@@ -1,0 +1,129 @@
+// The Sessions control-plane API (client-facing) and the Runtime compute types.
+//
+// A Session is a durable conversation (event log) plus zero-or-one live incarnation.
+// Each Exec is one execution/turn. Fork branches the log at a sequence.
+syntax = "proto3";
+
+package agentsessions.v1;
+
+option go_package = "github.com/aramase/agentsessions/api/genpb;agentsessionsv1";
+
+import "api/common.proto";
+
+// Phase flattens two axes — execution (the log) and compute (the incarnation) — into a
+// single lifecycle enum.
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  PHASE_PENDING = 1;
+  PHASE_RUNNING = 2;
+  PHASE_PAUSING = 3;
+  PHASE_PAUSED = 4;      // warm: resident, worker held
+  PHASE_SUSPENDING = 5;
+  PHASE_SUSPENDED = 6;   // cold: snapshot in storage, worker freed
+  PHASE_RESUMING = 7;
+  PHASE_FORKING = 8;
+  PHASE_TERMINATED = 9;  // log retained + replayable
+  PHASE_FAILED = 10;
+}
+
+message SnapshotRef {
+  oneof loc {
+    string local = 1;
+    string external_uri = 2;
+  }
+  bool memory = 3; // RAM/process captured? pod: false, kata/clh: true
+  bool sealed = 4; // encrypted + attested (confidential)
+}
+
+message RuntimeCapabilities {
+  bool memory_snapshot = 1;
+  bool cow_fork = 2;
+  bool attest = 3;
+  bool gpu_state = 4;
+}
+
+message ComputeRef {
+  string runtime = 1; // "pod" | "kata" | "clh" | "substrate"
+  string worker = 2;  // pod/worker id when live/warm; empty when cold
+  SnapshotRef snapshot = 3;
+  RuntimeCapabilities capabilities = 4;
+  map<string, string> attributes = 5; // backend-specific, e.g. substrate actor/atespace
+}
+
+message Session {
+  ResourceMetadata metadata = 1;
+  string harness = 2;
+  string model = 3; // model-agnostic id
+
+  Phase phase = 4;
+  int64 last_seq = 5; // event-log cursor
+
+  string parent_uid = 6; // fork lineage
+  int64 fork_seq = 7;
+
+  IdentityRef identity = 8;
+  ComputeRef compute = 9; // empty when SUSPENDED/TERMINATED
+  Origin origin = 10;     // neutral external context; filled by a producer adapter
+
+  map<string, string> labels = 11;
+  map<string, string> annotations = 12; // free-form adapter metadata (K8s-style)
+}
+
+message CreateSessionRequest { Session session = 1; }
+message GetSessionRequest { string uid = 1; }
+message ListSessionsRequest { string project = 1; }
+message ListSessionsResponse { repeated Session sessions = 1; }
+message DeleteSessionRequest { string uid = 1; }
+
+message ExecRequest {
+  string session = 1;
+  // Input messages for this turn. Empty = resume/re-drive the last non-terminal
+  // execution with no new input (recovery after a crash/interruption).
+  repeated Message inputs = 2;
+  int64 last_seq = 3; // client resume cursor after a disconnect
+  string harness = 4; // empty = session default
+  bytes config = 5;
+}
+
+message ReplayRequest {
+  string session = 1;
+  int64 from_seq = 2;
+  int64 to_seq = 3; // 0 = to head
+}
+
+message PauseRequest { string session = 1; }
+message SuspendRequest { string session = 1; }
+
+message ResumeRequest {
+  string session = 1;
+  bool boot = 2; // true = cold-boot + replay instead of snapshot restore
+}
+
+message ForkRequest {
+  string session = 1;
+  int64 at_seq = 2;         // 0 = HEAD
+  int32 count = 3;          // fan-out N children
+  IdentityRef identity = 4; // optional child principal
+  map<string, string> labels = 5;
+}
+message ForkResponse { repeated Session children = 1; }
+
+service Sessions {
+  rpc CreateSession(CreateSessionRequest) returns (Session);
+  rpc GetSession(GetSessionRequest) returns (Session);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc DeleteSession(DeleteSessionRequest) returns (Session);
+
+  // Exec runs one execution/turn; a resumable stream of events. If the session exists,
+  // it is continued. Replay re-delivers committed events (read-only).
+  rpc Exec(ExecRequest) returns (stream Event);
+  rpc Replay(ReplayRequest) returns (stream Event);
+
+  // Compute-layer durability.
+  rpc Pause(PauseRequest) returns (Session);     // warm, keep worker
+  rpc Suspend(SuspendRequest) returns (Session); // cold, free worker
+  rpc Resume(ResumeRequest) returns (Session);
+
+  // The differentiator: branch a session at a sequence into one or more children.
+  rpc Fork(ForkRequest) returns (ForkResponse);
+}

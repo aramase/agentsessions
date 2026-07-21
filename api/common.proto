@@ -1,0 +1,135 @@
+// Shared wire types for the agentsessions Session and Harness services.
+//
+// The Event message is used by BOTH the session log (Sessions.Exec / Replay) and the
+// harness stream (Harness.Connect) — the harness's events become the session log.
+syntax = "proto3";
+
+package agentsessions.v1;
+
+option go_package = "github.com/aramase/agentsessions/api/genpb;agentsessionsv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// ResourceMetadata is carried by every top-level resource.
+message ResourceMetadata {
+  string project = 1; // tenant / namespace
+  string name = 2;
+  string uid = 3;
+  int64 version = 4;
+  google.protobuf.Timestamp create_time = 5;
+  google.protobuf.Timestamp update_time = 6;
+}
+
+message Message {
+  string role = 1;    // user | assistant | model | tool
+  string content = 2; // simplified for v0
+}
+
+// IdentityRef is the bound agent principal. OIDC-neutral: an Entra Agent ID is one
+// issuer; a SPIFFE ID or a GitHub App identity are others. Carried on every event.
+message IdentityRef {
+  string principal = 1;
+  string issuer = 2;
+  string subject = 3; // session-scoped sub
+}
+
+// Origin is the neutral external context a session is tied to: where it came from and
+// what it is about. Producer adapters (GitHub, Foundry, custom apps) fill it; the core
+// defines no producer-specific fields. Modeled on CloudEvents source/subject.
+message Origin {
+  string source = 1;  // producing system/namespace, e.g. "github.com/acme/repo"
+  string subject = 2; // the specific object, e.g. "issues/42", "threads/abc"
+  string uri = 3;     // optional link
+  map<string, string> attributes = 4; // adapter-specific extras; well-known keys via profiles
+}
+
+// Mediation controls how a tool call is executed.
+enum Mediation {
+  MEDIATION_UNSPECIFIED = 0;
+  MEDIATION_IN_HARNESS_REPORTED = 1; // default: harness runs it, reports for audit
+  MEDIATION_CONTROLLER_MEDIATED = 2; // host/gateway executes (authz + policy)
+  MEDIATION_REQUIRES_APPROVAL = 3;   // pause for human/policy approval
+}
+
+message ModelCall {
+  string model = 1;
+  map<string, string> params = 2;
+}
+
+message Usage {
+  string model = 1;
+  int64 input_tokens = 2;
+  int64 output_tokens = 3;
+}
+
+// ToolCall aligns with an MCP tool call (name + structured args) so MCP tools map on.
+message ToolCall {
+  string id = 1;
+  string tool = 2; // tool name / MCP method
+  google.protobuf.Struct args = 3;
+  Mediation mediation = 4;
+}
+
+message ToolResult {
+  string id = 1;
+  google.protobuf.Struct output = 2;
+  bool is_error = 3;
+  string error = 4;
+}
+
+message ApprovalRequest {
+  string tool_call_id = 1;
+  string reason = 2;
+}
+
+message ApprovalResult {
+  string tool_call_id = 1;
+  bool approved = 2;
+  string reason = 3;
+}
+
+message Error {
+  int32 code = 1; // grpc status code
+  string description = 2;
+}
+
+message HarnessEnd {
+  string state = 1; // COMPLETED | FAILED | CANCELED
+  Error error = 2;
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_INPUT = 1;
+  EVENT_MODEL_CALL = 2;
+  EVENT_MODEL_DELTA = 3;
+  EVENT_OUTPUT = 4;
+  EVENT_TOOL_CALL = 5;
+  EVENT_TOOL_RESULT = 6;
+  EVENT_APPROVAL_REQUEST = 7;
+  EVENT_USAGE = 8;
+  EVENT_LOG = 9;
+  EVENT_END = 10;
+  EVENT_ERROR = 11;
+}
+
+// Event is the shared unit of the session log and the harness stream. The host assigns
+// the authoritative seq on append.
+message Event {
+  int64 seq = 1;
+  google.protobuf.Timestamp ts = 2;
+  EventKind kind = 3;
+  oneof body {
+    Message message = 4;
+    ModelCall model = 5;
+    ToolCall tool = 6;
+    ToolResult result = 7;
+    ApprovalRequest approval = 8;
+    Usage usage = 9;
+    HarnessEnd end = 10;
+    Error error = 11;
+  }
+  IdentityRef actor = 12;   // emitter principal -> provenance
+  string execution_id = 13; // which execution/turn produced this event
+}

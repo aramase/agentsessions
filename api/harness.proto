@@ -1,0 +1,87 @@
+// The Harness BYOH SPI: the contract between the host and an agent implementation.
+//
+// A Microsoft Agent Framework (MAF) agent, a GitHub Copilot agent, or a custom agent
+// implements it via a thin adapter. The host drives one execution per Connect stream;
+// the harness streams typed Events terminated by one EVENT_END. Beyond plain streaming, it
+// adds tool-call / approval mediation, per-call usage, and capability declaration.
+syntax = "proto3";
+
+package agentsessions.v1;
+
+option go_package = "github.com/aramase/agentsessions/api/genpb;agentsessionsv1";
+
+import "api/common.proto";
+
+// Resumability declares how a harness survives suspend/resume/fork. The host matches
+// this against a runtime's RuntimeCapabilities.
+enum Resumability {
+  RESUMABILITY_UNSPECIFIED = 0;
+  RESUMABILITY_STATELESS_REPLAY = 1;         // default: rehydrate from history; any runtime
+  RESUMABILITY_REQUIRES_MEMORY_SNAPSHOT = 2; // needs a memory-snapshot-capable runtime
+}
+
+message Capabilities {
+  Resumability resumability = 1;
+  bool fork_safe = 2;    // no un-replayable side effects mid-turn
+  bool requires_gpu = 3;
+  bool streaming = 4;
+}
+
+message ToolSpec {
+  string name = 1;
+  string description = 2;
+  Mediation mediation = 3; // default mediation for this tool
+}
+
+message HarnessDescriptor {
+  string id = 1;
+  repeated string models = 2; // model-agnostic: supported/required model ids
+  repeated ToolSpec tools = 3;
+  Capabilities capabilities = 4;
+}
+
+message DescribeRequest {}
+
+// IdentityContext carries the principal and signals whether the harness may mint
+// scoped, delegated tokens (Transaction Tokens) via the host for tool calls.
+message IdentityContext {
+  IdentityRef principal = 1;
+  bool can_mint_tokens = 2;
+}
+
+// Start begins one execution. History is pushed here (pull-by-range is a later
+// addition); it is empty when the sandbox was memory-restored.
+message Start {
+  bytes config = 1;
+  repeated Event history = 2;
+  // New input messages for this execution. Empty = resume/re-drive an interrupted
+  // execution from history with no new input.
+  repeated Message inputs = 3;
+  IdentityContext identity = 4;
+  int64 resume_from_seq = 5;
+}
+
+message Cancel {
+  string reason = 1; // USER | TIMEOUT | INTERNAL
+}
+
+// ControllerFrame is sent by the host to the harness during an execution.
+message ControllerFrame {
+  string session = 1;
+  string execution_id = 2;
+  oneof frame {
+    Start start = 3;
+    Cancel cancel = 4;
+    ApprovalResult approval = 5; // response to an EVENT_APPROVAL_REQUEST
+    ToolResult tool = 6;         // result for a CONTROLLER_MEDIATED tool call
+  }
+}
+
+service Harness {
+  // Describe returns the static contract; used to match the harness to a runtime.
+  rpc Describe(DescribeRequest) returns (HarnessDescriptor);
+
+  // Connect drives ONE execution. The host sends Start (and optional control frames);
+  // the harness streams Events terminated by exactly one EVENT_END.
+  rpc Connect(stream ControllerFrame) returns (stream Event);
+}
