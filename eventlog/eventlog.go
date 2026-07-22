@@ -5,19 +5,19 @@
 //   - an incarnation fencing token that rejects writes from a superseded incarnation;
 //   - a per-record hash-chain (tamper-evident; becomes a hash-tree at a fork).
 //
-// It is in-memory and dependency-free on purpose; a sqlite/Durable Task backend
-// implements the same shape later. See agentsessions-replay-determinism-contract.md
-// (§1, §5, §7).
+// content_hash is the language-neutral value from package canon (RFC 8785 JCS over
+// proto3-JSON), so the chain is verifiable by any implementation — not only this Go host — and
+// the integrity definition lives in exactly one place. A sqlite/Durable Task backend implements
+// the same shape later. See agentsessions-replay-determinism-contract.md (§1, §5, §7).
 package eventlog
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
+	"strconv"
 	"sync"
 
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/canon"
 )
 
 // ErrConflict is returned when Append's expectedLastSeq does not equal the log head
@@ -98,10 +98,14 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (Record, error)
 		prev = l.records[n-1].Hash
 	}
 	seq := l.headLocked() + 1
+	hash, err := canon.HashRecord(prev, seq, ev)
+	if err != nil {
+		return Record{}, err
+	}
 	rec := Record{
 		Seq:      seq,
 		PrevHash: prev,
-		Hash:     hashRecord(prev, seq, ev),
+		Hash:     hash,
 		Fence:    fence,
 		Event:    ev,
 	}
@@ -133,41 +137,16 @@ func (l *Log) Verify() error {
 	prev := ""
 	for i, r := range l.records {
 		if r.PrevHash != prev {
-			return errors.New("eventlog: broken chain at index " + itoa(i) + " (prev_hash mismatch)")
+			return errors.New("eventlog: broken chain at index " + strconv.Itoa(i) + " (prev_hash mismatch)")
 		}
-		if r.Hash != hashRecord(prev, r.Seq, r.Event) {
-			return errors.New("eventlog: content hash mismatch at index " + itoa(i))
+		want, err := canon.HashRecord(prev, r.Seq, r.Event)
+		if err != nil {
+			return err
+		}
+		if r.Hash != want {
+			return errors.New("eventlog: content hash mismatch at index " + strconv.Itoa(i))
 		}
 		prev = r.Hash
 	}
 	return nil
-}
-
-// hashRecord binds the position (seq) and the emitted Event body into the chain. The
-// Event carries no seq/hash fields, so there is no circularity.
-func hashRecord(prev string, seq int64, ev api.Event) string {
-	b, _ := json.Marshal(ev)
-	payload := append([]byte(prev), []byte(itoa(int(seq)))...)
-	payload = append(payload, b...)
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:])
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b []byte
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	for i > 0 {
-		b = append([]byte{byte('0' + i%10)}, b...)
-		i /= 10
-	}
-	if neg {
-		b = append([]byte{'-'}, b...)
-	}
-	return string(b)
 }
