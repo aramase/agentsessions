@@ -53,6 +53,11 @@ type Capabilities struct {
 	ForkSafe     bool // no un-replayable side effects mid-turn -> fork via replay is safe
 	RequiresGPU  bool
 	Streaming    bool
+	// ReasoningReplay: the harness persists and replays opaque provider reasoning parts
+	// verbatim via the provider's stateless path (not previous_response_id / server lineage).
+	// This keeps a reasoning harness on STATELESS_REPLAY — it adds NO snapshot edge. Verified
+	// across Anthropic/OpenAI/Gemini in the Track A reasoning-continuity spike.
+	ReasoningReplay bool
 }
 
 // Start is the per-execution invocation the host sends to the harness.
@@ -78,8 +83,13 @@ type TokenMinter func(ctx context.Context, audience []string) (string, error)
 // EventSink is the harness author's handle for emitting events. The SDK hides the gRPC
 // stream, sequence assignment, and the emit -> wait-for-host round-trip.
 type EventSink interface {
-	// Model records a model call (for audit/cost).
-	Model(ModelCall) error
+	// Model performs a model call and returns the completion. Live: the host invokes the
+	// model and records the result. Replay: the host serves the recorded result from the
+	// journal and does not invoke the model. Because the result flows back through this
+	// mediated call, the harness never touches a provider SDK directly — the load-bearing
+	// replay rule. Reasoning parts ride in the returned ModelResponse.Message and are
+	// recorded verbatim for replay/fork continuity (I2).
+	Model(ModelRequest) (ModelResponse, error)
 	// Output streams assistant output (a delta or a full message).
 	Output(delta string) error
 	// ToolCall emits a tool call and returns its result. For CONTROLLER_MEDIATED or
@@ -90,4 +100,18 @@ type EventSink interface {
 	Report(ToolResult) error
 	// Usage records token/cost accounting.
 	Usage(Usage) error
+}
+
+// ModelRequest is a model call: the message context + model selection.
+type ModelRequest struct {
+	Model    string
+	Messages []Message // context (history + new input) sent to the model
+	Params   map[string]string
+}
+
+// ModelResponse is the model's completion: an assistant message (which may carry text and
+// opaque reasoning parts) plus usage.
+type ModelResponse struct {
+	Message Message
+	Usage   Usage
 }

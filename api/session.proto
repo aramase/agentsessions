@@ -26,6 +26,27 @@ enum Phase {
   PHASE_FAILED = 10;
 }
 
+// ExecState is the execution/turn axis; ComputeState is the incarnation axis. The two are
+// modeled explicitly (§6 of the replay contract); Phase above is a derived summary.
+enum ExecState {
+  EXEC_STATE_UNSPECIFIED = 0;
+  EXEC_PENDING = 1;
+  EXEC_RUNNING = 2;
+  EXEC_AWAITING = 3; // blocked on approval/input, resolved from the log
+  EXEC_COMPLETED = 4;
+  EXEC_FAILED = 5;
+  EXEC_CANCELED = 6;
+}
+
+enum ComputeState {
+  COMPUTE_STATE_UNSPECIFIED = 0;
+  COMPUTE_NONE = 1; // no incarnation
+  COMPUTE_LIVE = 2;
+  COMPUTE_WARM = 3; // paused: resident, worker held
+  COMPUTE_COLD = 4; // suspended: snapshot in storage, worker freed
+  COMPUTE_TERMINATED = 5;
+}
+
 message SnapshotRef {
   oneof loc {
     string local = 1;
@@ -48,6 +69,7 @@ message ComputeRef {
   SnapshotRef snapshot = 3;
   RuntimeCapabilities capabilities = 4;
   map<string, string> attributes = 5; // backend-specific, e.g. substrate actor/atespace
+  int64 fence_token = 6;              // monotonic; log rejects appends from a superseded incarnation
 }
 
 message Session {
@@ -55,8 +77,10 @@ message Session {
   string harness = 2;
   string model = 3; // model-agnostic id
 
-  Phase phase = 4;
-  int64 last_seq = 5; // event-log cursor
+  reserved 4; // retired: Phase phase — split into the two axes below
+  ExecState exec_state = 13;       // execution/turn axis
+  ComputeState compute_state = 14; // incarnation axis
+  int64 last_seq = 5;              // event-log cursor
 
   string parent_uid = 6; // fork lineage
   int64 fork_seq = 7;
@@ -80,9 +104,13 @@ message ExecRequest {
   // Input messages for this turn. Empty = resume/re-drive the last non-terminal
   // execution with no new input (recovery after a crash/interruption).
   repeated Message inputs = 2;
-  int64 last_seq = 3; // client resume cursor after a disconnect
-  string harness = 4; // empty = session default
+  int64 resume_from_seq = 3; // client replay cursor after a disconnect (was: last_seq)
+  string harness = 4;        // empty = session default
   bytes config = 5;
+  // Single-writer CAS: the host commits this execution's first event only if the log
+  // head equals expected_last_seq. Mismatch is rejected (another writer advanced the log).
+  int64 expected_last_seq = 6;
+  int64 deadline_unix = 7;   // optional execution deadline (unix seconds); host cancels past it
 }
 
 message ReplayRequest {
@@ -108,16 +136,48 @@ message ForkRequest {
 }
 message ForkResponse { repeated Session children = 1; }
 
+message CancelRequest {
+  string session = 1;
+  string execution_id = 2;
+  string reason = 3; // USER | TIMEOUT | INTERNAL
+}
+message HeartbeatRequest {
+  string session = 1;
+  string execution_id = 2;
+}
+
+// ExecUpdate is what the live Exec stream carries: a committed LogRecord, or an ephemeral
+// streaming Delta (transport only — not logged, not hash-chained).
+message ExecUpdate {
+  oneof update {
+    LogRecord record = 1;
+    Delta delta = 2;
+  }
+}
+
+// Delta is an ephemeral streaming chunk that coalesces into a finalized EVENT_OUTPUT (or
+// reasoning) part. No seq; never hash-chained (§8, A2A TaskArtifactUpdateEvent).
+message Delta {
+  string execution_id = 1;
+  int32 part_index = 2; // which content part it accumulates into
+  string chunk = 3;     // text chunk; binary/media deltas are a later addition
+  bool done = 4;        // last delta for this part
+}
+
 service Sessions {
   rpc CreateSession(CreateSessionRequest) returns (Session);
   rpc GetSession(GetSessionRequest) returns (Session);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc DeleteSession(DeleteSessionRequest) returns (Session);
 
-  // Exec runs one execution/turn; a resumable stream of events. If the session exists,
-  // it is continued. Replay re-delivers committed events (read-only).
-  rpc Exec(ExecRequest) returns (stream Event);
-  rpc Replay(ReplayRequest) returns (stream Event);
+  // Exec runs one execution/turn. The live stream carries committed LogRecords plus
+  // ephemeral Deltas; Replay re-delivers committed records only (read-only).
+  rpc Exec(ExecRequest) returns (stream ExecUpdate);
+  rpc Replay(ReplayRequest) returns (stream LogRecord);
+
+  // In-flight control.
+  rpc Cancel(CancelRequest) returns (Session);       // cancel the in-flight execution
+  rpc Heartbeat(HeartbeatRequest) returns (Session); // liveness for long-running turns
 
   // Compute-layer durability.
   rpc Pause(PauseRequest) returns (Session);     // warm, keep worker

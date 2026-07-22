@@ -30,8 +30,8 @@ type Runtime interface {
 	// Stop destroys the incarnation and frees the worker.
 	Stop(ctx context.Context, in Incarnation) error
 
-	// Status reports the incarnation's phase.
-	Status(ctx context.Context, in Incarnation) (Phase, error)
+	// Status reports the incarnation's compute-lifecycle state.
+	Status(ctx context.Context, in Incarnation) (ComputeState, error)
 
 	// Capabilities reports what this backend supports.
 	Capabilities() RuntimeCapabilities
@@ -55,10 +55,11 @@ type SnapshotRef struct {
 
 // Incarnation is a live compute instance of a session (a sandbox).
 type Incarnation struct {
-	ID      string
-	Worker  string // pod/worker id
-	Address string // where the harness server listens
-	Runtime string // "pod" | "kata" | "clh" | "substrate"
+	ID         string
+	Worker     string // pod/worker id
+	Address    string // where the harness server listens
+	Runtime    string // "pod" | "kata" | "clh" | "substrate"
+	FenceToken int64  // monotonic; the log rejects appends from a superseded incarnation
 }
 
 // SessionSpec is what a Runtime needs to create an incarnation.

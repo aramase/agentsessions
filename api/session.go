@@ -13,8 +13,9 @@ type Session struct {
 	Harness string
 	Model   string // model-agnostic id, e.g. "azure-openai/gpt-x", "anthropic/..."
 
-	Phase   Phase
-	LastSeq int64 // event-log cursor = the resume/replay point
+	Exec         ExecState    // execution/turn axis (the event-log axis)
+	ComputeState ComputeState // incarnation axis
+	LastSeq      int64        // event-log cursor = the resume/replay point
 
 	ParentUID string // set iff this session was forked
 	ForkSeq   int64  // parent event seq forked at

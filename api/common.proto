@@ -2,6 +2,10 @@
 //
 // The Event message is used by BOTH the session log (Sessions.Exec / Replay) and the
 // harness stream (Harness.Connect) — the harness's events become the session log.
+//
+// The content model (Part) is aligned with A2A `Part` + MCP content for interop; the
+// event/log model is native. Derived from the durable-log & replay contract §7 (record
+// schema) and §8 (interop). See agentsessions-replay-determinism-contract.md.
 syntax = "proto3";
 
 package agentsessions.v1;
@@ -21,68 +25,136 @@ message ResourceMetadata {
   google.protobuf.Timestamp update_time = 6;
 }
 
-message Message {
-  string role = 1;    // user | assistant | model | tool
-  string content = 2; // simplified for v0
+// ---- Content model (A2A Part + MCP-aligned; multimodal + reasoning) ----
+
+// Part is one unit of message content. Text, file (inline or URI), structured data, or an
+// opaque reasoning block. Large payloads are externalized by URI, never inlined (§8).
+message Part {
+  oneof part {
+    TextPart text = 1;
+    FilePart file = 2;
+    DataPart data = 3;
+    ReasoningPart reasoning = 4;
+  }
 }
 
-// IdentityRef is the bound agent principal. OIDC-neutral: an Entra Agent ID is one
-// issuer; a SPIFFE ID or a GitHub App identity are others. Carried on every event.
+message TextPart {
+  string text = 1;
+}
+
+// FilePart carries binary/media content inline or by reference (A2A file part; MCP
+// resource_link / embedded resource). mime is an IANA media type.
+message FilePart {
+  string mime = 1;
+  oneof source {
+    bytes bytes = 2;
+    string uri = 3;
+  }
+  string name = 4;   // optional display name
+  string digest = 5; // content digest of the uri target (chain covers externalized bytes)
+}
+
+// DataPart is structured JSON (A2A data part; MCP structuredContent).
+message DataPart {
+  google.protobuf.Struct data = 1;
+}
+
+// ReasoningPart is an opaque, provider-tagged reasoning block that MUST be replayed
+// verbatim to preserve reasoning continuity within a turn (I2). agentsessions never
+// interprets `opaque` — all provider specifics live inside it. Verified across
+// Anthropic/OpenAI/Gemini in the Track A reasoning-continuity spike: one part type, no
+// per-provider sub-shapes, and no memory-snapshot edge (stateless verbatim replay).
+message ReasoningPart {
+  string provider = 1; // "anthropic" | "openai" | "google" — routing + validation
+  string model_id = 2; // model that produced it (cross-model resend case)
+  oneof opaque {        // signature / encrypted_content / thought signature, VERBATIM
+    bytes opaque_bytes = 3;
+    string opaque_uri = 4; // externalized when large; retained for the turn's fork lifetime
+  }
+  repeated Part summary = 5; // optional, NON-authoritative, compaction-droppable (may be multimodal)
+  string item_id = 6;        // optional provider id (e.g. OpenAI rs_...) for dedup/order
+  int32 ordinal = 7;         // position within the turn relative to text/tool parts
+  string validity_scope = 8; // = execution_id (turn); see replay contract §5
+  string opaque_digest = 9;  // content digest of opaque_uri target (chain covers externalized bytes)
+}
+
+// Message is a role-tagged sequence of content parts (A2A Message = role + Part[]).
+message Message {
+  string role = 1; // user | assistant | tool
+  repeated Part parts = 2;
+}
+
+// ---- Identity / origin ----
+
+// IdentityRef is the bound agent principal. OIDC-neutral: an Entra Agent ID is one issuer;
+// a SPIFFE ID or a GitHub App identity are others. Carried on every event.
 message IdentityRef {
   string principal = 1;
   string issuer = 2;
   string subject = 3; // session-scoped sub
 }
 
-// Origin is the neutral external context a session is tied to: where it came from and
-// what it is about. Producer adapters (GitHub, Foundry, custom apps) fill it; the core
-// defines no producer-specific fields. Modeled on CloudEvents source/subject.
+// Origin is the neutral external context a session is tied to. Producer adapters
+// (GitHub, Foundry, custom apps) fill it. Modeled on CloudEvents source/subject.
 message Origin {
-  string source = 1;  // producing system/namespace, e.g. "github.com/acme/repo"
-  string subject = 2; // the specific object, e.g. "issues/42", "threads/abc"
-  string uri = 3;     // optional link
-  map<string, string> attributes = 4; // adapter-specific extras; well-known keys via profiles
+  string source = 1;
+  string subject = 2;
+  string uri = 3;
+  map<string, string> attributes = 4;
 }
 
-// Mediation controls how a tool call is executed.
+// ---- Tool / model / approval / usage ----
+
+// Mediation controls how a tool call is executed / who enforces record-before-effect (§3).
 enum Mediation {
   MEDIATION_UNSPECIFIED = 0;
-  MEDIATION_IN_HARNESS_REPORTED = 1; // default: harness runs it, reports for audit
-  MEDIATION_CONTROLLER_MEDIATED = 2; // host/gateway executes (authz + policy)
+  MEDIATION_IN_HARNESS_REPORTED = 1; // harness runs it, reports for audit (cooperative WAL)
+  MEDIATION_CONTROLLER_MEDIATED = 2; // host/gateway executes (host-enforced WAL; trustless)
   MEDIATION_REQUIRES_APPROVAL = 3;   // pause for human/policy approval
 }
 
+// ModelCall is a model REQUEST emitted by the harness (EVENT_MODEL_CALL). The host records
+// it with input_hash and answers via ControllerFrame.ModelResult (correlated by id). The
+// completion (text + reasoning parts) is recorded separately as an EVENT_OUTPUT message.
+// Under STATELESS_REPLAY the harness never calls a provider directly.
 message ModelCall {
   string model = 1;
   map<string, string> params = 2;
+  string input_hash = 3; // §7/§9.1: required for STATELESS_REPLAY so the I0 check can run
+  string id = 4;         // correlation id for the served ModelResult
 }
 
 message Usage {
   string model = 1;
   int64 input_tokens = 2;
   int64 output_tokens = 3;
+  int64 reasoning_tokens = 4;
 }
 
-// ToolCall aligns with an MCP tool call (name + structured args) so MCP tools map on.
+// ToolCall aligns with an MCP tool call (name + structured args).
 message ToolCall {
   string id = 1;
   string tool = 2; // tool name / MCP method
   google.protobuf.Struct args = 3;
   Mediation mediation = 4;
+  string idempotency_key = 5; // §3/I3: dedups a retried side-effecting call tool-side
 }
 
 message ToolResult {
   string id = 1;
   google.protobuf.Struct output = 2;
-  bool is_error = 3;
-  string error = 4;
+  string output_uri = 3;    // externalized large output (MCP resource_link), else inline `output`
+  string output_digest = 6; // content digest of output_uri target (chain covers externalized bytes)
+  bool is_error = 4;
+  string error = 5;
 }
 
+// Approval is modeled as durable log entries: an unresolved request, later resolved by a
+// decision — so compute can suspend while awaiting a human/policy decision (§7).
 message ApprovalRequest {
   string tool_call_id = 1;
   string reason = 2;
 }
-
 message ApprovalResult {
   string tool_call_id = 1;
   bool approved = 2;
@@ -99,37 +171,75 @@ message HarnessEnd {
   Error error = 2;
 }
 
+// Lifecycle marks a compute/session transition in the log (§7). BASELINE is a replay /
+// compaction checkpoint (§1).
+message Lifecycle {
+  enum Kind {
+    LIFECYCLE_UNSPECIFIED = 0;
+    LIFECYCLE_SUSPEND = 1;
+    LIFECYCLE_RESUME = 2;
+    LIFECYCLE_FORK = 3;
+    LIFECYCLE_BASELINE = 4;
+    LIFECYCLE_CANCEL = 5;
+  }
+  Kind kind = 1;
+  string detail = 2; // e.g. "fork parent=<uid>@<seq>", baseline id
+}
+
+// ---- Event ----
+
 enum EventKind {
   EVENT_KIND_UNSPECIFIED = 0;
-  EVENT_INPUT = 1;
-  EVENT_MODEL_CALL = 2;
-  EVENT_MODEL_DELTA = 3;
-  EVENT_OUTPUT = 4;
-  EVENT_TOOL_CALL = 5;
-  EVENT_TOOL_RESULT = 6;
-  EVENT_APPROVAL_REQUEST = 7;
+  EVENT_INPUT = 1;            // a user/producer message
+  EVENT_MODEL_CALL = 2;       // model-call metadata (+ input_hash); output is an OUTPUT message
+  EVENT_OUTPUT = 3;           // a finalized assistant message; streaming deltas are transport, not logged
+  EVENT_TOOL_CALL = 4;
+  EVENT_TOOL_RESULT = 5;
+  EVENT_APPROVAL_REQUEST = 6;
+  EVENT_APPROVAL_RESULT = 7;
   EVENT_USAGE = 8;
-  EVENT_LOG = 9;
+  EVENT_LIFECYCLE = 9;
   EVENT_END = 10;
   EVENT_ERROR = 11;
 }
 
-// Event is the shared unit of the session log and the harness stream. The host assigns
-// the authoritative seq on append.
+// Event is the harness-emitted content unit. Ordering (seq) and integrity (prev_hash /
+// content_hash) are host-assigned and live on LogRecord — the harness, which does not know
+// seq/prev, emits a hash-free Event, so there is no circular hashing. Streaming deltas are
+// transport (see Delta in session.proto) and coalesce into the finalized event (§3).
 message Event {
-  int64 seq = 1;
-  google.protobuf.Timestamp ts = 2;
-  EventKind kind = 3;
+  reserved 1, 5, 6; // moved to LogRecord: seq, prev_hash, content_hash
+
+  string execution_id = 2; // which execution/turn produced this event
+  google.protobuf.Timestamp ts = 3;
+  int32 schema_version = 4; // §7: versions the body; replay survives schema skew
+
+  EventKind kind = 7;
   oneof body {
-    Message message = 4;
-    ModelCall model = 5;
-    ToolCall tool = 6;
-    ToolResult result = 7;
-    ApprovalRequest approval = 8;
-    Usage usage = 9;
-    HarnessEnd end = 10;
-    Error error = 11;
+    Message message = 8;
+    ModelCall model = 9;
+    ToolCall tool = 10;
+    ToolResult result = 11;
+    ApprovalRequest approval = 12;
+    ApprovalResult approval_result = 13;
+    Usage usage = 14;
+    Lifecycle lifecycle = 15;
+    HarnessEnd end = 16;
+    Error error = 17;
   }
-  IdentityRef actor = 12;   // emitter principal -> provenance
-  string execution_id = 13; // which execution/turn produced this event
+
+  IdentityRef actor = 18; // emitter principal -> provenance
+}
+
+// LogRecord is the host's durable, ordered wrapper around an Event. The host assigns seq,
+// links the hash-chain (content_hash = H(prev_hash || seq || canonical(event)); at a fork
+// child.first.prev_hash = parent@R.content_hash), and records the incarnation fence token.
+// Externalized payloads (FilePart.uri, ReasoningPart.opaque_uri, ToolResult.output_uri)
+// carry their own content digest so the chain covers them by reference.
+message LogRecord {
+  int64 seq = 1;
+  string prev_hash = 2;
+  string content_hash = 3;
+  int64 fence = 4;
+  Event event = 5;
 }

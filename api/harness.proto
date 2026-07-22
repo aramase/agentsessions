@@ -25,6 +25,9 @@ message Capabilities {
   bool fork_safe = 2;    // no un-replayable side effects mid-turn
   bool requires_gpu = 3;
   bool streaming = 4;
+  // reasoning_replay: harness replays opaque reasoning parts verbatim via the provider
+  // stateless path; keeps reasoning on STATELESS_REPLAY (no memory-snapshot edge).
+  bool reasoning_replay = 5;
 }
 
 message ToolSpec {
@@ -74,7 +77,16 @@ message ControllerFrame {
     Cancel cancel = 4;
     ApprovalResult approval = 5; // response to an EVENT_APPROVAL_REQUEST
     ToolResult tool = 6;         // result for a CONTROLLER_MEDIATED tool call
+    ModelResult model = 7;       // served completion for a mediated/replayed model call
   }
+}
+
+// ModelResult is a model completion served to the harness (live invocation or replay).
+// The Message carries text + opaque reasoning parts, recorded verbatim for continuity.
+message ModelResult {
+  Message message = 1;
+  Usage usage = 2;
+  string model_call_id = 3; // correlates to the emitted ModelCall.id
 }
 
 service Harness {

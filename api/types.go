@@ -17,16 +17,17 @@ import "time"
 type Phase string
 
 const (
-	PhasePending    Phase = "PENDING"
-	PhaseRunning    Phase = "RUNNING"
-	PhasePausing    Phase = "PAUSING"
-	PhasePaused     Phase = "PAUSED" // warm: resident on worker, instant resume
-	PhaseSuspending Phase = "SUSPENDING"
-	PhaseSuspended  Phase = "SUSPENDED" // cold: snapshot in storage, worker freed
-	PhaseResuming   Phase = "RESUMING"
-	PhaseForking    Phase = "FORKING"
-	PhaseTerminated Phase = "TERMINATED" // log retained + replayable
-	PhaseFailed     Phase = "FAILED"
+	PhaseUnspecified Phase = "UNSPECIFIED"
+	PhasePending     Phase = "PENDING"
+	PhaseRunning     Phase = "RUNNING"
+	PhasePausing     Phase = "PAUSING"
+	PhasePaused      Phase = "PAUSED" // warm: resident on worker, instant resume
+	PhaseSuspending  Phase = "SUSPENDING"
+	PhaseSuspended   Phase = "SUSPENDED" // cold: snapshot in storage, worker freed
+	PhaseResuming    Phase = "RESUMING"
+	PhaseForking     Phase = "FORKING"
+	PhaseTerminated  Phase = "TERMINATED" // log retained + replayable
+	PhaseFailed      Phase = "FAILED"
 )
 
 // EventKind classifies an Event. Typed events (vs opaque messages) are what make
@@ -36,55 +37,135 @@ type EventKind string
 const (
 	EventInput           EventKind = "INPUT"
 	EventModelCall       EventKind = "MODEL_CALL"
-	EventModelDelta      EventKind = "MODEL_DELTA"
 	EventOutput          EventKind = "OUTPUT"
 	EventToolCall        EventKind = "TOOL_CALL"
 	EventToolResult      EventKind = "TOOL_RESULT"
 	EventApprovalRequest EventKind = "APPROVAL_REQUEST"
+	EventApprovalResult  EventKind = "APPROVAL_RESULT"
 	EventUsage           EventKind = "USAGE"
-	EventLog             EventKind = "LOG"
+	EventLifecycle       EventKind = "LIFECYCLE"
 	EventEnd             EventKind = "END"
 	EventError           EventKind = "ERROR"
 )
 
-// Message is one turn of content in the history. Simplified for v0; a richer Content
-// type (parts, tool blocks, media) comes later.
+// Message is a role-tagged sequence of content parts (A2A Message = role + Part[]).
 type Message struct {
-	Role    string // user | assistant | model | tool
-	Content string
+	Role  string // user | assistant (A2A calls this "agent") | tool
+	Parts []Part
+}
+
+// Part is one unit of content: text, file (inline or URI), structured data, or an opaque
+// reasoning block. Aligned with A2A Part + MCP content. Exactly one field is set.
+type Part struct {
+	Text      *TextPart
+	File      *FilePart
+	Data      map[string]any
+	Reasoning *ReasoningPart
+}
+
+// TextPart is a text content block.
+type TextPart struct{ Text string }
+
+// FilePart carries media inline or by URI (A2A file part; MCP resource_link).
+type FilePart struct {
+	MIME   string
+	Bytes  []byte
+	URI    string
+	Digest string // content digest of the URI target, so the hash-chain covers externalized bytes
+	Name   string
+}
+
+// ReasoningPart is an opaque, provider-tagged reasoning block replayed verbatim to
+// preserve reasoning continuity within a turn (I2). agentsessions never interprets
+// Opaque; provider specifics live inside it. One part type across all providers (Track A
+// spike: no per-provider sub-shapes, no memory-snapshot edge).
+type ReasoningPart struct {
+	Provider      string // "anthropic" | "openai" | "google"
+	ModelID       string
+	Opaque        []byte // set, OR OpaqueURI when externalized
+	OpaqueURI     string
+	OpaqueDigest  string // content digest of OpaqueURI target (hash-chain covers externalized bytes)
+	Summary       []Part // optional, non-authoritative, compaction-droppable
+	ItemID        string
+	Ordinal       int32
+	ValidityScope string // = execution id (turn)
+}
+
+// TextMessage constructs a single-text-part message.
+func TextMessage(role, text string) *Message {
+	return &Message{Role: role, Parts: []Part{{Text: &TextPart{Text: text}}}}
+}
+
+// Text concatenates the text parts of a message (ignoring non-text parts).
+func (m *Message) Text() string {
+	var s string
+	for _, p := range m.Parts {
+		if p.Text != nil {
+			s += p.Text.Text
+		}
+	}
+	return s
 }
 
 // Event is the shared unit of the session log and the harness stream. The host assigns
-// the authoritative Seq on append.
+// the authoritative Seq on append. Ordering + integrity + identity live on the envelope;
+// typed content lives in the body.
 type Event struct {
-	Seq         int64
-	ExecutionID string // which execution/turn produced this event
-	Timestamp   time.Time
-	Kind        EventKind
+	// ExecutionID, timestamp, and content live on the Event; ordering (seq) and integrity
+	// (prev_hash / content_hash) are host-assigned and live on the log-record envelope
+	// (eventlog.Record / proto LogRecord), not on the harness-emitted Event.
+	ExecutionID   string
+	Timestamp     time.Time
+	SchemaVersion int32 // versions the event body; replay survives schema skew
 
-	Message   *Message
-	ModelCall *ModelCall
-	ToolCall  *ToolCall
-	Result    *ToolResult
-	Approval  *ApprovalRequest
-	Usage     *Usage
-	End       *HarnessEnd
-	Err       *Error
+	Kind EventKind
+
+	// typed body (exactly one set)
+	Message        *Message
+	ModelCall      *ModelCall
+	ToolCall       *ToolCall
+	Result         *ToolResult
+	Approval       *ApprovalRequest
+	ApprovalResult *ApprovalResult
+	Usage          *Usage
+	Lifecycle      *Lifecycle
+	End            *HarnessEnd
+	Err            *Error
 
 	Actor IdentityRef // emitter principal -> provenance on every action
 }
 
+// Lifecycle marks a compute/session transition in the log (§7). Baseline is a replay /
+// compaction checkpoint (§1).
+type Lifecycle struct {
+	Kind   LifecycleKind
+	Detail string
+}
+
+// LifecycleKind enumerates the lifecycle transitions recorded in the log.
+type LifecycleKind string
+
+const (
+	LifecycleSuspend  LifecycleKind = "SUSPEND"
+	LifecycleResume   LifecycleKind = "RESUME"
+	LifecycleFork     LifecycleKind = "FORK"
+	LifecycleBaseline LifecycleKind = "BASELINE"
+	LifecycleCancel   LifecycleKind = "CANCEL"
+)
+
 // ModelCall records a call to a model (model-agnostic) for audit and cost.
 type ModelCall struct {
-	Model  string
-	Params map[string]string
+	Model     string
+	Params    map[string]string
+	InputHash string // required for STATELESS_REPLAY so the §9.1 I0 check can run
 }
 
 // Usage is per-model-call token/cost accounting.
 type Usage struct {
-	Model        string
-	InputTokens  int64
-	OutputTokens int64
+	Model           string
+	InputTokens     int64
+	OutputTokens    int64
+	ReasoningTokens int64
 }
 
 // Mediation controls how a tool call is executed.
@@ -104,18 +185,21 @@ const (
 // ToolCall is a tool invocation. Its shape aligns with an MCP tool call (name +
 // structured arguments) so MCP tools map onto it directly.
 type ToolCall struct {
-	ID        string
-	Tool      string // tool name / MCP method
-	Args      map[string]any
-	Mediation Mediation
+	ID             string
+	Tool           string // tool name / MCP method
+	Args           map[string]any
+	Mediation      Mediation
+	IdempotencyKey string // dedups a retried side-effecting call tool-side (§3/I3)
 }
 
 // ToolResult is the outcome of a ToolCall.
 type ToolResult struct {
-	ID      string
-	Output  map[string]any
-	IsError bool
-	Error   string
+	ID           string
+	Output       map[string]any
+	OutputURI    string // externalized large output (MCP resource_link); else inline Output
+	OutputDigest string // content digest of OutputURI target (hash-chain covers externalized bytes)
+	IsError      bool
+	Error        string
 }
 
 // ApprovalRequest asks a human or policy engine to allow a tool call.
@@ -134,6 +218,7 @@ type ApprovalResult struct {
 // HarnessEnd is the terminal state of one execution.
 type HarnessEnd struct {
 	State string // COMPLETED | FAILED | CANCELED
+	Error *Error
 }
 
 // Error mirrors a gRPC status code + description.
