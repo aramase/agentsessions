@@ -10,7 +10,7 @@ package agentsessions.v1;
 
 option go_package = "github.com/aramase/agentsessions/api/genpb;agentsessionsv1";
 
-import "api/common.proto";
+import "common.proto";
 
 // Resumability declares how a harness survives suspend/resume/fork. The host matches
 // this against a runtime's RuntimeCapabilities.
