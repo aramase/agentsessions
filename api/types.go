@@ -158,6 +158,7 @@ type ModelCall struct {
 	Model     string
 	Params    map[string]string
 	InputHash string // required for STATELESS_REPLAY so the §9.1 I0 check can run
+	ID        string // correlation id for the served ModelResult (proto ModelCall.id)
 }
 
 // Usage is per-model-call token/cost accounting.
