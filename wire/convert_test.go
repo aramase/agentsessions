@@ -96,10 +96,10 @@ func TestEventRoundTrip(t *testing.T) {
 // an Event that hashes to the SAME value in a Go log — i.e. the Go conversion is lossless for
 // the hashed bytes, so record/replay identity (I5) holds across the gRPC wire for a Go host.
 //
-// NOTE: this is Go↔Go stability of the wire CONVERSION only. The event log's neutral,
-// cross-implementation hash is defined in package canon (JCS over proto3-JSON, contract §7) and
-// eventlog.hashRecord is wired to it in m0-eventlog. Until then eventlog hashes Go encoding/json,
-// so this test asserts conversion determinism, not language-neutral verifiability.
+// NOTE: this is Go↔Go stability of the wire CONVERSION only — it asserts the conversion is
+// lossless for the hashed bytes, not that a non-Go implementation computes the same chain. The
+// event log's neutral, cross-implementation hash is defined in package canon (JCS over
+// proto3-JSON, contract §7) and is used by both the in-memory and sqlite logs.
 func TestHashStableAcrossWire(t *testing.T) {
 	events := []api.Event{
 		{Kind: api.EventInput, Message: api.TextMessage("user", "drive")},
