@@ -110,6 +110,9 @@ type Log struct {
 	session string
 }
 
+// Log satisfies the controller's error-returning event-log contract.
+var _ eventlog.Store = (*Log)(nil)
+
 // Head returns the seq of the last committed record (0 if empty).
 func (l *Log) Head() (int64, error) {
 	var head int64
