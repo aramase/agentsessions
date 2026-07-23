@@ -88,7 +88,8 @@ type EventSink interface {
 	// journal and does not invoke the model. Because the result flows back through this
 	// mediated call, the harness never touches a provider SDK directly — the load-bearing
 	// replay rule. Reasoning parts ride in the returned ModelResponse.Message and are
-	// recorded verbatim for replay/fork continuity (I2).
+	// recorded verbatim for replay/fork continuity (I2). The completion is recorded as the
+	// turn's output by the host; do not also emit the same content via Output (double-record).
 	Model(ModelRequest) (ModelResponse, error)
 	// Output streams assistant output (a delta or a full message).
 	Output(delta string) error
