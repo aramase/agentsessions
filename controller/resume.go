@@ -20,17 +20,22 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	if len(recs) == 0 || recs[len(recs)-1].Event.Kind == api.EventEnd {
-		return false, nil // nothing interrupted
+	if len(recs) == 0 {
+		return false, nil
 	}
 
-	lastInput := -1
+	lastInput, lastEnd := -1, -1
 	for i, r := range recs {
-		if r.Event.Kind == api.EventInput {
+		switch r.Event.Kind {
+		case api.EventInput:
 			lastInput = i
+		case api.EventEnd:
+			lastEnd = i
 		}
 	}
-	if lastInput < 0 {
+	// Complete (or nothing to do) when there is no turn, or an END follows the last INPUT. A
+	// trailing lifecycle marker (e.g. SUSPEND) after a completed turn is not an interrupted turn.
+	if lastInput < 0 || lastEnd > lastInput {
 		return false, nil
 	}
 
