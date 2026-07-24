@@ -1,0 +1,5 @@
+# Dependencies for hack/verify_chain.py in full-audit mode (--journal). The golden self-check
+# (--golden) needs none of these — it is stdlib-only. Any recent protobuf works: the Event schema is
+# supplied at runtime as a buf FileDescriptorSet, so there is no generated-code/runtime version coupling.
+protobuf
+jcs
