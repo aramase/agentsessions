@@ -100,6 +100,12 @@ func EventFromProto(p *v1.Event) api.Event {
 
 // ---- content sub-messages ----
 
+// MessageToProto converts a domain Message to its wire form (exported for the Sessions service).
+func MessageToProto(m *api.Message) *v1.Message { return msgToProto(m) }
+
+// MessageFromProto converts a wire Message to the domain type (exported for the Sessions service).
+func MessageFromProto(p *v1.Message) *api.Message { return msgFromProto(p) }
+
 func msgToProto(m *api.Message) *v1.Message {
 	if m == nil {
 		return nil
