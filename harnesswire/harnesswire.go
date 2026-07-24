@@ -121,13 +121,40 @@ func (s *streamSink) Output(delta string) error {
 	})
 }
 
-// ToolCall/Report over the wire arrive with the controller-side tool executor (tool-idempotency
-// calibration); not yet exercised by the echo harness.
-func (s *streamSink) ToolCall(api.ToolCall) (api.ToolResult, error) {
-	return api.ToolResult{}, errors.New("harnesswire: tool mediation over the wire not implemented (M0)")
+// ToolCall mediates a CONTROLLER_MEDIATED tool over the wire: it emits the call as an
+// EVENT_TOOL_CALL (carrying args + idempotency key) and blocks for the host's ToolResult frame. The
+// host — not the harness — executes and records the tool (record-before-effect, §3), exactly as it
+// mediates a model call, so the load-bearing rule holds across the process boundary.
+func (s *streamSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
+	call := tc
+	if err := s.stream.Send(&v1.Event{
+		Kind: v1.EventKind_EVENT_TOOL_CALL,
+		Body: &v1.Event_Tool{Tool: wire.ToolCallToProto(&call)},
+	}); err != nil {
+		return api.ToolResult{}, err
+	}
+	frame, ok := <-s.results
+	if !ok {
+		return api.ToolResult{}, io.EOF
+	}
+	tr := frame.GetTool()
+	if tr == nil {
+		return api.ToolResult{}, errors.New("harnesswire: expected a ToolResult frame")
+	}
+	if res := wire.ToolResultFromProto(tr); res != nil {
+		return *res, nil
+	}
+	return api.ToolResult{}, nil
 }
-func (s *streamSink) Report(api.ToolResult) error {
-	return errors.New("harnesswire: tool reporting over the wire not implemented (M0)")
+
+// Report records the result of a tool the harness executed in-sandbox (IN_HARNESS_REPORTED): it
+// emits an EVENT_TOOL_RESULT the host records, mirroring the in-process liveSink.Report.
+func (s *streamSink) Report(tr api.ToolResult) error {
+	res := tr
+	return s.stream.Send(&v1.Event{
+		Kind: v1.EventKind_EVENT_TOOL_RESULT,
+		Body: &v1.Event_Result{Result: wire.ToolResultToProto(&res)},
+	})
 }
 func (s *streamSink) Usage(u api.Usage) error {
 	return s.stream.Send(&v1.Event{Kind: v1.EventKind_EVENT_USAGE, Body: &v1.Event_Usage{Usage: &v1.Usage{
@@ -196,6 +223,24 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 		case v1.EventKind_EVENT_OUTPUT:
 			if msg := wire.MessageFromProto(ev.GetMessage()); msg != nil {
 				if err := sink.Output(msg.Text()); err != nil {
+					return err
+				}
+			}
+		case v1.EventKind_EVENT_TOOL_CALL:
+			tc := wire.ToolCallFromProto(ev.GetTool())
+			if tc == nil {
+				return errors.New("harnesswire: EVENT_TOOL_CALL missing its payload")
+			}
+			res, err := sink.ToolCall(*tc)
+			if err != nil {
+				return err
+			}
+			if err := stream.Send(&v1.ControllerFrame{Frame: &v1.ControllerFrame_Tool{Tool: wire.ToolResultToProto(&res)}}); err != nil {
+				return err
+			}
+		case v1.EventKind_EVENT_TOOL_RESULT:
+			if tr := wire.ToolResultFromProto(ev.GetResult()); tr != nil {
+				if err := sink.Report(*tr); err != nil {
 					return err
 				}
 			}

@@ -138,3 +138,53 @@ func TestWireNondeterministicReplay(t *testing.T) {
 		t.Fatalf("verify: %v", err)
 	}
 }
+
+// TestWireControllerMediatedTool proves a CONTROLLER_MEDIATED tool is host-mediated across the
+// process boundary: the out-of-process harness emits the tool call over Harness.Connect, the HOST
+// executes it (its executor, not the harness) and records intent+result, and on replay the recorded
+// result is served without re-executing — determinism holds for tools exactly as for model calls.
+func TestWireControllerMediatedTool(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	har := wireHarnessFrom(t, toolHarness{key: "k1"})
+	tool := newIdempotentTool()
+
+	c, err := controller.New(log, (&countModel{}).call, controller.WithToolExecutor(tool.exec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Exec(context.Background(), har, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
+		t.Fatalf("wire exec: %v", err)
+	}
+	if tool.effects["k1"] != 1 {
+		t.Fatalf("host executed the tool %d times, want 1", tool.effects["k1"])
+	}
+	recs, _ := log.Read(1)
+	var calls, results int
+	for _, r := range recs {
+		switch r.Event.Kind {
+		case api.EventToolCall:
+			calls++
+		case api.EventToolResult:
+			results++
+		}
+	}
+	if calls != 1 || results != 1 {
+		t.Fatalf("journal has %d TOOL_CALL / %d TOOL_RESULT, want 1/1", calls, results)
+	}
+
+	c2, err := controller.New(log, (&countModel{}).call, controller.WithToolExecutor(tool.exec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Replay(context.Background(), har); err != nil {
+		t.Fatalf("wire replay: %v", err)
+	}
+	if tool.effects["k1"] != 1 {
+		t.Fatalf("replay re-executed the tool: %d times, want 1 (I1)", tool.effects["k1"])
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+}

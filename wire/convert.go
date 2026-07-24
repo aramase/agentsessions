@@ -106,6 +106,14 @@ func MessageToProto(m *api.Message) *v1.Message { return msgToProto(m) }
 // MessageFromProto converts a wire Message to the domain type (exported for the Sessions service).
 func MessageFromProto(p *v1.Message) *api.Message { return msgFromProto(p) }
 
+// ToolCallToProto / ToolCallFromProto / ToolResultToProto / ToolResultFromProto are exported for the
+// harness wire bridge, which mediates a CONTROLLER_MEDIATED tool call out of process exactly as it
+// mediates a model call.
+func ToolCallToProto(t *api.ToolCall) *v1.ToolCall         { return toolCallToProto(t) }
+func ToolCallFromProto(t *v1.ToolCall) *api.ToolCall       { return toolCallFromProto(t) }
+func ToolResultToProto(t *api.ToolResult) *v1.ToolResult   { return toolResultToProto(t) }
+func ToolResultFromProto(t *v1.ToolResult) *api.ToolResult { return toolResultFromProto(t) }
+
 func msgToProto(m *api.Message) *v1.Message {
 	if m == nil {
 		return nil
