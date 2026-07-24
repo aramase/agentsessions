@@ -1,0 +1,51 @@
+# The durable journal lives on a PersistentVolume, so it survives the pod. On a plain single-node
+# kind cluster this is a hostPath volume from the default local-path provisioner — no substrate, no
+# memory snapshot, no CSI driver with checkpoint support. Pod death + replay is the whole trick.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentnode-journal
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentnode
+  labels:
+    app: agentnode
+spec:
+  replicas: 1
+  # Recreate: the RWO journal volume must be released by the old pod before the new one mounts it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agentnode
+  template:
+    metadata:
+      labels:
+        app: agentnode
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: agentnode
+          image: agentnode:demo
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: AGENT_JOURNAL
+              value: /data/journal.db
+            - name: AGENT_SESSION
+              value: demo
+            - name: AGENT_INPUT
+              value: "hello from a plain kubernetes pod"
+          volumeMounts:
+            - name: journal
+              mountPath: /data
+      volumes:
+        - name: journal
+          persistentVolumeClaim:
+            claimName: agentnode-journal
