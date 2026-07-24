@@ -950,11 +950,15 @@ func (x *Origin) GetAttributes() map[string]string {
 // completion (text + reasoning parts) is recorded separately as an EVENT_OUTPUT message.
 // Under STATELESS_REPLAY the harness never calls a provider directly.
 type ModelCall struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Model         string                 `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
-	Params        map[string]string      `protobuf:"bytes,2,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	InputHash     string                 `protobuf:"bytes,3,opt,name=input_hash,json=inputHash,proto3" json:"input_hash,omitempty"` // §7/§9.1: required for STATELESS_REPLAY so the I0 check can run
-	Id            string                 `protobuf:"bytes,4,opt,name=id,proto3" json:"id,omitempty"`                                // correlation id for the served ModelResult
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Model     string                 `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
+	Params    map[string]string      `protobuf:"bytes,2,rep,name=params,proto3" json:"params,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	InputHash string                 `protobuf:"bytes,3,opt,name=input_hash,json=inputHash,proto3" json:"input_hash,omitempty"` // §7/§9.1: required for STATELESS_REPLAY so the I0 check can run
+	Id        string                 `protobuf:"bytes,4,opt,name=id,proto3" json:"id,omitempty"`                                // correlation id for the served ModelResult
+	// messages is the request context the host needs to INVOKE the model on the live path. It is
+	// wire-only: the host records the call with input_hash alone (messages stripped), since the
+	// recorded form only needs the hash to re-check I0 on replay.
+	Messages      []*Message `protobuf:"bytes,5,rep,name=messages,proto3" json:"messages,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1015,6 +1019,13 @@ func (x *ModelCall) GetId() string {
 		return x.Id
 	}
 	return ""
+}
+
+func (x *ModelCall) GetMessages() []*Message {
+	if x != nil {
+		return x.Messages
+	}
+	return nil
 }
 
 type Usage struct {
@@ -1912,13 +1923,14 @@ const file_common_proto_rawDesc = "" +
 	"attributes\x1a=\n" +
 	"\x0fAttributesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xcc\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x83\x02\n" +
 	"\tModelCall\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12?\n" +
 	"\x06params\x18\x02 \x03(\v2'.agentsessions.v1.ModelCall.ParamsEntryR\x06params\x12\x1d\n" +
 	"\n" +
 	"input_hash\x18\x03 \x01(\tR\tinputHash\x12\x0e\n" +
-	"\x02id\x18\x04 \x01(\tR\x02id\x1a9\n" +
+	"\x02id\x18\x04 \x01(\tR\x02id\x125\n" +
+	"\bmessages\x18\x05 \x03(\v2\x19.agentsessions.v1.MessageR\bmessages\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x90\x01\n" +
@@ -2067,30 +2079,31 @@ var file_common_proto_depIdxs = []int32{
 	4,  // 8: agentsessions.v1.Message.parts:type_name -> agentsessions.v1.Part
 	23, // 9: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
 	24, // 10: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
-	26, // 11: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
-	0,  // 12: agentsessions.v1.ToolCall.mediation:type_name -> agentsessions.v1.Mediation
-	26, // 13: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
-	18, // 14: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
-	2,  // 15: agentsessions.v1.Lifecycle.kind:type_name -> agentsessions.v1.Lifecycle.Kind
-	25, // 16: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
-	1,  // 17: agentsessions.v1.Event.kind:type_name -> agentsessions.v1.EventKind
-	9,  // 18: agentsessions.v1.Event.message:type_name -> agentsessions.v1.Message
-	12, // 19: agentsessions.v1.Event.model:type_name -> agentsessions.v1.ModelCall
-	14, // 20: agentsessions.v1.Event.tool:type_name -> agentsessions.v1.ToolCall
-	15, // 21: agentsessions.v1.Event.result:type_name -> agentsessions.v1.ToolResult
-	16, // 22: agentsessions.v1.Event.approval:type_name -> agentsessions.v1.ApprovalRequest
-	17, // 23: agentsessions.v1.Event.approval_result:type_name -> agentsessions.v1.ApprovalResult
-	13, // 24: agentsessions.v1.Event.usage:type_name -> agentsessions.v1.Usage
-	20, // 25: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
-	19, // 26: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
-	18, // 27: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
-	10, // 28: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
-	21, // 29: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
-	30, // [30:30] is the sub-list for method output_type
-	30, // [30:30] is the sub-list for method input_type
-	30, // [30:30] is the sub-list for extension type_name
-	30, // [30:30] is the sub-list for extension extendee
-	0,  // [0:30] is the sub-list for field type_name
+	9,  // 11: agentsessions.v1.ModelCall.messages:type_name -> agentsessions.v1.Message
+	26, // 12: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
+	0,  // 13: agentsessions.v1.ToolCall.mediation:type_name -> agentsessions.v1.Mediation
+	26, // 14: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
+	18, // 15: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
+	2,  // 16: agentsessions.v1.Lifecycle.kind:type_name -> agentsessions.v1.Lifecycle.Kind
+	25, // 17: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	1,  // 18: agentsessions.v1.Event.kind:type_name -> agentsessions.v1.EventKind
+	9,  // 19: agentsessions.v1.Event.message:type_name -> agentsessions.v1.Message
+	12, // 20: agentsessions.v1.Event.model:type_name -> agentsessions.v1.ModelCall
+	14, // 21: agentsessions.v1.Event.tool:type_name -> agentsessions.v1.ToolCall
+	15, // 22: agentsessions.v1.Event.result:type_name -> agentsessions.v1.ToolResult
+	16, // 23: agentsessions.v1.Event.approval:type_name -> agentsessions.v1.ApprovalRequest
+	17, // 24: agentsessions.v1.Event.approval_result:type_name -> agentsessions.v1.ApprovalResult
+	13, // 25: agentsessions.v1.Event.usage:type_name -> agentsessions.v1.Usage
+	20, // 26: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
+	19, // 27: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
+	18, // 28: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
+	10, // 29: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
+	21, // 30: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
+	31, // [31:31] is the sub-list for method output_type
+	31, // [31:31] is the sub-list for method input_type
+	31, // [31:31] is the sub-list for extension type_name
+	31, // [31:31] is the sub-list for extension extendee
+	0,  // [0:31] is the sub-list for field type_name
 }
 
 func init() { file_common_proto_init() }

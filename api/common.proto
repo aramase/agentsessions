@@ -122,6 +122,10 @@ message ModelCall {
   map<string, string> params = 2;
   string input_hash = 3; // §7/§9.1: required for STATELESS_REPLAY so the I0 check can run
   string id = 4;         // correlation id for the served ModelResult
+  // messages is the request context the host needs to INVOKE the model on the live path. It is
+  // wire-only: the host records the call with input_hash alone (messages stripped), since the
+  // recorded form only needs the hash to re-check I0 on replay.
+  repeated Message messages = 5;
 }
 
 message Usage {
