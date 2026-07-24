@@ -30,6 +30,12 @@ var ErrReplayInvokedModel = errors.New("controller: replay invoked the model (I1
 // the log was written (a determinism violation, symmetric to the I0 input-hash check).
 var ErrReplayDiverged = errors.New("controller: replay diverged from the journal")
 
+// ErrMissingIdempotencyKey rejects a CONTROLLER_MEDIATED tool call that omits the idempotency key
+// the crash-recovery re-drive needs to dedup its side effect (I3). Without a key, at-most-once
+// silently would not hold, so the host fails loud rather than record an unrecoverable intent. The
+// full key contract (generation, TTL, scope) is the §10 spike; this is the minimal guard.
+var ErrMissingIdempotencyKey = errors.New("controller: CONTROLLER_MEDIATED tool call requires an idempotency key")
+
 // ModelFunc performs a live model invocation. It is the nondeterministic op the controller records
 // on the live path and serves from the journal on replay.
 type ModelFunc func(api.ModelRequest) (api.ModelResponse, error)

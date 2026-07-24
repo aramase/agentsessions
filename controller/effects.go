@@ -45,6 +45,12 @@ func (s *liveSink) Output(delta string) error {
 
 func (s *liveSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
 	call := tc
+	// A host-mediated side-effecting tool MUST carry an idempotency key: the crash-recovery re-drive
+	// (§3/I3) dedups on it. Reject before recording, so a keyless call leaves no unrecoverable intent
+	// in the journal and at-most-once cannot silently degrade.
+	if call.Mediation == api.MediationControllerMediated && call.IdempotencyKey == "" {
+		return api.ToolResult{}, ErrMissingIdempotencyKey
+	}
 	// Record-before-effect (§3/I3): the TOOL_CALL intent (+ idempotency key) is durable BEFORE the
 	// side effect runs, so a crash after execute re-drives under the same key (tool-side dedup).
 	if _, err := s.c.appendSeq(api.Event{Kind: api.EventToolCall, ToolCall: &call}); err != nil {

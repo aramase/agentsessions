@@ -3,6 +3,7 @@ package conformance_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -300,20 +301,20 @@ func (t *idempotentTool) exec(tc api.ToolCall) (api.ToolResult, error) {
 	return r, nil
 }
 
-// toolHarness calls one CONTROLLER_MEDIATED tool (fixed idempotency key) then finishes. Being
-// deterministic, it re-emits the identical ToolCall on resume.
-type toolHarness struct{}
+// toolHarness calls one CONTROLLER_MEDIATED tool (with the given idempotency key) then finishes.
+// Being deterministic, it re-emits the identical ToolCall on resume.
+type toolHarness struct{ key string }
 
 func (toolHarness) Describe(context.Context) (api.Descriptor, error) {
 	return api.Descriptor{ID: "tool"}, nil
 }
 
-func (toolHarness) Run(_ context.Context, _ *api.Start, sink api.EventSink) error {
+func (h toolHarness) Run(_ context.Context, _ *api.Start, sink api.EventSink) error {
 	_, err := sink.ToolCall(api.ToolCall{
 		ID:             "t1",
 		Tool:           "charge",
 		Mediation:      api.MediationControllerMediated,
-		IdempotencyKey: "k1",
+		IdempotencyKey: h.key,
 	})
 	return err
 }
@@ -329,7 +330,7 @@ func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c1.Exec(context.Background(), toolHarness{}, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
+	if err := c1.Exec(context.Background(), toolHarness{key: "k1"}, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	// Journal now: INPUT(1) TOOL_CALL(2) TOOL_RESULT(3) END(4); the effect ran exactly once.
@@ -354,7 +355,7 @@ func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	redrove, err := c2.Resume(context.Background(), toolHarness{})
+	redrove, err := c2.Resume(context.Background(), toolHarness{key: "k1"})
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
@@ -381,5 +382,31 @@ func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	}
 	if err := log.Verify(); err != nil {
 		t.Fatalf("verify after resume: %v", err)
+	}
+}
+
+// 8. Fail-loud idempotency guard: a CONTROLLER_MEDIATED tool call with no idempotency key is
+// rejected BEFORE the intent is recorded — I3's at-most-once re-drive has nothing to dedup on, so
+// the host must not let the guarantee silently degrade, and must leave no unrecoverable TOOL_CALL.
+func TestControllerMediatedToolRequiresKey(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	c, err := controller.New(log, (&countModel{}).call, controller.WithToolExecutor(newIdempotentTool().exec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.Exec(context.Background(), toolHarness{key: ""}, []api.Message{*api.TextMessage("user", "go")}, 0)
+	if !errors.Is(err, controller.ErrMissingIdempotencyKey) {
+		t.Fatalf("want ErrMissingIdempotencyKey, got %v", err)
+	}
+	recs, _ := log.Read(1)
+	for _, r := range recs {
+		if r.Event.Kind == api.EventToolCall {
+			t.Fatal("a keyless tool call was recorded; the guard must reject before recording intent")
+		}
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatalf("verify: %v", err)
 	}
 }
