@@ -34,6 +34,19 @@ var ErrReplayDiverged = errors.New("controller: replay diverged from the journal
 // on the live path and serves from the journal on replay.
 type ModelFunc func(api.ModelRequest) (api.ModelResponse, error)
 
+// ToolFunc executes a CONTROLLER_MEDIATED tool. The host calls it between appending the TOOL_CALL
+// intent and appending the TOOL_RESULT (the two-phase write-ahead of §3/I3). It receives the call's
+// IdempotencyKey and owns tool-side deduplication: on crash-recovery the host re-executes the same
+// call under the same key, and an idempotent tool MUST NOT repeat the external effect.
+type ToolFunc func(api.ToolCall) (api.ToolResult, error)
+
+// Option configures a Controller at construction.
+type Option func(*Controller)
+
+// WithToolExecutor sets the executor for CONTROLLER_MEDIATED tool calls. Without it, a harness that
+// emits a host-mediated ToolCall gets an error (in-harness-reported tools use Report instead).
+func WithToolExecutor(tool ToolFunc) Option { return func(c *Controller) { c.tool = tool } }
+
 // Controller drives one session's log with a single incarnation (fence). It is meant to be driven
 // by a single goroutine: Exec and Replay are NOT safe to call concurrently on the same Controller
 // (liveModelCalls is unsynchronized). Concurrency BETWEEN controllers/processes is safe — the log's
@@ -41,18 +54,23 @@ type ModelFunc func(api.ModelRequest) (api.ModelResponse, error)
 type Controller struct {
 	log            eventlog.Store
 	model          ModelFunc
+	tool           ToolFunc
 	fence          int64
 	liveModelCalls int
 }
 
 // New starts a fresh incarnation over log: it advances the fencing token (superseding any prior
 // incarnation, e.g. a dead pod) and returns a controller ready to Exec or Replay.
-func New(log eventlog.Store, model ModelFunc) (*Controller, error) {
+func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, error) {
 	fence, err := log.NewFence()
 	if err != nil {
 		return nil, err
 	}
-	return &Controller{log: log, model: model, fence: fence}, nil
+	c := &Controller{log: log, model: model, fence: fence}
+	for _, o := range opts {
+		o(c)
+	}
+	return c, nil
 }
 
 // Exec runs one live execution/turn. The first INPUT append is guarded by the caller's

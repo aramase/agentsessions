@@ -276,3 +276,110 @@ func TestIntegrityGoldenVectorCrossImpl(t *testing.T) {
 		t.Fatalf("non-Go verifier did not confirm the hash:\n%s", out)
 	}
 }
+
+// idempotentTool models an external side-effecting tool with tool-side dedup: it counts real
+// effects per idempotency key and returns the cached result for a repeated key. Its state stands in
+// for the tool's OWN durable dedup (e.g. a payment API keyed on the idempotency key), so — like the
+// external effect — it survives the simulated controller crash.
+type idempotentTool struct {
+	effects map[string]int
+	results map[string]api.ToolResult
+}
+
+func newIdempotentTool() *idempotentTool {
+	return &idempotentTool{effects: map[string]int{}, results: map[string]api.ToolResult{}}
+}
+
+func (t *idempotentTool) exec(tc api.ToolCall) (api.ToolResult, error) {
+	if r, ok := t.results[tc.IdempotencyKey]; ok {
+		return r, nil // deduped: the effect already ran under this key
+	}
+	t.effects[tc.IdempotencyKey]++
+	r := api.ToolResult{ID: tc.ID, Output: map[string]any{"ran": true}}
+	t.results[tc.IdempotencyKey] = r
+	return r, nil
+}
+
+// toolHarness calls one CONTROLLER_MEDIATED tool (fixed idempotency key) then finishes. Being
+// deterministic, it re-emits the identical ToolCall on resume.
+type toolHarness struct{}
+
+func (toolHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "tool"}, nil
+}
+
+func (toolHarness) Run(_ context.Context, _ *api.Start, sink api.EventSink) error {
+	_, err := sink.ToolCall(api.ToolCall{
+		ID:             "t1",
+		Tool:           "charge",
+		Mediation:      api.MediationControllerMediated,
+		IdempotencyKey: "k1",
+	})
+	return err
+}
+
+// 7. Crash between a tool's execute and its result-append (I3): the host-mediated tool executor
+// re-drives the recorded TOOL_CALL under the same idempotency key on resume; an idempotent tool
+// runs the external effect AT MOST ONCE. Symmetric to the model re-drive, this closes the tool half
+// of the record-before-effect invariant.
+func TestCrashMidToolCallAtMostOnce(t *testing.T) {
+	s, path := openFile(t)
+	tool := newIdempotentTool()
+	c1, err := controller.New(s.Session("s"), (&countModel{}).call, controller.WithToolExecutor(tool.exec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c1.Exec(context.Background(), toolHarness{}, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Journal now: INPUT(1) TOOL_CALL(2) TOOL_RESULT(3) END(4); the effect ran exactly once.
+	if tool.effects["k1"] != 1 {
+		t.Fatalf("live: effect ran %d times, want 1", tool.effects["k1"])
+	}
+	s.Close()
+
+	// Crash lost the TOOL_RESULT and END: the intent (TOOL_CALL, seq 2) is durable, the result is
+	// not — the exact window §3 protects against.
+	truncateFrom(t, path, "s", 3)
+
+	s2, err := sqlitelog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	log := s2.Session("s")
+	// Same tool instance: its dedup state is the external tool's, which the controller crash does
+	// not erase.
+	c2, err := controller.New(log, (&countModel{}).call, controller.WithToolExecutor(tool.exec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redrove, err := c2.Resume(context.Background(), toolHarness{})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if !redrove {
+		t.Fatal("expected Resume to re-drive the interrupted turn")
+	}
+	// The executor is CALLED again on re-drive, but the same key dedups it — the external effect
+	// fired exactly once across the crash (at-most-once / I3).
+	if tool.effects["k1"] != 1 {
+		t.Fatalf("resume re-ran the side effect: %d times, want 1 (I3 violated)", tool.effects["k1"])
+	}
+	recs, _ := log.Read(1)
+	if recs[len(recs)-1].Event.Kind != api.EventEnd {
+		t.Fatal("resume did not complete the turn (no END)")
+	}
+	results := 0
+	for _, r := range recs {
+		if r.Event.Kind == api.EventToolResult {
+			results++
+		}
+	}
+	if results != 1 {
+		t.Fatalf("journal has %d TOOL_RESULTs, want exactly 1", results)
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatalf("verify after resume: %v", err)
+	}
+}

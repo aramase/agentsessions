@@ -45,12 +45,33 @@ func (s *liveSink) Output(delta string) error {
 
 func (s *liveSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
 	call := tc
+	// Record-before-effect (§3/I3): the TOOL_CALL intent (+ idempotency key) is durable BEFORE the
+	// side effect runs, so a crash after execute re-drives under the same key (tool-side dedup).
 	if _, err := s.c.appendSeq(api.Event{Kind: api.EventToolCall, ToolCall: &call}); err != nil {
 		return api.ToolResult{}, err
 	}
-	// M0 has no controller-side tool executor; controller-mediated tools arrive with real
-	// executors in a later step. Harnesses that run tools in-sandbox use Report instead.
-	return api.ToolResult{}, errors.New("controller: no tool executor configured (M0)")
+	return s.execTool(call)
+}
+
+// execTool runs a controller-mediated tool and write-ahead records its TOOL_RESULT. The TOOL_CALL
+// intent MUST already be recorded by the caller — execTool performs only phases 2 and 3 of §3
+// (execute, then append the result), so it is reused verbatim on crash-recovery, where the intent
+// is already durable in the journal.
+func (s *liveSink) execTool(call api.ToolCall) (api.ToolResult, error) {
+	if s.c.tool == nil {
+		// ToolCall is the controller-mediated path; without an executor it is a misconfiguration
+		// (in-harness-reported tools use Report instead).
+		return api.ToolResult{}, errors.New("controller: no tool executor configured")
+	}
+	res, err := s.c.tool(call)
+	if err != nil {
+		return api.ToolResult{}, err
+	}
+	result := res
+	if _, err := s.c.appendSeq(api.Event{Kind: api.EventToolResult, Result: &result}); err != nil {
+		return api.ToolResult{}, err
+	}
+	return res, nil
 }
 
 func (s *liveSink) Report(tr api.ToolResult) error {

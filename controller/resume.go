@@ -128,17 +128,25 @@ func (s *resumeSink) Output(delta string) error {
 
 func (s *resumeSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
 	if s.i < len(s.stream) {
-		if _, ok := s.recordedNext(api.EventToolCall); !ok {
+		call, ok := s.recordedNext(api.EventToolCall)
+		if !ok {
 			return api.ToolResult{}, errors.New("resume: recorded stream diverged (expected tool call)")
 		}
-		tr, ok := s.recordedNext(api.EventToolResult)
-		if !ok {
-			return api.ToolResult{}, errors.New("resume: recorded tool result missing")
+		if tr, ok := s.recordedNext(api.EventToolResult); ok {
+			// Intent AND result recorded: served, the tool is NOT re-executed (at-most-once, I3).
+			if tr.Result == nil {
+				return api.ToolResult{}, nil
+			}
+			return *tr.Result, nil
 		}
-		if tr.Result == nil {
-			return api.ToolResult{}, nil
+		// Intent recorded but no result: the crash fell between execute and result-append. Re-drive
+		// the effect under the SAME recorded idempotency key (§3) — an idempotent tool dedups it —
+		// and write-ahead the result. This closes the tool half of I3, symmetric to the model
+		// re-drive above.
+		if call.ToolCall == nil {
+			return api.ToolResult{}, errors.New("resume: recorded tool call missing its payload")
 		}
-		return *tr.Result, nil
+		return s.live.execTool(*call.ToolCall)
 	}
 	return s.live.ToolCall(tc)
 }
