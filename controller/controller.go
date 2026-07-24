@@ -59,6 +59,17 @@ func New(log eventlog.Store, model ModelFunc) (*Controller, error) {
 // expectedLastSeq (the single-writer CAS at the session boundary); the harness then runs
 // host-mediated, and the turn ends with an END event.
 func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) error {
+	// The harness receives the committed conversation so far as History (a stateless harness
+	// reconstructs its context from it); the echo harness ignores it, but a real one needs it.
+	prior, err := c.log.Read(1)
+	if err != nil {
+		return err
+	}
+	history := make([]api.Event, 0, len(prior))
+	for _, r := range prior {
+		history = append(history, r.Event)
+	}
+
 	last := expectedLastSeq
 	for i := range inputs {
 		in := inputs[i]
@@ -68,13 +79,13 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		}
 		last = rec.Seq
 	}
-	if err := har.Run(ctx, &api.Start{Inputs: inputs}, &liveSink{c: c}); err != nil {
+	if err := har.Run(ctx, &api.Start{History: history, Inputs: inputs}, &liveSink{c: c}); err != nil {
 		// Best-effort: record the failure. If this append itself fails we still surface the
 		// original harness error to the caller.
 		_, _ = c.appendSeq(api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
 		return err
 	}
-	_, err := c.appendSeq(api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	_, err = c.appendSeq(api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	return err
 }
 
