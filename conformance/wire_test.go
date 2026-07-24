@@ -2,8 +2,10 @@ package conformance_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -20,11 +22,15 @@ import (
 // wireHarness runs the echo harness in a gRPC Harness server (bufconn) and returns an api.Harness
 // that drives it OUT OF PROCESS over Harness.Connect. Each Run opens a fresh Connect stream, so the
 // same value serves both the live turn and the replay.
-func wireHarness(t *testing.T) api.Harness {
+func wireHarness(t *testing.T) api.Harness { return wireHarnessFrom(t, echoagent.Harness{}) }
+
+// wireHarnessFrom serves h over a bufconn Harness server and returns an api.Harness that drives it
+// out of process, so a test can swap in a deliberately-failing harness.
+func wireHarnessFrom(t *testing.T, h api.Harness) api.Harness {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	v1.RegisterHarnessServer(srv, harnesswire.NewServer(echoagent.Harness{}))
+	v1.RegisterHarnessServer(srv, harnesswire.NewServer(h))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 
@@ -38,6 +44,55 @@ func wireHarness(t *testing.T) api.Harness {
 	}
 	t.Cleanup(func() { conn.Close() })
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn))
+}
+
+// failHarness fails its run without emitting anything; the Server terminates the stream with
+// END{FAILED,error} and returns the status.
+type failHarness struct{}
+
+func (failHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "fail"}, nil
+}
+func (failHarness) Run(context.Context, *api.Start, api.EventSink) error {
+	return errors.New("boom")
+}
+
+// TestWireFailedHarnessSurfacesError is the END-state correctness proof across the wire: a remote
+// harness that FAILs is journaled as EVENT_ERROR, not EVENT_END{COMPLETED}. Before the fix,
+// ClientHarness.Run returned nil on any END event, so the controller recorded the failed turn as a
+// successful one and the failure was silently lost across the process boundary.
+func TestWireFailedHarnessSurfacesError(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	har := wireHarnessFrom(t, failHarness{})
+
+	c, err := controller.New(log, (&countModel{}).call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.Exec(context.Background(), har, []api.Message{*api.TextMessage("user", "hi")}, 0)
+	if err == nil {
+		t.Fatal("exec of a failing remote harness returned nil; the failure was swallowed")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("surfaced error did not carry the harness failure %q: %v", "boom", err)
+	}
+
+	recs, rerr := log.Read(1)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	last := recs[len(recs)-1].Event
+	if last.Kind == api.EventEnd {
+		t.Fatalf("failed turn was journaled as END{%s}; want EVENT_ERROR", last.End.State)
+	}
+	if last.Kind != api.EventError {
+		t.Fatalf("terminal event = %s; want ERROR", last.Kind)
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatalf("verify after a failed turn: %v", err)
+	}
 }
 
 // TestWireNondeterministicReplay is the load-bearing proof across a PROCESS BOUNDARY: with the

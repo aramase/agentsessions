@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/aramase/agentsessions/api"
@@ -158,6 +159,8 @@ func (h *ClientHarness) Describe(ctx context.Context) (api.Descriptor, error) {
 // sink call and sending the result back. The sink (live or replay) is the controller's — the host
 // still mediates the model over the wire.
 func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // tear the Connect stream down (and the server's recv loop) when Run returns
 	stream, err := h.client.Connect(ctx)
 	if err != nil {
 		return err
@@ -201,9 +204,23 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 				_ = sink.Usage(api.Usage{Model: u.GetModel(), InputTokens: u.GetInputTokens(), OutputTokens: u.GetOutputTokens(), ReasoningTokens: u.GetReasoningTokens()})
 			}
 		case v1.EventKind_EVENT_END:
-			return nil
+			return endError(ev.GetEnd())
 		}
 	}
+}
+
+// endError maps a terminal HarnessEnd into a Go error. COMPLETED is the only success; a FAILED (or
+// any other non-completed) end MUST surface so the controller records EVENT_ERROR instead of
+// EVENT_END{COMPLETED}. Without this, a failed remote harness would be journaled as a successful
+// turn — the failure would be silently lost across the process boundary.
+func endError(end *v1.HarnessEnd) error {
+	if end.GetState() == "COMPLETED" {
+		return nil
+	}
+	if e := end.GetError(); e != nil && e.GetDescription() != "" {
+		return fmt.Errorf("harnesswire: remote harness ended %s: %s", end.GetState(), e.GetDescription())
+	}
+	return fmt.Errorf("harnesswire: remote harness ended %s", end.GetState())
 }
 
 // ---- conversions ----
