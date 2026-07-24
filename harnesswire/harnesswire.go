@@ -87,12 +87,13 @@ type streamSink struct {
 }
 
 func (s *streamSink) Model(req api.ModelRequest) (api.ModelResponse, error) {
+	id := newID()
 	ev := &v1.Event{
 		Kind: v1.EventKind_EVENT_MODEL_CALL,
 		Body: &v1.Event_Model{Model: &v1.ModelCall{
 			Model:    req.Model,
 			Params:   req.Params,
-			Id:       newID(),
+			Id:       id,
 			Messages: messagesToProto(req.Messages),
 		}},
 	}
@@ -106,6 +107,11 @@ func (s *streamSink) Model(req api.ModelRequest) (api.ModelResponse, error) {
 	mr := frame.GetModel()
 	if mr == nil {
 		return api.ModelResponse{}, errors.New("harnesswire: expected a ModelResult frame")
+	}
+	// Correlate the reply to the call we emitted: a mismatched model_call_id means the stream
+	// delivered the wrong reply (reordering/loss), so fail loud rather than mis-serve it.
+	if mr.GetModelCallId() != id {
+		return api.ModelResponse{}, fmt.Errorf("harnesswire: model result correlation mismatch: got %q, want %q", mr.GetModelCallId(), id)
 	}
 	var msg api.Message
 	if m := wire.MessageFromProto(mr.GetMessage()); m != nil {
@@ -141,10 +147,16 @@ func (s *streamSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
 	if tr == nil {
 		return api.ToolResult{}, errors.New("harnesswire: expected a ToolResult frame")
 	}
-	if res := wire.ToolResultFromProto(tr); res != nil {
-		return *res, nil
+	res := wire.ToolResultFromProto(tr)
+	if res == nil {
+		return api.ToolResult{}, nil
 	}
-	return api.ToolResult{}, nil
+	// Correlate the reply to the call we emitted (symmetric to model_call_id): the host stamps the
+	// result's ID to the call's ID, so a mismatch means a wrong/reordered reply — fail loud.
+	if res.ID != call.ID {
+		return api.ToolResult{}, fmt.Errorf("harnesswire: tool result correlation mismatch: got %q, want %q", res.ID, call.ID)
+	}
+	return *res, nil
 }
 
 // Report records the result of a tool the harness executed in-sandbox (IN_HARNESS_REPORTED): it
