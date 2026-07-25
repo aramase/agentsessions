@@ -4,6 +4,11 @@ modules:
 lint:
   use:
     - MINIMAL
+  except:
+    # Deliberate flat layout: the protos live at the module root (api/) with package
+    # agentsessions.v1 and generate to api/genpb. Enforcing the directory-matches-package rule
+    # would require api/agentsessions/v1/, which changes the generated Go import path.
+    - PACKAGE_DIRECTORY_MATCH
 breaking:
   use:
     - FILE

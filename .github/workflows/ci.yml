@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # buf breaking compares the change against the main branch
 
       - uses: actions/setup-go@v5
         with:
@@ -31,6 +33,13 @@ jobs:
           git add -N api/genpb
           git diff --exit-code -- api/genpb
 
+      # Proto contract gates for the neutral schema: style + backward compatibility. The breaking
+      # gate compares the change against main so an incompatible schema edit fails the build.
+      - name: buf lint
+        run: buf lint
+      - name: buf breaking
+        run: buf breaking --against '.git#branch=main'
+
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"
@@ -40,4 +49,28 @@ jobs:
 
       - run: go build ./...
       - run: go vet ./...
-      - run: go test ./...
+      # -race guards the single-writer log and the streaming sinks.
+      - run: go test -race ./...
+
+      # Cheap always-on integrity gate: the zero-dep golden self-check (stdlib only, no venv).
+      - name: integrity golden self-check
+        run: python3 hack/verify_chain.py --golden
+
+  integrity:
+    # Full cross-language provenance audit: record a real journal, have an INDEPENDENT Python
+    # implementation (protobuf + RFC 8785 JCS) reproduce and verify the whole chain, then prove it
+    # FAILS CLOSED on a tampered record. Kept a separate job so its Python venv setup is isolated.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: cross-language chain verifier (audit + tamper)
+        run: ./hack/verify_chain.sh
