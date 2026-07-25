@@ -36,6 +36,12 @@ var ErrReplayDiverged = errors.New("controller: replay diverged from the journal
 // full key contract (generation, TTL, scope) is the §10 spike; this is the minimal guard.
 var ErrMissingIdempotencyKey = errors.New("controller: CONTROLLER_MEDIATED tool call requires an idempotency key")
 
+// ErrUnmediatedToolCall rejects a ToolCall whose mediation tier is not host-executed. ToolCall is
+// only for CONTROLLER_MEDIATED (and, once implemented, REQUIRES_APPROVAL); an UNSPECIFIED or
+// IN_HARNESS_REPORTED call must not execute here (the latter uses Report), so it is rejected before
+// anything is recorded — closing the keyless-execute bypass.
+var ErrUnmediatedToolCall = errors.New("controller: ToolCall requires a host-mediated tier")
+
 // ModelFunc performs a live model invocation. It is the nondeterministic op the controller records
 // on the live path and serves from the journal on replay.
 type ModelFunc func(api.ModelRequest) (api.ModelResponse, error)

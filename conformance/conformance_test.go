@@ -410,3 +410,41 @@ func TestControllerMediatedToolRequiresKey(t *testing.T) {
 		t.Fatalf("verify: %v", err)
 	}
 }
+
+// unmediatedToolHarness emits a tool call with no mediation set (the zero value) and no key — the
+// exact shape that must not slip past the mediation branch and execute.
+type unmediatedToolHarness struct{}
+
+func (unmediatedToolHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "u"}, nil
+}
+
+func (unmediatedToolHarness) Run(_ context.Context, _ *api.Start, sink api.EventSink) error {
+	_, err := sink.ToolCall(api.ToolCall{ID: "u1", Tool: "x"})
+	return err
+}
+
+// 9. Close the mediation bypass: a ToolCall with an UNSPECIFIED mediation must be rejected before it
+// can execute. Otherwise a keyless, unmediated call would run and re-drive without dedup, silently
+// voiding I3 — the empty-key guard alone keys off CONTROLLER_MEDIATED and would miss it.
+func TestUnmediatedToolCallRejected(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	c, err := controller.New(log, (&countModel{}).call, controller.WithToolExecutor(newIdempotentTool().exec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Exec(context.Background(), unmediatedToolHarness{}, []api.Message{*api.TextMessage("user", "go")}, 0); !errors.Is(err, controller.ErrUnmediatedToolCall) {
+		t.Fatalf("want ErrUnmediatedToolCall (I3 bypass open), got %v", err)
+	}
+	recs, _ := log.Read(1)
+	for _, r := range recs {
+		if r.Event.Kind == api.EventToolResult {
+			t.Fatal("the unmediated tool executed (recorded a TOOL_RESULT)")
+		}
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+}
