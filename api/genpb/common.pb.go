@@ -1478,11 +1478,19 @@ func (x *HarnessEnd) GetError() *Error {
 // Lifecycle marks a compute/session transition in the log (§7). BASELINE is a replay /
 // compaction checkpoint (§1).
 type Lifecycle struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          Lifecycle_Kind         `protobuf:"varint,1,opt,name=kind,proto3,enum=agentsessions.v1.Lifecycle_Kind" json:"kind,omitempty"`
-	Detail        string                 `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"` // e.g. "fork parent=<uid>@<seq>", baseline id
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Kind   Lifecycle_Kind         `protobuf:"varint,1,opt,name=kind,proto3,enum=agentsessions.v1.Lifecycle_Kind" json:"kind,omitempty"`
+	Detail string                 `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"` // e.g. "fork parent=<uid>@<seq>", baseline id
+	// SnapshotRef captured on SUSPEND (§5.1), carried inline so it rides the tamper-evident chain with
+	// no side table and no cross-file message dependency. A filesystem-only backend sets only
+	// snapshot_local (the session handle to replay) with snapshot_memory=false; a memory backend also
+	// sets snapshot_external_uri.
+	SnapshotLocal       string `protobuf:"bytes,3,opt,name=snapshot_local,json=snapshotLocal,proto3" json:"snapshot_local,omitempty"`
+	SnapshotExternalUri string `protobuf:"bytes,4,opt,name=snapshot_external_uri,json=snapshotExternalUri,proto3" json:"snapshot_external_uri,omitempty"`
+	SnapshotMemory      bool   `protobuf:"varint,5,opt,name=snapshot_memory,json=snapshotMemory,proto3" json:"snapshot_memory,omitempty"`
+	SnapshotSealed      bool   `protobuf:"varint,6,opt,name=snapshot_sealed,json=snapshotSealed,proto3" json:"snapshot_sealed,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Lifecycle) Reset() {
@@ -1527,6 +1535,34 @@ func (x *Lifecycle) GetDetail() string {
 		return x.Detail
 	}
 	return ""
+}
+
+func (x *Lifecycle) GetSnapshotLocal() string {
+	if x != nil {
+		return x.SnapshotLocal
+	}
+	return ""
+}
+
+func (x *Lifecycle) GetSnapshotExternalUri() string {
+	if x != nil {
+		return x.SnapshotExternalUri
+	}
+	return ""
+}
+
+func (x *Lifecycle) GetSnapshotMemory() bool {
+	if x != nil {
+		return x.SnapshotMemory
+	}
+	return false
+}
+
+func (x *Lifecycle) GetSnapshotSealed() bool {
+	if x != nil {
+		return x.SnapshotSealed
+	}
+	return false
 }
 
 // Event is the harness-emitted content unit. Ordering (seq) and integrity (prev_hash /
@@ -1969,10 +2005,14 @@ const file_common_proto_rawDesc = "" +
 	"\n" +
 	"HarnessEnd\x12\x14\n" +
 	"\x05state\x18\x01 \x01(\tR\x05state\x12-\n" +
-	"\x05error\x18\x02 \x01(\v2\x17.agentsessions.v1.ErrorR\x05error\"\xec\x01\n" +
+	"\x05error\x18\x02 \x01(\v2\x17.agentsessions.v1.ErrorR\x05error\"\x99\x03\n" +
 	"\tLifecycle\x124\n" +
 	"\x04kind\x18\x01 \x01(\x0e2 .agentsessions.v1.Lifecycle.KindR\x04kind\x12\x16\n" +
-	"\x06detail\x18\x02 \x01(\tR\x06detail\"\x90\x01\n" +
+	"\x06detail\x18\x02 \x01(\tR\x06detail\x12%\n" +
+	"\x0esnapshot_local\x18\x03 \x01(\tR\rsnapshotLocal\x122\n" +
+	"\x15snapshot_external_uri\x18\x04 \x01(\tR\x13snapshotExternalUri\x12'\n" +
+	"\x0fsnapshot_memory\x18\x05 \x01(\bR\x0esnapshotMemory\x12'\n" +
+	"\x0fsnapshot_sealed\x18\x06 \x01(\bR\x0esnapshotSealed\"\x90\x01\n" +
 	"\x04Kind\x12\x19\n" +
 	"\x15LIFECYCLE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11LIFECYCLE_SUSPEND\x10\x01\x12\x14\n" +

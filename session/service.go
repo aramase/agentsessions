@@ -16,7 +16,6 @@ import (
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
-	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/sqlitelog"
@@ -142,7 +141,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (*v1.ForkRespon
 	for i := 0; i < count; i++ {
 		uid := newUID()
 		child := s.store.Session(uid)
-		if err := controller.Fork(parent, child, atSeq); err != nil {
+		if err := s.placer.Fork(ctx, parent, child, req.GetSession(), uid, atSeq); err != nil {
 			return nil, status.Errorf(codes.Internal, "fork: %v", err)
 		}
 		h, _ := child.Head()
@@ -151,11 +150,11 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (*v1.ForkRespon
 	return &v1.ForkResponse{Children: children}, nil
 }
 
-// Suspend marks the session cold. In the co-located model the journal is already durable, so this
-// records a SUSPEND lifecycle marker; the worker is freed by the process exiting.
+// Suspend snapshots the incarnation and marks the session cold. The Placer records the SnapshotRef
+// in a SUSPEND lifecycle event (§5.1) and frees the worker via the Runtime SPI.
 func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (*v1.Session, error) {
 	log := s.store.Session(req.GetSession())
-	if err := appendLifecycle(log, api.LifecycleSuspend); err != nil {
+	if _, err := s.placer.Suspend(ctx, log, req.GetSession()); err != nil {
 		return nil, status.Errorf(codes.Internal, "suspend: %v", err)
 	}
 	h, _ := log.Head()
@@ -164,36 +163,17 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (*v1.Sess
 	return sp, nil
 }
 
-// Resume re-drives any interrupted turn (crash-recovery via replay) and records a RESUME marker.
+// Resume restores the incarnation via the Runtime SPI, re-drives any interrupted turn, and records a
+// RESUME marker.
 func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (*v1.Session, error) {
 	log := s.store.Session(req.GetSession())
-	c, err := controller.New(log, s.placer.Model())
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "controller: %v", err)
-	}
-	if _, err := c.Resume(ctx, s.placer.Harness()); err != nil {
+	if err := s.placer.Resume(ctx, log, req.GetSession()); err != nil {
 		return nil, status.Errorf(codes.Internal, "resume: %v", err)
-	}
-	if err := appendLifecycle(log, api.LifecycleResume); err != nil {
-		return nil, status.Errorf(codes.Internal, "resume marker: %v", err)
 	}
 	h, _ := log.Head()
 	sp := s.session(req.GetSession(), h, "", 0)
 	sp.ComputeState = v1.ComputeState_COMPUTE_LIVE
 	return sp, nil
-}
-
-func appendLifecycle(log eventlog.Store, kind api.LifecycleKind) error {
-	fence, err := log.NewFence()
-	if err != nil {
-		return err
-	}
-	head, err := log.Head()
-	if err != nil {
-		return err
-	}
-	_, err = log.Append(head, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: kind}})
-	return err
 }
 
 func execError(err error) error {

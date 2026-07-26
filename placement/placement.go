@@ -74,7 +74,94 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	return inc, nil
 }
 
-// Harness and Model expose the placed harness and live model for lifecycle ops not yet migrated onto
-// the Placer (Resume). Interim accessors — step 5 adds Placer.Resume/Suspend/Fork and removes these.
-func (p *Placer) Harness() api.Harness        { return p.backend.Harness() }
-func (p *Placer) Model() controller.ModelFunc { return p.model }
+// Suspend snapshots the incarnation to external storage, records the SnapshotRef in a SUSPEND
+// lifecycle event so Resume can recover it from the tamper-evident chain (§5.1), then frees the
+// worker via Stop. Snapshot and Stop key on the session id, so a minimal incarnation suffices.
+func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID string) (api.SnapshotRef, error) {
+	inc := api.Incarnation{ID: sessionUID}
+	ref, err := p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	if err := appendLifecycle(log, api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}); err != nil {
+		return api.SnapshotRef{}, err
+	}
+	if err := p.backend.Stop(ctx, inc); err != nil {
+		return api.SnapshotRef{}, err
+	}
+	return ref, nil
+}
+
+// Resume recovers the recorded SnapshotRef, Restores an incarnation, mints a NEW fence (superseding
+// any zombie writer), binds a controller to it, re-drives any interrupted turn (replay for a
+// filesystem-only backend), and records a RESUME marker. A session with no prior SUSPEND (crash mid
+// turn) falls back to re-provisioning from the session handle.
+func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID string) error {
+	ref, err := lastSuspendRef(log, sessionUID)
+	if err != nil {
+		return err
+	}
+	inc, err := p.backend.Restore(ctx, ref)
+	if err != nil {
+		return err
+	}
+	fence, err := log.NewFence()
+	if err != nil {
+		return err
+	}
+	inc.FenceToken = fence
+	c, err := controller.New(log, p.model, controller.WithFence(fence))
+	if err != nil {
+		return err
+	}
+	if _, err := c.Resume(ctx, p.backend.Harness()); err != nil {
+		return err
+	}
+	head, err := log.Head()
+	if err != nil {
+		return err
+	}
+	// RESUME marker under the incarnation's fence (controller.Resume used the same token).
+	_, err = log.Append(head, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleResume}})
+	return err
+}
+
+// Fork provisions the child's compute (replay-fork for filesystem-only backends) and copies the
+// parent's log prefix up to atSeq so the child shares the parent's hash chain.
+func (p *Placer) Fork(ctx context.Context, parent, child eventlog.Store, parentUID, childUID string, atSeq int64) error {
+	if _, err := p.backend.Fork(ctx, api.SnapshotRef{Local: parentUID}, api.ForkOpts{ChildSessionUID: childUID}); err != nil {
+		return err
+	}
+	return controller.Fork(parent, child, atSeq)
+}
+
+// appendLifecycle mints a fresh fence (superseding any prior writer) and records a lifecycle event.
+func appendLifecycle(log eventlog.Store, lc api.Lifecycle) error {
+	fence, err := log.NewFence()
+	if err != nil {
+		return err
+	}
+	head, err := log.Head()
+	if err != nil {
+		return err
+	}
+	_, err = log.Append(head, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &lc})
+	return err
+}
+
+// lastSuspendRef returns the SnapshotRef from the most recent SUSPEND event, or — when there is none
+// (a crash mid-turn, not a clean suspend) — a trivial ref naming the session so a filesystem-only
+// backend re-provisions and replays the journal.
+func lastSuspendRef(log eventlog.Store, sessionUID string) (api.SnapshotRef, error) {
+	recs, err := log.Read(1)
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	for i := len(recs) - 1; i >= 0; i-- {
+		ev := recs[i].Event
+		if ev.Kind == api.EventLifecycle && ev.Lifecycle != nil && ev.Lifecycle.Kind == api.LifecycleSuspend && ev.Lifecycle.Snapshot != nil {
+			return *ev.Lifecycle.Snapshot, nil
+		}
+	}
+	return api.SnapshotRef{Local: sessionUID}, nil
+}

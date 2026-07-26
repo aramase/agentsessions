@@ -188,6 +188,14 @@ message Lifecycle {
   }
   Kind kind = 1;
   string detail = 2; // e.g. "fork parent=<uid>@<seq>", baseline id
+  // SnapshotRef captured on SUSPEND (§5.1), carried inline so it rides the tamper-evident chain with
+  // no side table and no cross-file message dependency. A filesystem-only backend sets only
+  // snapshot_local (the session handle to replay) with snapshot_memory=false; a memory backend also
+  // sets snapshot_external_uri.
+  string snapshot_local = 3;
+  string snapshot_external_uri = 4;
+  bool snapshot_memory = 5;
+  bool snapshot_sealed = 6;
 }
 
 // ---- Event ----

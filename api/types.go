@@ -138,8 +138,9 @@ type Event struct {
 // Lifecycle marks a compute/session transition in the log (§7). Baseline is a replay /
 // compaction checkpoint (§1).
 type Lifecycle struct {
-	Kind   LifecycleKind
-	Detail string
+	Kind     LifecycleKind
+	Detail   string
+	Snapshot *SnapshotRef // captured state, set on SUSPEND (§5.1)
 }
 
 // LifecycleKind enumerates the lifecycle transitions recorded in the log.

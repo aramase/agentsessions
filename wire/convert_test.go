@@ -78,9 +78,15 @@ func TestEventRoundTrip(t *testing.T) {
 		"approval_result":  {Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{ToolCallID: "t1", Approved: true, Reason: "ok"}},
 		"usage":            {Kind: api.EventUsage, Usage: &api.Usage{Model: "gpt-x", InputTokens: 10, OutputTokens: 20, ReasoningTokens: 5}},
 		"lifecycle_fork":   {Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleFork, Detail: "parent@7"}},
-		"end":              {Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
-		"end_failed":       {Kind: api.EventEnd, End: &api.HarnessEnd{State: "FAILED", Error: &api.Error{Code: 13, Description: "boom"}}},
-		"error":            {Kind: api.EventError, Err: &api.Error{Code: 2, Description: "unknown"}},
+		"lifecycle_suspend": {Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{
+			Kind: api.LifecycleSuspend, Snapshot: &api.SnapshotRef{Local: "sess-x"},
+		}},
+		"lifecycle_suspend_memory": {Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{
+			Kind: api.LifecycleSuspend, Snapshot: &api.SnapshotRef{Local: "actor-1", ExternalURI: "gcs://snap/x", Memory: true, Sealed: true},
+		}},
+		"end":        {Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}},
+		"end_failed": {Kind: api.EventEnd, End: &api.HarnessEnd{State: "FAILED", Error: &api.Error{Code: 13, Description: "boom"}}},
+		"error":      {Kind: api.EventError, Err: &api.Error{Code: 2, Description: "unknown"}},
 	}
 	for name, ev := range cases {
 		t.Run(name, func(t *testing.T) {

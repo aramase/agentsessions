@@ -160,3 +160,54 @@ func TestNeutralityThroughPlacer(t *testing.T) {
 		t.Fatalf("substrate (MemorySnapshot=true) must accept a REQUIRES_MEMORY_SNAPSHOT harness, got %v", err)
 	}
 }
+
+// TestSuspendResumeRoundtripThroughSPI proves the §5.1 round-trip: Suspend snapshots via the Runtime
+// SPI and records the SnapshotRef in a SUSPEND event on the tamper-evident chain; Resume recovers
+// that ref, Restores a fresh incarnation, re-drives with a new fence, and records a RESUME marker —
+// no side table. For runtime/local the ref is the session handle (Memory:false).
+func TestSuspendResumeRoundtripThroughSPI(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("s")
+	p := placement.New(local.New(echoagent.Harness{}), echoagent.Model)
+
+	if _, err := p.Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	ref, err := p.Suspend(context.Background(), log, "s")
+	if err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if ref.Local != "s" || ref.Memory {
+		t.Fatalf("local suspend ref must be the session handle, filesystem-only: %+v", ref)
+	}
+
+	// The ref rides the chain: the SUSPEND event carries it (§5.1), no side table.
+	recs, _ := log.Read(1)
+	var carried *api.SnapshotRef
+	for _, r := range recs {
+		if r.Event.Kind == api.EventLifecycle && r.Event.Lifecycle != nil && r.Event.Lifecycle.Kind == api.LifecycleSuspend {
+			carried = r.Event.Lifecycle.Snapshot
+		}
+	}
+	if carried == nil || carried.Local != "s" {
+		t.Fatal("the SUSPEND event must carry the SnapshotRef on the chain (§5.1)")
+	}
+
+	// Resume recovers the ref, restores, and records a RESUME marker; the chain stays verifiable.
+	if err := p.Resume(context.Background(), log, "s"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	recs, _ = log.Read(1)
+	last := recs[len(recs)-1].Event
+	if last.Kind != api.EventLifecycle || last.Lifecycle == nil || last.Lifecycle.Kind != api.LifecycleResume {
+		t.Fatalf("resume must record a RESUME marker, last=%v", last.Kind)
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatalf("verify after suspend/resume: %v", err)
+	}
+}
