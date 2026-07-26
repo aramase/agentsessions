@@ -41,11 +41,28 @@ type Backend interface {
 type Placer struct {
 	backend Backend
 	model   controller.ModelFunc
+	dial    Dialer
 }
 
+// Dialer opens a Harness.Connect client to the harness at a runtime-specific address and returns a
+// closer for the connection. runtime/local uses a unix-socket address (the default dialer); substrate
+// uses the actor's mesh DNS reached through the atenet router (an injected dialer that owns the
+// router port-forward + sets the :authority). This is the one transport seam that differs per backend.
+type Dialer func(address string) (api.Harness, func() error, error)
+
+// Option configures a Placer.
+type Option func(*Placer)
+
+// WithDialer overrides how the Placer reaches a harness (default: unix-socket dial for runtime/local).
+func WithDialer(d Dialer) Option { return func(p *Placer) { p.dial = d } }
+
 // New builds a Placer over a compute backend and the live model.
-func New(backend Backend, model controller.ModelFunc) *Placer {
-	return &Placer{backend: backend, model: model}
+func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
+	p := &Placer{backend: backend, model: model, dial: unixDial}
+	for _, o := range opts {
+		o(p)
+	}
+	return p
 }
 
 // Exec places one turn: Create the incarnation, mint the fence from the log and stamp it on the
@@ -67,7 +84,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if err != nil {
 		return api.Incarnation{}, err
 	}
-	har, closeHarness, err := dial(inc.Address)
+	har, closeHarness, err := p.dial(inc.Address)
 	if err != nil {
 		return api.Incarnation{}, err
 	}
@@ -90,7 +107,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 // dial connects to a harnesswire server at a unix-socket address and returns the harness proxy plus a
 // closer for the connection. This is the single Harness.Connect path both runtime/local and substrate
 // drive through.
-func dial(address string) (api.Harness, func() error, error) {
+func unixDial(address string) (api.Harness, func() error, error) {
 	sock := strings.TrimPrefix(address, "unix://")
 	conn, err := grpc.NewClient(
 		"passthrough:///agentlocal",
@@ -137,7 +154,7 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err != nil {
 		return err
 	}
-	har, closeHarness, err := dial(inc.Address)
+	har, closeHarness, err := p.dial(inc.Address)
 	if err != nil {
 		return err
 	}
