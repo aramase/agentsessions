@@ -15,6 +15,8 @@ import (
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/placement"
+	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/session"
 	"github.com/aramase/agentsessions/sqlitelog"
 	"github.com/aramase/agentsessions/wire"
@@ -30,7 +32,7 @@ func newClient(t *testing.T) v1.SessionsClient {
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	v1.RegisterSessionsServer(srv, session.NewService(store, echoagent.Model, echoagent.Harness{}))
+	v1.RegisterSessionsServer(srv, session.NewService(store, placement.New(local.New(echoagent.Harness{}), echoagent.Model)))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 

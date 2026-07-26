@@ -18,6 +18,7 @@ import (
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
+	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/sqlitelog"
 	"github.com/aramase/agentsessions/wire"
 )
@@ -25,15 +26,15 @@ import (
 // Service implements v1.SessionsServer over a sqlitelog store and the controller.
 type Service struct {
 	v1.UnimplementedSessionsServer
-	store   *sqlitelog.Store
-	model   controller.ModelFunc
-	harness api.Harness
+	store  *sqlitelog.Store
+	placer *placement.Placer
 }
 
-// NewService builds the Sessions service over store, using model as the live model and harness as
-// the (single, M0) bring-your-own-harness.
-func NewService(store *sqlitelog.Store, model controller.ModelFunc, harness api.Harness) *Service {
-	return &Service{store: store, model: model, harness: harness}
+// NewService builds the Sessions service over store, driving executions through placer (which owns
+// the Runtime backend and the M0 harness). The bare harness is no longer held here — it comes from
+// the backend via the Placer.
+func NewService(store *sqlitelog.Store, placer *placement.Placer) *Service {
+	return &Service{store: store, placer: placer}
 }
 
 func newUID() string {
@@ -77,17 +78,15 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) error
 	if err != nil {
 		return status.Errorf(codes.Internal, "head: %v", err)
 	}
-	c, err := controller.New(log, s.model)
-	if err != nil {
-		return status.Errorf(codes.Internal, "controller: %v", err)
-	}
 	inputs := make([]api.Message, 0, len(req.GetInputs()))
 	for _, m := range req.GetInputs() {
 		if dm := wire.MessageFromProto(m); dm != nil {
 			inputs = append(inputs, *dm)
 		}
 	}
-	if err := c.Exec(stream.Context(), s.harness, inputs, req.GetExpectedLastSeq()); err != nil {
+	// Route the turn through the placement seam: Create the incarnation, mint+bind the fence, and
+	// drive the placed harness through the Runtime SPI instead of a co-located controller.
+	if _, err := s.placer.Exec(stream.Context(), log, req.GetSession(), inputs, req.GetExpectedLastSeq()); err != nil {
 		return execError(err)
 	}
 	recs, err := log.Read(headBefore + 1)
@@ -168,11 +167,11 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (*v1.Sess
 // Resume re-drives any interrupted turn (crash-recovery via replay) and records a RESUME marker.
 func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (*v1.Session, error) {
 	log := s.store.Session(req.GetSession())
-	c, err := controller.New(log, s.model)
+	c, err := controller.New(log, s.placer.Model())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "controller: %v", err)
 	}
-	if _, err := c.Resume(ctx, s.harness); err != nil {
+	if _, err := c.Resume(ctx, s.placer.Harness()); err != nil {
 		return nil, status.Errorf(codes.Internal, "resume: %v", err)
 	}
 	if err := appendLifecycle(log, api.LifecycleResume); err != nil {

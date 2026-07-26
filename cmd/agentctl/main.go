@@ -25,6 +25,8 @@ import (
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/placement"
+	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/session"
 	"github.com/aramase/agentsessions/sqlitelog"
 	"github.com/aramase/agentsessions/wire"
@@ -86,7 +88,7 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	svc := session.NewService(store, echoagent.Model, echoagent.Harness{})
+	svc := session.NewService(store, placement.New(local.New(echoagent.Harness{}), echoagent.Model))
 	sock := fmt.Sprintf("%s/agentctl-%d.sock", os.TempDir(), os.Getpid())
 	_ = os.Remove(sock)
 	lis, err := net.Listen("unix", sock)
