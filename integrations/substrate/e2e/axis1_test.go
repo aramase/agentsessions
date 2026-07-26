@@ -8,27 +8,34 @@
 // SPI mapping + our determinism model on real substrate, no memory dependency. Axis 2
 // (REQUIRES_MEMORY_SNAPSHOT on a micro-VM) is a separate driver.
 //
-// The one seam this cannot resolve without a live cluster is how to auth the ate-api Control client
-// (substrate CI matrixes cert vs token). It is env-configurable and TODO-marked; the first CI run
-// resolves it. Everything else — the Placer wiring, the mesh dial, the conformance assertion — is the
-// same code paths exercised by the unit and runtime/local tests.
+// The ate-api Control client authenticates with substrate's token scheme (TLS on :443 plus a bearer
+// SA JWT minted for the api-server's audience); see controlConn. Everything else — the Placer wiring,
+// the mesh dial, the conformance assertion — is the same code paths exercised by the unit and
+// runtime/local tests.
 package e2e
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
+	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/controller"
@@ -93,17 +100,71 @@ func kubectlPortForward(t *testing.T, namespace, svc string, remotePort int) (in
 	}
 }
 
-// controlConn dials the port-forwarded ate-api Control. TODO(first-CI): substrate matrixes cert vs
-// token auth on :443; wire the real credentials here (spike §3e picks token). Until then this is an
-// insecure h2c dial, overridable by env, and the first CI run pins the exact scheme.
+// controlConn dials the port-forwarded ate-api Control with the token-auth scheme substrate's kind
+// install configures (--ateapi-client-auth=token): TLS on :443 plus a per-RPC bearer SA JWT. Over a
+// 127.0.0.1 port-forward the server cert's SAN (api.ate-system.svc) cannot match the loopback dial
+// target, so server verification is skipped — the transport is a local kubectl tunnel, and the token,
+// not the channel, is the credential. The token is minted by mintControlToken for the audience the
+// api-server binds; the server authenticates any valid SA JWT (no per-identity authz). Env-overridable.
 func controlConn(t *testing.T, localPort int) *grpc.ClientConn {
 	t.Helper()
 	target := env("ATEAPI_TARGET", fmt.Sprintf("127.0.0.1:%d", localPort))
-	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	tlsCreds := credentials.NewTLS(&tls.Config{InsecureSkipVerify: true}) //nolint:gosec // loopback port-forward tunnel; the SA JWT is the credential
+	conn, err := grpc.NewClient(target,
+		grpc.WithTransportCredentials(tlsCreds),
+		grpc.WithPerRPCCredentials(bearerToken(mintControlToken(t))),
+	)
 	if err != nil {
 		t.Fatalf("ate-api dial: %v", err)
 	}
 	return conn
+}
+
+// mintControlToken issues a short-lived SA JWT for the ate-api audience via `kubectl create token` —
+// the external-client analog of the projected token substrate's in-cluster callers mount. The
+// audience must equal the api-server's --client-jwt-audience; the SA identity is unconstrained.
+func mintControlToken(t *testing.T) string {
+	t.Helper()
+	sa := env("ATEAPI_TOKEN_SA", "default")
+	saNS := env("ATEAPI_TOKEN_SA_NS", env("ATE_SYSTEM_NS", "ate-system"))
+	aud := env("ATEAPI_AUDIENCE", "api.ate-system.svc")
+	cmd := exec.Command("kubectl", "create", "token", sa, "-n", saNS, "--audience", aud)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("kubectl create token %s/%s (aud=%s): %v: %s", saNS, sa, aud, err, stderr.String())
+	}
+	tok := strings.TrimSpace(string(out))
+	if tok == "" {
+		t.Fatal("kubectl create token returned an empty token")
+	}
+	return tok
+}
+
+// bearerToken presents a static SA JWT as gRPC per-RPC credentials. RequireTransportSecurity is true
+// so the token only ever rides the TLS channel, never cleartext.
+type bearerToken string
+
+func (b bearerToken) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + string(b)}, nil
+}
+
+func (bearerToken) RequireTransportSecurity() bool { return true }
+
+// ensureAtespace idempotently creates the atespace actors are placed in. Substrate requires it to
+// exist before CreateActor (like a namespace); it is out-of-band setup, not part of our runtime SPI,
+// so the e2e provisions it directly over the Control API rather than through the Placer.
+func ensureAtespace(t *testing.T, conn *grpc.ClientConn, name string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := atepb.NewControlClient(conn).CreateAtespace(ctx, &atepb.CreateAtespaceRequest{
+		Atespace: &atepb.Atespace{Metadata: &atepb.ResourceMetadata{Name: name}},
+	})
+	if err != nil && status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("create atespace %q: %v", name, err)
+	}
 }
 
 // meshDialer returns a placement.Dialer that reaches an actor's harnesswire server through the
@@ -147,7 +208,9 @@ func TestAxis1PlacedExecReplayOnSubstrate(t *testing.T) {
 	routerPort, stopRouter := kubectlPortForward(t, ns, env("ROUTER_SVC", "atenet-router"), 80)
 	defer stopRouter()
 
-	adapter := ateadapter.New(controlConn(t, ctlPort), "")
+	ctlConn := controlConn(t, ctlPort)
+	ensureAtespace(t, ctlConn, atespace)
+	adapter := ateadapter.New(ctlConn, "")
 	// The echo harness declares STATELESS_REPLAY (axis 1); the descriptor is what the placement gate
 	// reads before Create (substrate's harness is remote, so it is configured, not introspected).
 	echoDesc := api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}
