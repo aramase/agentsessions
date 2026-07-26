@@ -1,0 +1,217 @@
+// Package e2e drives the agentsessions conformance path against a REAL agent-substrate ate-system in
+// kind. It lives in the substrate integration module (not core), so the neutral core still imports no
+// substrate. It is gated on SUBSTRATE_E2E=1 and a live cluster, so a normal `go test ./...` skips it.
+//
+// Axis 1 (this file): the STATELESS_REPLAY path. The Placer places the echo harness on substrate,
+// cold-boots the actor (ResumeActor{boot:true}), drives one turn over the atenet mesh, then the
+// controller replays the durable journal byte-identically with zero model invocations — proving the
+// SPI mapping + our determinism model on real substrate, no memory dependency. Axis 2
+// (REQUIRES_MEMORY_SNAPSHOT on a micro-VM) is a separate driver.
+//
+// The one seam this cannot resolve without a live cluster is how to auth the ate-api Control client
+// (substrate CI matrixes cert vs token). It is env-configurable and TODO-marked; the first CI run
+// resolves it. Everything else — the Placer wiring, the mesh dial, the conformance assertion — is the
+// same code paths exercised by the unit and runtime/local tests.
+package e2e
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"reflect"
+	"regexp"
+	"testing"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/aramase/agentsessions/api"
+	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/controller"
+	"github.com/aramase/agentsessions/eventlog"
+	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/harnesswire"
+	ateadapter "github.com/aramase/agentsessions/integrations/substrate"
+	"github.com/aramase/agentsessions/placement"
+	"github.com/aramase/agentsessions/runtime/substrate"
+	"github.com/aramase/agentsessions/sqlitelog"
+)
+
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// kubectlPortForward forwards a Service port to a local ephemeral port via a `kubectl port-forward`
+// subprocess (no client-go dependency), returning the local port and a stop func. It parses the
+// "Forwarding from 127.0.0.1:<port>" line kubectl prints when ready.
+func kubectlPortForward(t *testing.T, namespace, svc string, remotePort int) (int, func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, "kubectl", "port-forward",
+		"-n", namespace, "svc/"+svc, fmt.Sprintf(":%d", remotePort))
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		t.Fatalf("port-forward %s/%s: %v", namespace, svc, err)
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		t.Fatalf("port-forward %s/%s start: %v", namespace, svc, err)
+	}
+	re := regexp.MustCompile(`Forwarding from 127\.0\.0\.1:(\d+)`)
+	local := make(chan int, 1)
+	go func() {
+		sc := bufio.NewScanner(stdout)
+		for sc.Scan() {
+			if m := re.FindStringSubmatch(sc.Text()); m != nil {
+				var p int
+				fmt.Sscanf(m[1], "%d", &p)
+				local <- p
+				return
+			}
+		}
+		close(local)
+	}()
+	select {
+	case p, ok := <-local:
+		if !ok {
+			cancel()
+			t.Fatalf("port-forward %s/%s: never became ready", namespace, svc)
+		}
+		return p, cancel
+	case <-time.After(30 * time.Second):
+		cancel()
+		t.Fatalf("port-forward %s/%s: timeout waiting for ready", namespace, svc)
+		return 0, cancel
+	}
+}
+
+// controlConn dials the port-forwarded ate-api Control. TODO(first-CI): substrate matrixes cert vs
+// token auth on :443; wire the real credentials here (spike §3e picks token). Until then this is an
+// insecure h2c dial, overridable by env, and the first CI run pins the exact scheme.
+func controlConn(t *testing.T, localPort int) *grpc.ClientConn {
+	t.Helper()
+	target := env("ATEAPI_TARGET", fmt.Sprintf("127.0.0.1:%d", localPort))
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("ate-api dial: %v", err)
+	}
+	return conn
+}
+
+// meshDialer returns a placement.Dialer that reaches an actor's harnesswire server through the
+// port-forwarded atenet router: it dials 127.0.0.1:<routerPort> with the :authority set to the
+// actor's mesh DNS (Incarnation.Address), which is how the router routes (and auto-resumes). h2c —
+// the router's Envoy accepts cleartext HTTP/2 downstream per source analysis of its xDS config;
+// pending the first CI run.
+func meshDialer(routerPort int) placement.Dialer {
+	return func(address string) (api.Harness, func() error, error) {
+		conn, err := grpc.NewClient(
+			fmt.Sprintf("127.0.0.1:%d", routerPort),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithAuthority(address), // <actor>.<atespace>.actors.resources.substrate.ate.dev
+			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", routerPort))
+			}),
+		)
+		if err != nil {
+			return nil, nil, err
+		}
+		return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
+	}
+}
+
+// TestAxis1PlacedExecReplayOnSubstrate is the axis-1 acceptance: one placed turn on real substrate
+// (ResumeActor{boot:true} + mesh drive) replays byte-identically with zero model invocations, and the
+// tamper-evident chain still verifies.
+func TestAxis1PlacedExecReplayOnSubstrate(t *testing.T) {
+	if os.Getenv("SUBSTRATE_E2E") == "" {
+		t.Skip("set SUBSTRATE_E2E=1 (and a live ate-system + KUBECONFIG) to run the substrate axis-1 e2e")
+	}
+	ns := env("ATE_SYSTEM_NS", "ate-system")
+	atespace := env("SUBSTRATE_ATESPACE", "e2e")
+	tmplNS := env("ACTORTEMPLATE_NS", "ate-agentsessions")
+	tmplName := env("ACTORTEMPLATE_NAME", "echo-harness")
+
+	// Port-forward the Control (lifecycle) and the atenet router (Harness.Connect).
+	ctlPort, stopCtl := kubectlPortForward(t, ns, env("ATEAPI_SVC", "api"), 443)
+	defer stopCtl()
+	routerPort, stopRouter := kubectlPortForward(t, ns, env("ROUTER_SVC", "atenet-router"), 80)
+	defer stopRouter()
+
+	adapter := ateadapter.New(controlConn(t, ctlPort), "")
+	// The echo harness declares STATELESS_REPLAY (axis 1); the descriptor is what the placement gate
+	// reads before Create (substrate's harness is remote, so it is configured, not introspected).
+	echoDesc := api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}
+	backend := substrate.New(adapter, atespace, substrate.ObjectRef{Namespace: tmplNS, Name: tmplName}, echoDesc)
+
+	dial := meshDialer(routerPort)
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("e2e")
+	p := placement.New(backend, echoagent.Model, placement.WithDialer(dial))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Place + drive one turn: Create the actor (boot:true), dial the harness over the mesh, run it.
+	if _, err := p.Exec(ctx, log, "e2e", []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+		t.Fatalf("placed exec on substrate: %v", err)
+	}
+	recs, _ := log.Read(1)
+	live := outputsOf(recs)
+	if len(live) == 0 {
+		t.Fatal("placed turn produced no output")
+	}
+
+	// Replay through the same placed harness: the recorded answer is served, the model is not invoked.
+	har, closeHar, err := dial(meshAddress(atespace, "e2e"))
+	if err != nil {
+		t.Fatalf("mesh dial for replay: %v", err)
+	}
+	defer closeHar()
+	c2, err := controller.New(log, echoagent.Model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := c2.Replay(ctx, har)
+	if err != nil {
+		t.Fatalf("replay on substrate: %v", err)
+	}
+	if !reflect.DeepEqual(live, replay) {
+		t.Fatalf("substrate replay diverged: live=%v replay=%v", live, replay)
+	}
+	if c2.ModelInvocations() != 0 {
+		t.Fatalf("substrate replay invoked the model %d times (I1)", c2.ModelInvocations())
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatalf("chain verify after placed exec+replay: %v", err)
+	}
+}
+
+func outputsOf(recs []eventlog.Record) []string {
+	var out []string
+	for _, r := range recs {
+		if r.Event.Kind == api.EventOutput && r.Event.Message != nil {
+			out = append(out, r.Event.Message.Text())
+		}
+	}
+	return out
+}
+
+// meshAddress is the actor's atenet mesh DNS (Incarnation.Address): the authority the router routes
+// on. Deterministic from (atespace, session), so replay re-dials the same actor without a lookup.
+func meshAddress(atespace, session string) string {
+	return session + "." + atespace + "." + ateadapter.DefaultDNSSuffix
+}

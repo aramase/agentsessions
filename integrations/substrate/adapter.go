@@ -104,7 +104,7 @@ func (ad *Adapter) GetActor(ctx context.Context, actor substrate.ActorRef) (subs
 // actorInfo maps a substrate Actor onto the narrowed ActorInfo the backend needs. MeshDNS is the
 // atenet router authority the controller dials. Source analysis of the Envoy router config indicates
 // h2c end-to-end (explicit HTTP/2 upstream to the actor + AUTO/h2c downstream), so a harnesswire gRPC
-// harness should be reachable over the mesh with no HTTP/1 shim — pending live-cluster confirm.
+// harness should be reachable over the mesh with no HTTP/1 shim — pending the first CI run.
 func (ad *Adapter) actorInfo(a *atepb.Actor) substrate.ActorInfo {
 	info := substrate.ActorInfo{
 		Status: actorStatus(a.GetStatus()),

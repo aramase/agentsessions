@@ -1,0 +1,100 @@
+# Axis-1 conformance on REAL agent-substrate, in kind. Separate from the fast per-PR gate (ci.yml):
+# this is heavy (kind + KVM + ate-system + micro-VM assets on other axes), so it runs nightly and on
+# manual dispatch, NOT on every PR. It copies agent-substrate's own pr-workflow.yaml recipe (free-disk,
+# /dev/kvm udev rule, kind bring-up). Axis 1 = gVisor + the echo harness + ResumeActor{boot:true} +
+# journal replay — the cheapest always-green path that empirically closes the gRPC-over-router (Q1)
+# and ResumeActor-vs-auto-resume (§3b) questions. Axis 2 (micro-VM memory snapshot) is added later.
+name: substrate-e2e
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # nightly
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# The agent-substrate commit our adapter's go.mod pins; keep them in lockstep so the cluster's
+# ateapi and our generated client agree.
+env:
+  SUBSTRATE_REF: aa1d14a7b33b
+  KO_DOCKER_REPO: localhost:5001
+
+jobs:
+  axis1-gvisor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agentsessions
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup ko
+        uses: ko-build/setup-ko@v0.7
+
+      - name: Nested substrate module builds + tests (core stays substrate-free)
+        # The adapter lives in its own module; the core module must import zero substrate. This asserts
+        # both: the nested module tests pass, and `go list -deps` on core has no agent-substrate.
+        run: |
+          cd integrations/substrate && go test ./... && cd -
+          test "$(go list -deps ./... | grep -c agent-substrate)" = "0"
+
+      - name: Clone agent-substrate (pinned)
+        run: |
+          git clone https://github.com/agent-substrate/substrate _substrate
+          git -C _substrate checkout "${SUBSTRATE_REF}"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Enable KVM
+        # create-kind-cluster.sh mounts /dev/kvm into the node; grant access via the udev rule
+        # substrate's own CI uses. (gVisor itself does not need KVM, but the bring-up script expects it.)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Create kind cluster + install ate-system
+        working-directory: _substrate
+        run: |
+          hack/create-kind-cluster.sh
+          # token auth is the simpler first cut (spike §3e); cert is a later matrix dimension.
+          hack/install-ate-kind.sh --deploy-ate-system --ateapi-client-auth=token
+
+      - name: Build + apply the echo harness ActorTemplate + WorkerPool
+        # Two ko:// image refs span two modules: our harnessnode (this repo) and substrate's
+        # ateom-gvisor (the clone). Resolve each in its own module, substitute into the manifest, apply.
+        # TODO(first-CI): confirm the exact resolve/apply path — substrate may expect `kubectl ate`.
+        run: |
+          HARNESS_IMG="$(ko build --bare ./cmd/harnessnode)"
+          ATEOM_IMG="$(cd _substrate && ko build --bare ./cmd/ateom-gvisor)"
+          sed -e "s#ko://github.com/aramase/agentsessions/cmd/harnessnode#${HARNESS_IMG}#" \
+              -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
+              deploy/substrate/echo-actortemplate.yaml | kubectl --context kind-kind apply -f -
+          kubectl --context kind-kind wait --for=condition=Ready \
+            actortemplate/echo-harness -n ate-agentsessions --timeout=600s
+
+      - name: Axis-1 conformance (placed exec + byte-identical replay on substrate)
+        env:
+          SUBSTRATE_E2E: "1"
+        run: |
+          cd integrations/substrate
+          go test -v -run TestAxis1PlacedExecReplayOnSubstrate ./e2e/
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl --context kind-kind get actortemplate,workerpool,actors,pods -A -o wide || true
+          for ns in ate-agentsessions ate-system; do
+            for p in $(kubectl --context kind-kind get pods -n "$ns" -o name 2>/dev/null); do
+              echo "=== logs: $ns/$p ==="
+              kubectl --context kind-kind logs -n "$ns" "$p" --all-containers --tail=200 2>/dev/null || true
+            done
+          done
