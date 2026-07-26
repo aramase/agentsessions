@@ -23,6 +23,10 @@ import (
 )
 
 func newClient(t *testing.T) v1.SessionsClient {
+	return newClientWith(t, local.New(echoagent.Harness{}))
+}
+
+func newClientWith(t *testing.T, backend placement.Backend) v1.SessionsClient {
 	t.Helper()
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
@@ -32,7 +36,7 @@ func newClient(t *testing.T) v1.SessionsClient {
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	v1.RegisterSessionsServer(srv, session.NewService(store, placement.New(local.New(echoagent.Harness{}), echoagent.Model)))
+	v1.RegisterSessionsServer(srv, session.NewService(store, placement.New(backend, echoagent.Model)))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 
@@ -46,6 +50,31 @@ func newClient(t *testing.T) v1.SessionsClient {
 	}
 	t.Cleanup(func() { conn.Close() })
 	return v1.NewSessionsClient(conn)
+}
+
+// memHarness declares REQUIRES_MEMORY_SNAPSHOT — unplaceable on the filesystem-only local backend.
+type memHarness struct{}
+
+func (memHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}, nil
+}
+func (memHarness) Run(context.Context, *api.Start, api.EventSink) error { return nil }
+
+// TestExecUnplaceableIsFailedPrecondition proves the placement gate surfaces at the API: a
+// REQUIRES_MEMORY_SNAPSHOT harness on the filesystem-only local backend is refused with
+// codes.FailedPrecondition, distinct from the CAS/fence codes.Aborted.
+func TestExecUnplaceableIsFailedPrecondition(t *testing.T) {
+	c := newClientWith(t, local.New(memHarness{}))
+	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+		Session: "s",
+		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unplaceable harness: want FailedPrecondition, got %v", err)
+	}
 }
 
 func execOutputs(t *testing.T, c v1.SessionsClient, sess, input string, expected int64) []string {

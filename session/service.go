@@ -198,6 +198,8 @@ func appendLifecycle(log eventlog.Store, kind api.LifecycleKind) error {
 
 func execError(err error) error {
 	switch {
+	case errors.Is(err, placement.ErrUnplaceable):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
 	default:

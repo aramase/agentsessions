@@ -7,11 +7,19 @@ package placement
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
 )
+
+// ErrUnplaceable is returned when a harness requires a capability the chosen backend cannot provide
+// (e.g. REQUIRES_MEMORY_SNAPSHOT on a filesystem-only pod). The gate runs BEFORE Create, so an
+// unplaceable harness never provisions compute or writes to the log; session.Service surfaces it as
+// codes.FailedPrecondition.
+var ErrUnplaceable = errors.New("placement: harness cannot be placed on this runtime")
 
 // Backend is the compute Runtime the Placer drives. In the in-process M0 path it also provides the
 // harness handle directly via Harness(); the socket variant (design note §10 step 6) will instead have
@@ -36,6 +44,17 @@ func New(backend Backend, model controller.ModelFunc) *Placer {
 // incarnation, bind a controller to that same token, and drive the (placed) harness. The log stays the
 // single fence authority; the returned incarnation carries the fence for Suspend/Resume (step 5).
 func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string, inputs []api.Message, expectedLastSeq int64) (api.Incarnation, error) {
+	// Placement gate (honest degradation): refuse a harness the backend cannot host BEFORE
+	// provisioning any compute or writing to the log — e.g. a REQUIRES_MEMORY_SNAPSHOT harness on a
+	// filesystem-only backend — so it fails fast at the API instead of mid-run.
+	desc, err := p.backend.Harness().Describe(ctx)
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	if !controller.CanPlace(desc.Capabilities, p.backend.Capabilities()) {
+		return api.Incarnation{}, fmt.Errorf("%w: harness %q needs %s but the runtime provides MemorySnapshot=%v",
+			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, p.backend.Capabilities().MemorySnapshot)
+	}
 	inc, err := p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID})
 	if err != nil {
 		return api.Incarnation{}, err

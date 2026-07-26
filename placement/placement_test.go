@@ -2,12 +2,16 @@ package placement_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/controller"
+	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
+	"github.com/aramase/agentsessions/runtime/substrate"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
@@ -71,7 +75,88 @@ func TestPlacerFenceBinding(t *testing.T) {
 	if inc2.FenceToken <= inc1.FenceToken {
 		t.Fatalf("each placement must mint a strictly newer fence: %d then %d", inc1.FenceToken, inc2.FenceToken)
 	}
+	// The stamped fence is REAL: a controller bound to the first (now superseded) incarnation's fence
+	// is fenced out on append. expected_last_seq is current, so the failure isolates the fence.
+	head2, _ := log.Head()
+	stale, err := controller.New(log, echoagent.Model, controller.WithFence(inc1.FenceToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stale.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "stale")}, head2); !errors.Is(err, eventlog.ErrFenced) {
+		t.Fatalf("a controller bound to the superseded fence must be fenced out, got %v", err)
+	}
 	if err := log.Verify(); err != nil {
 		t.Fatalf("verify: %v", err)
+	}
+}
+
+// memSnapshotHarness declares REQUIRES_MEMORY_SNAPSHOT — placeable on substrate, refused on a
+// filesystem-only backend. Its Run is a no-op (the gate decision, not execution, is under test).
+type memSnapshotHarness struct{}
+
+func (memSnapshotHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}, nil
+}
+func (memSnapshotHarness) Run(context.Context, *api.Start, api.EventSink) error { return nil }
+
+// stubControl is a no-op substrate.ControlClient so a substrate backend can be driven in tests
+// without a real ate-api-server.
+type stubControl struct{}
+
+func (stubControl) CreateActor(context.Context, substrate.ActorRef, substrate.ObjectRef) error {
+	return nil
+}
+func (stubControl) ResumeActor(context.Context, substrate.ActorRef, bool) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{}, nil
+}
+func (stubControl) SuspendActor(context.Context, substrate.ActorRef) (string, error) { return "", nil }
+func (stubControl) DeleteActor(context.Context, substrate.ActorRef) error            { return nil }
+func (stubControl) GetActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{}, nil
+}
+
+// placeableSubstrate wraps a substrate backend with an in-process harness so it satisfies
+// placement.Backend for the gate test (real substrate dials the actor; here the harness is a stub).
+type placeableSubstrate struct {
+	*substrate.Backend
+	harness api.Harness
+}
+
+func (p placeableSubstrate) Harness() api.Harness { return p.harness }
+
+// TestNeutralityThroughPlacer is the spike §8 criterion driven end-to-end through the Placer's gate:
+// a REQUIRES_MEMORY_SNAPSHOT harness is REFUSED on runtime/local (MemorySnapshot=false) with
+// ErrUnplaceable — before any compute is provisioned or any record is written — and ACCEPTED on
+// substrate (MemorySnapshot=true). Honest degradation is now an end-to-end property of the Placer,
+// not a bare CanPlace unit assertion.
+func TestNeutralityThroughPlacer(t *testing.T) {
+	// local (filesystem-only) must refuse.
+	store1, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store1.Close()
+	log1 := store1.Session("s")
+	localPlacer := placement.New(local.New(memSnapshotHarness{}), echoagent.Model)
+	if _, err := localPlacer.Exec(context.Background(), log1, "s", nil, 0); !errors.Is(err, placement.ErrUnplaceable) {
+		t.Fatalf("local (MemorySnapshot=false) must refuse a REQUIRES_MEMORY_SNAPSHOT harness, got %v", err)
+	}
+	if h, _ := log1.Head(); h != 0 {
+		t.Fatalf("a refused placement must not provision or write to the log, head=%d", h)
+	}
+
+	// substrate (MemorySnapshot=true) must accept: the gate passes and the turn proceeds.
+	store2, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store2.Close()
+	sub := placeableSubstrate{
+		Backend: substrate.New(stubControl{}, "space", substrate.ObjectRef{Name: "echo"}),
+		harness: memSnapshotHarness{},
+	}
+	subPlacer := placement.New(sub, echoagent.Model)
+	if _, err := subPlacer.Exec(context.Background(), store2.Session("s"), "s", nil, 0); err != nil {
+		t.Fatalf("substrate (MemorySnapshot=true) must accept a REQUIRES_MEMORY_SNAPSHOT harness, got %v", err)
 	}
 }
