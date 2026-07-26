@@ -59,6 +59,12 @@ type Option func(*Controller)
 // emits a host-mediated ToolCall gets an error (in-harness-reported tools use Report instead).
 func WithToolExecutor(tool ToolFunc) Option { return func(c *Controller) { c.tool = tool } }
 
+// WithFence binds the controller to a fence the caller already minted from the log (via NewFence),
+// instead of minting its own. The placement layer uses this so the fence it stamps on the
+// incarnation and the fence the controller appends under are the same log-minted token — the log
+// stays the single fence authority. Fences are >= 1, so WithFence(0) is a no-op (mint-my-own).
+func WithFence(token int64) Option { return func(c *Controller) { c.fence = token } }
+
 // Controller drives one session's log with a single incarnation (fence). It is meant to be driven
 // by a single goroutine: Exec and Replay are NOT safe to call concurrently on the same Controller
 // (liveModelCalls is unsynchronized). Concurrency BETWEEN controllers/processes is safe — the log's
@@ -71,16 +77,22 @@ type Controller struct {
 	liveModelCalls int
 }
 
-// New starts a fresh incarnation over log: it advances the fencing token (superseding any prior
-// incarnation, e.g. a dead pod) and returns a controller ready to Exec or Replay.
+// New starts an incarnation over log. Unless the caller supplies a fence via WithFence, it advances
+// the log's fencing token (superseding any prior incarnation, e.g. a dead pod) and binds to it. When
+// WithFence is supplied (the placement layer minted the fence and stamped it on the incarnation), New
+// uses that token instead — the log remains the single authority either way.
 func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, error) {
-	fence, err := log.NewFence()
-	if err != nil {
-		return nil, err
-	}
-	c := &Controller{log: log, model: model, fence: fence}
+	c := &Controller{log: log, model: model}
 	for _, o := range opts {
 		o(c)
+	}
+	// Fences are >= 1, so a zero fence means no WithFence was supplied: mint one from the log.
+	if c.fence == 0 {
+		fence, err := log.NewFence()
+		if err != nil {
+			return nil, err
+		}
+		c.fence = fence
 	}
 	return c, nil
 }

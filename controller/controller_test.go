@@ -162,6 +162,45 @@ func TestReplayI0Mismatch(t *testing.T) {
 	}
 }
 
+// TestWithFence proves the placement layer's fence binding: a controller built WithFence(k) appends
+// under the SUPPLIED fence k rather than minting its own, so once a later incarnation mints k+1 via
+// NewFence(), the k-bound controller is fenced out — the fresh-pod-supersedes-zombie guarantee,
+// driven by the caller's fence instead of controller.New's self-mint.
+func TestWithFence(t *testing.T) {
+	log := memStore(t)
+
+	// Incarnation A: the placer mints a fence and binds controller A to it.
+	fA, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cA, err := controller.New(log, echoModel, controller.WithFence(fA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cA.Exec(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+		t.Fatalf("controller bound to the current fence should append: %v", err)
+	}
+	head, err := log.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Incarnation B supersedes A: a fresh fence (fA+1) is minted from the log.
+	if _, err := log.NewFence(); err != nil {
+		t.Fatal(err)
+	}
+	// A controller still bound to the stale fence fA must be fenced out on its next append. The
+	// expected_last_seq is correct (head), so the failure isolates the FENCE, not the CAS.
+	cStale, err := controller.New(log, echoModel, controller.WithFence(fA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cStale.Exec(context.Background(), &echoHarness{}, []api.Message{msg("again")}, head); !errors.Is(err, eventlog.ErrFenced) {
+		t.Fatalf("a controller bound to a superseded fence must be fenced out, got %v", err)
+	}
+}
+
 // TestSingleWriterCAS: a second turn with a stale expected_last_seq is rejected at the INPUT append.
 func TestSingleWriterCAS(t *testing.T) {
 	log := memStore(t)
