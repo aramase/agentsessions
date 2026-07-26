@@ -23,6 +23,7 @@ import (
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/harnesswire"
+	"github.com/aramase/agentsessions/runtime/substrate"
 )
 
 func env(key, def string) string {
@@ -33,8 +34,8 @@ func env(key, def string) string {
 }
 
 func main() {
-	grpcAddr := env("HARNESS_ADDR", ":80")       // harnesswire gRPC; the mesh routes here
-	readyzAddr := env("HARNESS_READYZ", ":8081") // HTTP readyz for the ActorTemplate probe
+	grpcAddr := env("HARNESS_ADDR", ":"+substrate.HarnessPort) // harnesswire gRPC; the driver dials PodIP here
+	readyzAddr := env("HARNESS_READYZ", ":8081")               // HTTP readyz for the ActorTemplate probe
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

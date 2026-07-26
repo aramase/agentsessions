@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"reflect"
@@ -167,32 +166,23 @@ func ensureAtespace(t *testing.T, conn *grpc.ClientConn, name string) {
 	}
 }
 
-// meshDialer returns a placement.Dialer that reaches an actor's harnesswire server through the
-// port-forwarded atenet router: it dials 127.0.0.1:<routerPort> with the :authority set to the
-// actor's mesh DNS (Incarnation.Address), which is how the router routes (and auto-resumes). h2c —
-// the router's Envoy accepts cleartext HTTP/2 downstream per source analysis of its xDS config;
-// pending the first CI run.
-func meshDialer(routerPort int) placement.Dialer {
-	return func(address string) (api.Harness, func() error, error) {
-		conn, err := grpc.NewClient(
-			fmt.Sprintf("127.0.0.1:%d", routerPort),
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithAuthority(address), // <actor>.<atespace>.actors.resources.substrate.ate.dev
-			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", routerPort))
-			}),
-		)
-		if err != nil {
-			return nil, nil, err
-		}
-		return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
+// dialActor opens a harnesswire client to the actor's harness over h2c at a host:port — the actor's
+// PodIP:HarnessPort (Incarnation.Address). This is the same direct dial the Placer's default dialer
+// performs; the e2e reuses it for the replay re-dial. The atenet mesh is HTTP/1.1-only to actors, so
+// gRPC bypasses the router and reaches the pod directly — which requires in-cluster pod-network
+// reachability (see the in-cluster runner, slice 2).
+func dialActor(t *testing.T, address string) (api.Harness, func() error) {
+	t.Helper()
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial harness %s: %v", address, err)
 	}
+	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close
 }
 
 // TestAxis1PlacedExecReplayOnSubstrate is the axis-1 acceptance: one placed turn on real substrate
-// (ResumeActor{boot:true} + mesh drive) replays byte-identically with zero model invocations, and the
-// tamper-evident chain still verifies.
+// (ResumeActor{boot:true} + direct PodIP:HarnessPort dial) replays byte-identically with zero model
+// invocations, and the tamper-evident chain still verifies.
 func TestAxis1PlacedExecReplayOnSubstrate(t *testing.T) {
 	if os.Getenv("SUBSTRATE_E2E") == "" {
 		t.Skip("set SUBSTRATE_E2E=1 (and a live ate-system + KUBECONFIG) to run the substrate axis-1 e2e")
@@ -202,11 +192,11 @@ func TestAxis1PlacedExecReplayOnSubstrate(t *testing.T) {
 	tmplNS := env("ACTORTEMPLATE_NS", "ate-agentsessions")
 	tmplName := env("ACTORTEMPLATE_NAME", "echo-harness")
 
-	// Port-forward the Control (lifecycle) and the atenet router (Harness.Connect).
+	// Port-forward the ate-api Control (lifecycle). The harness is reached directly at the actor's
+	// PodIP:HarnessPort (Path A), not the router — so once this driver runs in-cluster (slice 2) it
+	// needs no router port-forward at all. Externally the Control port-forward still works.
 	ctlPort, stopCtl := kubectlPortForward(t, ns, env("ATEAPI_SVC", "api"), 443)
 	defer stopCtl()
-	routerPort, stopRouter := kubectlPortForward(t, ns, env("ROUTER_SVC", "atenet-router"), 80)
-	defer stopRouter()
 
 	ctlConn := controlConn(t, ctlPort)
 	ensureAtespace(t, ctlConn, atespace)
@@ -216,20 +206,21 @@ func TestAxis1PlacedExecReplayOnSubstrate(t *testing.T) {
 	echoDesc := api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}
 	backend := substrate.New(adapter, atespace, substrate.ObjectRef{Namespace: tmplNS, Name: tmplName}, echoDesc)
 
-	dial := meshDialer(routerPort)
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
 	log := store.Session("e2e")
-	p := placement.New(backend, echoagent.Model, placement.WithDialer(dial))
+	// No injected dialer: the Placer's default dialer dials the actor's PodIP:HarnessPort directly.
+	p := placement.New(backend, echoagent.Model)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	// Place + drive one turn: Create the actor (boot:true), dial the harness over the mesh, run it.
-	if _, err := p.Exec(ctx, log, "e2e", []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+	// Place + drive one turn: Create the actor (boot:true), dial the harness at PodIP:HarnessPort, run.
+	inc, err := p.Exec(ctx, log, "e2e", []api.Message{*api.TextMessage("user", "hi")}, 0)
+	if err != nil {
 		t.Fatalf("placed exec on substrate: %v", err)
 	}
 	recs, _ := log.Read(1)
@@ -238,11 +229,9 @@ func TestAxis1PlacedExecReplayOnSubstrate(t *testing.T) {
 		t.Fatal("placed turn produced no output")
 	}
 
-	// Replay through the same placed harness: the recorded answer is served, the model is not invoked.
-	har, closeHar, err := dial(meshAddress(atespace, "e2e"))
-	if err != nil {
-		t.Fatalf("mesh dial for replay: %v", err)
-	}
+	// Replay through the same placed harness (same PodIP:HarnessPort): the recorded answer is served,
+	// the model is not invoked.
+	har, closeHar := dialActor(t, inc.Address)
 	defer closeHar()
 	c2, err := controller.New(log, echoagent.Model)
 	if err != nil {
@@ -271,10 +260,4 @@ func outputsOf(recs []eventlog.Record) []string {
 		}
 	}
 	return out
-}
-
-// meshAddress is the actor's atenet mesh DNS (Incarnation.Address): the authority the router routes
-// on. Deterministic from (atespace, session), so replay re-dials the same actor without a lookup.
-func meshAddress(atespace, session string) string {
-	return session + "." + atespace + "." + ateadapter.DefaultDNSSuffix
 }

@@ -53,13 +53,24 @@ func TestCreateBootsActor(t *testing.T) {
 	if want := []string{"create:sess-x", "resume:sess-x:boot=true"}; !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("create calls=%v want %v", m.calls, want)
 	}
-	if in.Worker != "10.0.0.5" || in.Address != "sess-x.space.actors" || in.Runtime != "substrate" {
+	// Address is the direct h2c dial target (PodIP:HarnessPort), not the mesh DNS — the router cannot
+	// proxy gRPC, so an in-cluster driver dials the actor's pod IP directly.
+	if in.Worker != "10.0.0.5" || in.Address != "10.0.0.5:80" || in.Runtime != "substrate" {
 		t.Fatalf("unexpected incarnation %+v", in)
 	}
 }
 
+func TestCreateRejectsMissingPodIP(t *testing.T) {
+	// A resumed actor with no pod IP means it was not scheduled onto a worker; the backend must fail
+	// loudly rather than hand back a bogus ":80" dial target.
+	m := &mockControl{info: substrate.ActorInfo{MeshDNS: "sess-x.space.actors"}}
+	if _, err := newBackend(m).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x"}); err == nil {
+		t.Fatal("expected an error when the actor has no pod IP, got nil")
+	}
+}
+
 func TestSuspendRestoreRoundtrip(t *testing.T) {
-	m := &mockControl{}
+	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.7"}}
 	b := newBackend(m)
 	ref, err := b.Snapshot(context.Background(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
 	if err != nil {
@@ -112,7 +123,7 @@ func TestStatusMapping(t *testing.T) {
 }
 
 func TestForkIsReplayFork(t *testing.T) {
-	m := &mockControl{}
+	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.9"}}
 	if _, err := newBackend(m).Fork(context.Background(), api.SnapshotRef{Local: "parent"}, api.ForkOpts{ChildSessionUID: "child"}); err != nil {
 		t.Fatal(err)
 	}

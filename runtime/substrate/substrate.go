@@ -17,6 +17,7 @@ package substrate
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"github.com/aramase/agentsessions/api"
 )
@@ -101,7 +102,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (api.Incarnati
 	if err != nil {
 		return api.Incarnation{}, fmt.Errorf("substrate: resume actor: %w", err)
 	}
-	return b.incarnation(s.SessionUID, info), nil
+	return b.incarnation(s.SessionUID, info)
 }
 
 // Snapshot suspends the actor: RAM+disk snapshot to external storage, worker freed. Only the
@@ -128,7 +129,7 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarna
 	if err != nil {
 		return api.Incarnation{}, fmt.Errorf("substrate: resume (restore) actor: %w", err)
 	}
-	return b.incarnation(name, info), nil
+	return b.incarnation(name, info)
 }
 
 // Fork is realized as a replay-fork: substrate has no clone-from-arbitrary-snapshot API, so a fresh
@@ -183,11 +184,24 @@ func (b *Backend) Capabilities() api.RuntimeCapabilities {
 	}
 }
 
-func (b *Backend) incarnation(uid string, info ActorInfo) api.Incarnation {
+// HarnessPort is the TCP port the in-sandbox harness (cmd/harnessnode) serves harnesswire on, and the
+// port an in-cluster driver dials directly on the actor's pod IP. The atenet mesh is HTTP/1.1-only to
+// actors, so gRPC bypasses the router and reaches PodIP:HarnessPort over h2c (matching google/ax's
+// direct-dial path). Keep in sync with cmd/harnessnode's HARNESS_ADDR default.
+const HarnessPort = "80"
+
+// incarnation maps a resumed actor onto the compute handle the Placer drives. Address is the actor's
+// pod IP + HarnessPort — the direct h2c dial target — not the mesh DNS, because the router cannot
+// proxy gRPC. A missing pod IP (actor not scheduled onto a worker) is a loud error, never a silent
+// dial to ":80".
+func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, error) {
+	if info.PodIP == "" {
+		return api.Incarnation{}, fmt.Errorf("substrate: actor %q has no pod IP (not scheduled onto a worker?)", uid)
+	}
 	return api.Incarnation{
 		ID:      uid,
 		Worker:  info.PodIP,
-		Address: info.MeshDNS,
+		Address: net.JoinHostPort(info.PodIP, HarnessPort),
 		Runtime: "substrate",
-	}
+	}, nil
 }

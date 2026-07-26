@@ -45,9 +45,10 @@ type Placer struct {
 }
 
 // Dialer opens a Harness.Connect client to the harness at a runtime-specific address and returns a
-// closer for the connection. runtime/local uses a unix-socket address (the default dialer); substrate
-// uses the actor's mesh DNS reached through the atenet router (an injected dialer that owns the
-// router port-forward + sets the :authority). This is the one transport seam that differs per backend.
+// closer for the connection. runtime/local passes a unix-socket address (unix://…); substrate passes
+// the actor's pod IP as host:port (PodIP:80), dialed directly over h2c — the atenet mesh is
+// HTTP/1.1-only to actors, so gRPC bypasses the router. The default dialer handles both forms;
+// WithDialer overrides it (tests). This is the one transport seam the harness rides unchanged.
 type Dialer func(address string) (api.Harness, func() error, error)
 
 // Option configures a Placer.
@@ -58,7 +59,7 @@ func WithDialer(d Dialer) Option { return func(p *Placer) { p.dial = d } }
 
 // New builds a Placer over a compute backend and the live model.
 func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
-	p := &Placer{backend: backend, model: model, dial: unixDial}
+	p := &Placer{backend: backend, model: model, dial: defaultDial}
 	for _, o := range opts {
 		o(p)
 	}
@@ -104,11 +105,18 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	return inc, nil
 }
 
-// dial connects to a harnesswire server at a unix-socket address and returns the harness proxy plus a
-// closer for the connection. This is the single Harness.Connect path both runtime/local and substrate
-// drive through.
-func unixDial(address string) (api.Harness, func() error, error) {
-	sock := strings.TrimPrefix(address, "unix://")
+// defaultDial reaches a harnesswire server by address form: runtime/local passes a unix-socket
+// address (unix://…); substrate passes the actor's pod IP as host:port (PodIP:80). Both ride the same
+// harnesswire gRPC client; only the transport differs. One dial path, two address forms.
+func defaultDial(address string) (api.Harness, func() error, error) {
+	if sock, ok := strings.CutPrefix(address, "unix://"); ok {
+		return unixDial(sock)
+	}
+	return tcpDial(address)
+}
+
+// unixDial connects to a harnesswire server on a unix socket (runtime/local).
+func unixDial(sock string) (api.Harness, func() error, error) {
 	conn, err := grpc.NewClient(
 		"passthrough:///agentlocal",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -117,6 +125,17 @@ func unixDial(address string) (api.Harness, func() error, error) {
 			return d.DialContext(ctx, "unix", sock)
 		}),
 	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("placement: dial unix %s: %w", sock, err)
+	}
+	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
+}
+
+// tcpDial connects to a harnesswire server at a TCP host:port over h2c (cleartext HTTP/2). Substrate
+// exposes the actor's harness on PodIP:80; an in-cluster caller dials it directly, bypassing the
+// HTTP/1.1-only atenet router. No TLS: the harness terminates plaintext gRPC, matching google/ax.
+func tcpDial(address string) (api.Harness, func() error, error) {
+	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, nil, fmt.Errorf("placement: dial %s: %w", address, err)
 	}
