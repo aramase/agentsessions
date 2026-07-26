@@ -222,6 +222,13 @@ func (ComputeState) EnumDescriptor() ([]byte, []int) {
 	return file_session_proto_rawDescGZIP(), []int{2}
 }
 
+// SnapshotRef is the session-STATUS ref carried in ComputeRef below. It is NOT yet wired in Go (no
+// converter). The canonical wired form is api.SnapshotRef, and the durable log carries the ref inline
+// on the SUSPEND Lifecycle event (common.proto Lifecycle.snapshot_*). The oneof here cannot hold both
+// local AND external_uri, which a substrate ref needs.
+// TODO(spike): flatten this oneof to match api.SnapshotRef when ComputeRef/substrate status is wired.
+// An in-place flatten is buf-breaking (oneof-exit is flagged even under WIRE_JSON), so it needs a
+// coordinated schema version bump, not an edit.
 type SnapshotRef struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Loc:

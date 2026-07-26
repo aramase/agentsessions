@@ -1481,10 +1481,11 @@ type Lifecycle struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Kind   Lifecycle_Kind         `protobuf:"varint,1,opt,name=kind,proto3,enum=agentsessions.v1.Lifecycle_Kind" json:"kind,omitempty"`
 	Detail string                 `protobuf:"bytes,2,opt,name=detail,proto3" json:"detail,omitempty"` // e.g. "fork parent=<uid>@<seq>", baseline id
-	// SnapshotRef captured on SUSPEND (§5.1), carried inline so it rides the tamper-evident chain with
-	// no side table and no cross-file message dependency. A filesystem-only backend sets only
-	// snapshot_local (the session handle to replay) with snapshot_memory=false; a memory backend also
-	// sets snapshot_external_uri.
+	// SnapshotRef captured on SUSPEND (§5.1), carried inline (mirroring the canonical api.SnapshotRef)
+	// so it rides the tamper-evident chain with no side table and no cross-file message dependency.
+	// This is distinct from the aspirational session-status message SnapshotRef in session.proto. A
+	// filesystem-only backend sets only snapshot_local (the session handle to replay) with
+	// snapshot_memory=false; a memory backend also sets snapshot_external_uri.
 	SnapshotLocal       string `protobuf:"bytes,3,opt,name=snapshot_local,json=snapshotLocal,proto3" json:"snapshot_local,omitempty"`
 	SnapshotExternalUri string `protobuf:"bytes,4,opt,name=snapshot_external_uri,json=snapshotExternalUri,proto3" json:"snapshot_external_uri,omitempty"`
 	SnapshotMemory      bool   `protobuf:"varint,5,opt,name=snapshot_memory,json=snapshotMemory,proto3" json:"snapshot_memory,omitempty"`

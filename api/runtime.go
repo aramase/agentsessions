@@ -45,12 +45,17 @@ const (
 	SnapshotExternal SnapshotKind = "EXTERNAL"
 )
 
-// SnapshotRef points at a captured state.
+// SnapshotRef points at a captured incarnation state. This Go SPI type is the canonical, WIRED
+// representation: Runtime backends produce/consume it, and the durable log carries it inline on the
+// SUSPEND Lifecycle event (api.Lifecycle.Snapshot -> proto Lifecycle.snapshot_* fields). The proto
+// message agentsessions.v1.SnapshotRef (session.proto, used by ComputeRef) is a SEPARATE, not-yet-
+// wired session-status shape — see its TODO. Unlike that oneof, this holds both Local and ExternalURI
+// (a substrate ref sets both).
 type SnapshotRef struct {
-	Local       string
-	ExternalURI string
-	Memory      bool // RAM/process captured? kata/clh: true, pod: false
-	Sealed      bool // encrypted + attested (confidential)
+	Local       string // node/handle-local ref, or (filesystem-only) the session handle to replay
+	ExternalURI string // external blob (cold/suspend)
+	Memory      bool   // RAM/process captured? kata/clh: true, pod: false
+	Sealed      bool   // encrypted + attested (confidential)
 }
 
 // Incarnation is a live compute instance of a session (a sandbox).
