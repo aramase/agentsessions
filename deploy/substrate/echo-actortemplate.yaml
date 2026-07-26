@@ -52,9 +52,11 @@ spec:
     matchLabels:
       workload: echo-harness
   # A stateless-replay harness keeps no durable in-actor state (the event log is the state), so there
-  # is no volume. snapshotsConfig is still declared for schema completeness; axis 1 boots fresh
-  # (boot:true) and never restores a snapshot, so it is not exercised until axis 2.
+  # is no durable-dir volume. The ActorTemplate still builds a golden snapshot to reach Ready, so
+  # onCommit must be Full (a full `runsc checkpoint`): DATA scope snapshots durable-dir volumes and
+  # fails closed when there are none. axis-1 actors boot fresh (boot:true) and replay the journal, so
+  # the golden's memory image is never restored -- but it must build for the template to go Ready.
   snapshotsConfig:
     onPause: Full
-    onCommit: Data
+    onCommit: Full
     location: gs://ate-snapshots/ate-agentsessions/
