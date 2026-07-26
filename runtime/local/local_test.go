@@ -2,6 +2,7 @@ package local_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
@@ -9,7 +10,7 @@ import (
 	"github.com/aramase/agentsessions/runtime/local"
 )
 
-// stubHarness is a placeholder api.Harness the backend places in-process.
+// stubHarness is a placeholder api.Harness the backend serves.
 type stubHarness struct{}
 
 func (stubHarness) Describe(context.Context) (api.Descriptor, error) {
@@ -17,28 +18,36 @@ func (stubHarness) Describe(context.Context) (api.Descriptor, error) {
 }
 func (stubHarness) Run(context.Context, *api.Start, api.EventSink) error { return nil }
 
-func TestCreateInProcess(t *testing.T) {
+// newBackend builds a backend and closes its harness server when the test ends.
+func newBackend(t *testing.T) *local.Backend {
+	t.Helper()
 	b := local.New(stubHarness{})
+	t.Cleanup(func() { _ = b.Close() })
+	return b
+}
+
+func TestCreateInProcess(t *testing.T) {
+	b := newBackend(t)
 	in, err := b.Create(context.Background(), &api.SessionSpec{SessionUID: "s1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if in.ID != "s1" || in.Runtime != "local" || in.Address != "inproc://s1" || in.Worker == "" {
+	if in.ID != "s1" || in.Runtime != "local" || !strings.HasPrefix(in.Address, "unix://") || in.Worker == "" {
 		t.Fatalf("unexpected incarnation %+v", in)
 	}
-	if b.Harness() == nil {
-		t.Fatal("backend must expose the in-process harness for the placement layer to drive")
+	if d, err := b.Describe(context.Background()); err != nil || d.ID == "" {
+		t.Fatalf("backend must expose the harness descriptor for the placement gate: %v %+v", err, d)
 	}
 }
 
 func TestCreateRequiresUID(t *testing.T) {
-	if _, err := local.New(stubHarness{}).Create(context.Background(), &api.SessionSpec{}); err == nil {
+	if _, err := newBackend(t).Create(context.Background(), &api.SessionSpec{}); err == nil {
 		t.Fatal("create must require a session uid")
 	}
 }
 
 func TestSnapshotFilesystemOnly(t *testing.T) {
-	ref, err := local.New(stubHarness{}).Snapshot(context.Background(), api.Incarnation{ID: "s1"}, api.SnapshotExternal)
+	ref, err := newBackend(t).Snapshot(context.Background(), api.Incarnation{ID: "s1"}, api.SnapshotExternal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,13 +60,13 @@ func TestSnapshotFilesystemOnly(t *testing.T) {
 }
 
 func TestSnapshotLocalUnsupported(t *testing.T) {
-	if _, err := local.New(stubHarness{}).Snapshot(context.Background(), api.Incarnation{ID: "s"}, api.SnapshotLocal); err == nil {
+	if _, err := newBackend(t).Snapshot(context.Background(), api.Incarnation{ID: "s"}, api.SnapshotLocal); err == nil {
 		t.Fatal("warm (LOCAL) snapshot must be unsupported on the filesystem-only local backend")
 	}
 }
 
 func TestRestoreReprovisions(t *testing.T) {
-	in, err := local.New(stubHarness{}).Restore(context.Background(), api.SnapshotRef{Local: "s1"})
+	in, err := newBackend(t).Restore(context.Background(), api.SnapshotRef{Local: "s1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,13 +76,13 @@ func TestRestoreReprovisions(t *testing.T) {
 }
 
 func TestRestoreRequiresHandle(t *testing.T) {
-	if _, err := local.New(stubHarness{}).Restore(context.Background(), api.SnapshotRef{}); err == nil {
+	if _, err := newBackend(t).Restore(context.Background(), api.SnapshotRef{}); err == nil {
 		t.Fatal("restore must require a session handle in the ref")
 	}
 }
 
 func TestForkIsReplayFork(t *testing.T) {
-	in, err := local.New(stubHarness{}).Fork(context.Background(), api.SnapshotRef{Local: "parent"}, api.ForkOpts{ChildSessionUID: "child"})
+	in, err := newBackend(t).Fork(context.Background(), api.SnapshotRef{Local: "parent"}, api.ForkOpts{ChildSessionUID: "child"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +92,7 @@ func TestForkIsReplayFork(t *testing.T) {
 }
 
 func TestStopAndStatus(t *testing.T) {
-	b := local.New(stubHarness{})
+	b := newBackend(t)
 	if err := b.Stop(context.Background(), api.Incarnation{ID: "s1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +106,7 @@ func TestStopAndStatus(t *testing.T) {
 }
 
 func TestCapabilitiesFilesystemOnly(t *testing.T) {
-	caps := local.New(stubHarness{}).Capabilities()
+	caps := newBackend(t).Capabilities()
 	if caps.MemorySnapshot || caps.CoWFork || caps.Attest || caps.GPUState {
 		t.Fatalf("local must be filesystem-only, got %+v", caps)
 	}
@@ -107,7 +116,7 @@ func TestCapabilitiesFilesystemOnly(t *testing.T) {
 // local backend must REFUSE a REQUIRES_MEMORY_SNAPSHOT harness (which substrate accepts) and accept a
 // STATELESS_REPLAY one. This is the pod side of the two-backend neutrality proof.
 func TestCanPlaceRefusal(t *testing.T) {
-	caps := local.New(stubHarness{}).Capabilities()
+	caps := newBackend(t).Capabilities()
 	mem := api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}
 	if controller.CanPlace(mem, caps) {
 		t.Fatal("local (MemorySnapshot=false) must refuse a REQUIRES_MEMORY_SNAPSHOT harness")

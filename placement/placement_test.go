@@ -15,6 +15,15 @@ import (
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
+// newLocalPlacer builds a Placer over a fresh runtime/local backend and closes the backend's harness
+// server when the test ends.
+func newLocalPlacer(t *testing.T, h api.Harness) *placement.Placer {
+	t.Helper()
+	b := local.New(h)
+	t.Cleanup(func() { _ = b.Close() })
+	return placement.New(b, echoagent.Model)
+}
+
 // TestPlacerExecRoutesThroughRuntime proves a turn placed via the Placer runs through Runtime.Create
 // and the backend-provided harness, binds the controller to a log-minted fence stamped on the
 // incarnation, and produces a verifiable journal — the in-process realization of "the controller
@@ -27,7 +36,7 @@ func TestPlacerExecRoutesThroughRuntime(t *testing.T) {
 	defer store.Close()
 	log := store.Session("s")
 
-	p := placement.New(local.New(echoagent.Harness{}), echoagent.Model)
+	p := newLocalPlacer(t, echoagent.Harness{})
 	inc, err := p.Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "hi")}, 0)
 	if err != nil {
 		t.Fatalf("placed exec: %v", err)
@@ -61,7 +70,7 @@ func TestPlacerFenceBinding(t *testing.T) {
 	}
 	defer store.Close()
 	log := store.Session("s")
-	p := placement.New(local.New(echoagent.Harness{}), echoagent.Model)
+	p := newLocalPlacer(t, echoagent.Harness{})
 
 	inc1, err := p.Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "one")}, 0)
 	if err != nil {
@@ -122,7 +131,9 @@ type placeableSubstrate struct {
 	harness api.Harness
 }
 
-func (p placeableSubstrate) Harness() api.Harness { return p.harness }
+func (p placeableSubstrate) Describe(ctx context.Context) (api.Descriptor, error) {
+	return p.harness.Describe(ctx)
+}
 
 // TestNeutralityThroughPlacer is the spike §8 criterion driven end-to-end through the Placer's gate:
 // a REQUIRES_MEMORY_SNAPSHOT harness is REFUSED on runtime/local (MemorySnapshot=false) with
@@ -137,7 +148,7 @@ func TestNeutralityThroughPlacer(t *testing.T) {
 	}
 	defer store1.Close()
 	log1 := store1.Session("s")
-	localPlacer := placement.New(local.New(memSnapshotHarness{}), echoagent.Model)
+	localPlacer := newLocalPlacer(t, memSnapshotHarness{})
 	if _, err := localPlacer.Exec(context.Background(), log1, "s", nil, 0); !errors.Is(err, placement.ErrUnplaceable) {
 		t.Fatalf("local (MemorySnapshot=false) must refuse a REQUIRES_MEMORY_SNAPSHOT harness, got %v", err)
 	}
@@ -145,7 +156,9 @@ func TestNeutralityThroughPlacer(t *testing.T) {
 		t.Fatalf("a refused placement must not provision or write to the log, head=%d", h)
 	}
 
-	// substrate (MemorySnapshot=true) must accept: the gate passes and the turn proceeds.
+	// substrate (MemorySnapshot=true) must ACCEPT: the gate passes (no ErrUnplaceable). The stub
+	// substrate returns no dialable address, so the drive fails afterward — that is not a placement
+	// refusal, which is exactly the distinction under test.
 	store2, err := sqlitelog.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +169,7 @@ func TestNeutralityThroughPlacer(t *testing.T) {
 		harness: memSnapshotHarness{},
 	}
 	subPlacer := placement.New(sub, echoagent.Model)
-	if _, err := subPlacer.Exec(context.Background(), store2.Session("s"), "s", nil, 0); err != nil {
+	if _, err := subPlacer.Exec(context.Background(), store2.Session("s"), "s", nil, 0); errors.Is(err, placement.ErrUnplaceable) {
 		t.Fatalf("substrate (MemorySnapshot=true) must accept a REQUIRES_MEMORY_SNAPSHOT harness, got %v", err)
 	}
 }
@@ -172,7 +185,7 @@ func TestSuspendResumeRoundtripThroughSPI(t *testing.T) {
 	}
 	defer store.Close()
 	log := store.Session("s")
-	p := placement.New(local.New(echoagent.Harness{}), echoagent.Model)
+	p := newLocalPlacer(t, echoagent.Harness{})
 
 	if _, err := p.Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
 		t.Fatal(err)

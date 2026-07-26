@@ -88,11 +88,13 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	svc := session.NewService(store, placement.New(local.New(echoagent.Harness{}), echoagent.Model))
+	backend := local.New(echoagent.Harness{})
+	svc := session.NewService(store, placement.New(backend, echoagent.Model))
 	sock := fmt.Sprintf("%s/agentctl-%d.sock", os.TempDir(), os.Getpid())
 	_ = os.Remove(sock)
 	lis, err := net.Listen("unix", sock)
 	if err != nil {
+		backend.Close()
 		store.Close()
 		return nil, nil, err
 	}
@@ -110,6 +112,7 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 	if err != nil {
 		srv.Stop()
 		os.Remove(sock)
+		backend.Close()
 		store.Close()
 		return nil, nil, err
 	}
@@ -117,6 +120,7 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 		conn.Close()
 		srv.Stop()
 		os.Remove(sock)
+		backend.Close()
 		store.Close()
 	}
 	return v1.NewSessionsClient(conn), cleanup, nil

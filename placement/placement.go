@@ -9,10 +9,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/aramase/agentsessions/api"
+	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
+	"github.com/aramase/agentsessions/harnesswire"
 )
 
 // ErrUnplaceable is returned when a harness requires a capability the chosen backend cannot provide
@@ -21,12 +28,13 @@ import (
 // codes.FailedPrecondition.
 var ErrUnplaceable = errors.New("placement: harness cannot be placed on this runtime")
 
-// Backend is the compute Runtime the Placer drives. In the in-process M0 path it also provides the
-// harness handle directly via Harness(); the socket variant (design note §10 step 6) will instead have
-// the Placer dial Incarnation.Address to build a ClientHarness. runtime/local satisfies this.
+// Backend is the compute Runtime the Placer drives. It exposes the harness DESCRIPTOR so the Placer
+// can gate CanPlace before Create (placement must not provision compute to learn a harness's needs);
+// the harness itself is reached by dialing Incarnation.Address (Harness.Connect) — the one dial path
+// both runtime/local and substrate use. runtime/local satisfies this.
 type Backend interface {
 	api.Runtime
-	Harness() api.Harness
+	Describe(ctx context.Context) (api.Descriptor, error)
 }
 
 // Placer owns the incarnation lifecycle: Create the compute, mint+bind the fence, drive the controller.
@@ -44,10 +52,10 @@ func New(backend Backend, model controller.ModelFunc) *Placer {
 // incarnation, bind a controller to that same token, and drive the (placed) harness. The log stays the
 // single fence authority; the returned incarnation carries the fence for Suspend/Resume (step 5).
 func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string, inputs []api.Message, expectedLastSeq int64) (api.Incarnation, error) {
-	// Placement gate (honest degradation): refuse a harness the backend cannot host BEFORE
-	// provisioning any compute or writing to the log — e.g. a REQUIRES_MEMORY_SNAPSHOT harness on a
-	// filesystem-only backend — so it fails fast at the API instead of mid-run.
-	desc, err := p.backend.Harness().Describe(ctx)
+	// Placement gate (honest degradation): read the harness descriptor in-process and refuse a
+	// harness the backend cannot host BEFORE provisioning any compute or writing to the log — e.g. a
+	// REQUIRES_MEMORY_SNAPSHOT harness on a filesystem-only backend.
+	desc, err := p.backend.Describe(ctx)
 	if err != nil {
 		return api.Incarnation{}, err
 	}
@@ -59,6 +67,11 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if err != nil {
 		return api.Incarnation{}, err
 	}
+	har, closeHarness, err := dial(inc.Address)
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	defer closeHarness()
 	fence, err := log.NewFence()
 	if err != nil {
 		return api.Incarnation{}, err
@@ -68,10 +81,29 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if err != nil {
 		return api.Incarnation{}, err
 	}
-	if err := c.Exec(ctx, p.backend.Harness(), inputs, expectedLastSeq); err != nil {
+	if err := c.Exec(ctx, har, inputs, expectedLastSeq); err != nil {
 		return inc, err
 	}
 	return inc, nil
+}
+
+// dial connects to a harnesswire server at a unix-socket address and returns the harness proxy plus a
+// closer for the connection. This is the single Harness.Connect path both runtime/local and substrate
+// drive through.
+func dial(address string) (api.Harness, func() error, error) {
+	sock := strings.TrimPrefix(address, "unix://")
+	conn, err := grpc.NewClient(
+		"passthrough:///agentlocal",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", sock)
+		}),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("placement: dial %s: %w", address, err)
+	}
+	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 
 // Suspend snapshots the incarnation to external storage, records the SnapshotRef in a SUSPEND
@@ -105,6 +137,11 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err != nil {
 		return err
 	}
+	har, closeHarness, err := dial(inc.Address)
+	if err != nil {
+		return err
+	}
+	defer closeHarness()
 	fence, err := log.NewFence()
 	if err != nil {
 		return err
@@ -114,7 +151,7 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err != nil {
 		return err
 	}
-	if _, err := c.Resume(ctx, p.backend.Harness()); err != nil {
+	if _, err := c.Resume(ctx, har); err != nil {
 		return err
 	}
 	head, err := log.Head()

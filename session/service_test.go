@@ -28,6 +28,9 @@ func newClient(t *testing.T) v1.SessionsClient {
 
 func newClientWith(t *testing.T, backend placement.Backend) v1.SessionsClient {
 	t.Helper()
+	if c, ok := backend.(io.Closer); ok {
+		t.Cleanup(func() { _ = c.Close() })
+	}
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)

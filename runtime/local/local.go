@@ -1,34 +1,49 @@
-// Package local implements the agentsessions api.Runtime compute SPI as a filesystem-only,
-// in-process backend — the honest "plain pod" counterpart to runtime/substrate. It captures no
-// RAM/process state: the event log IS the durable state, so resume is realized by STATELESS_REPLAY
-// (the host replays the journal into a fresh incarnation). Capabilities report MemorySnapshot=false,
-// which is what makes CanPlace meaningful — a REQUIRES_MEMORY_SNAPSHOT harness is refused here and
-// accepted on substrate (honest degradation across two backends behind one SPI).
+// Package local implements the agentsessions api.Runtime compute SPI as a filesystem-only backend —
+// the honest "plain pod" counterpart to runtime/substrate. It captures no RAM/process state: the
+// event log IS the durable state, so resume is realized by STATELESS_REPLAY (the host replays the
+// journal into a fresh incarnation). Capabilities report MemorySnapshot=false, which is what makes
+// CanPlace meaningful — a REQUIRES_MEMORY_SNAPSHOT harness is refused here and accepted on substrate
+// (honest degradation across two backends behind one SPI).
 //
-// This first cut runs the harness IN-PROCESS: Create returns an incarnation with a synthetic address
-// and the placement layer drives the held api.Harness directly (Backend.Harness). A follow-up swaps
-// this for a harnesswire unix-socket server so the real Harness.Connect transport — the same seam
-// substrate uses — is exercised (design note §4/§10 step 6).
+// The harness runs behind a real harnesswire gRPC server on a unix socket: Create returns an
+// incarnation whose Address the placement layer dials via Harness.Connect — the SAME transport
+// substrate uses — so determinism holds over the wire for local exactly as it will for substrate.
+// Describe exposes the harness's static contract IN-PROCESS so the placement gate runs before Create.
 package local
 
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
+	"path/filepath"
+	"sync"
+	"sync/atomic"
+
+	"google.golang.org/grpc"
 
 	"github.com/aramase/agentsessions/api"
+	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/harnesswire"
 )
 
-// Backend implements api.Runtime by placing a single harness in-process (M0). Later the harness is
-// selected per SessionSpec.Harness/Image from a registry.
+// Backend implements api.Runtime by serving a single harness over a unix socket (M0). Later the
+// harness is selected per SessionSpec.Harness/Image from a registry.
 type Backend struct {
 	harness api.Harness
 	worker  string
+
+	mu   sync.Mutex
+	srv  *grpc.Server
+	sock string
+	addr string
 }
 
 var _ api.Runtime = (*Backend)(nil)
 
-// New builds an in-process backend that places harness.
+var socketSeq atomic.Int64
+
+// New builds a backend that serves harness.
 func New(harness api.Harness) *Backend {
 	host, _ := os.Hostname()
 	if host == "" {
@@ -37,20 +52,64 @@ func New(harness api.Harness) *Backend {
 	return &Backend{harness: harness, worker: fmt.Sprintf("%s/%d", host, os.Getpid())}
 }
 
-// Harness returns the in-process harness handle the placement layer drives directly, in lieu of
-// dialing Incarnation.Address over the wire. (The socket-server variant replaces this — §10 step 6.)
-func (b *Backend) Harness() api.Harness { return b.harness }
+// Describe returns the placed harness's static contract. The placement layer reads it IN-PROCESS to
+// gate CanPlace before Create — placement must not provision compute to learn a harness's needs.
+func (b *Backend) Describe(ctx context.Context) (api.Descriptor, error) {
+	return b.harness.Describe(ctx)
+}
 
-// Create provisions an in-process incarnation. There is no sandbox to boot; the address is synthetic
-// (inproc://) and signals that the placement layer uses Harness() rather than Harness.Connect.
+// start lazily stands up the harness as a harnesswire gRPC server on a unix socket (once per
+// backend). All incarnations share it: the harness is stateless and each turn opens its own
+// Harness.Connect stream, so a single server is the real transport the placement layer dials. Close
+// tears it down.
+func (b *Backend) start() (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.srv != nil {
+		return b.addr, nil
+	}
+	sock := filepath.Join(os.TempDir(), fmt.Sprintf("agentlocal-%d-%d.sock", os.Getpid(), socketSeq.Add(1)))
+	_ = os.Remove(sock)
+	lis, err := net.Listen("unix", sock)
+	if err != nil {
+		return "", fmt.Errorf("local: listen: %w", err)
+	}
+	srv := grpc.NewServer()
+	v1.RegisterHarnessServer(srv, harnesswire.NewServer(b.harness))
+	go srv.Serve(lis)
+	b.srv, b.sock, b.addr = srv, sock, "unix://"+sock
+	return b.addr, nil
+}
+
+// Close stops the shared harness server and removes its socket. Callers own the backend lifetime.
+func (b *Backend) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.srv != nil {
+		b.srv.Stop()
+		b.srv = nil
+	}
+	if b.sock != "" {
+		_ = os.Remove(b.sock)
+		b.sock = ""
+	}
+	return nil
+}
+
+// Create provisions an incarnation: it ensures the harness server is up and returns the unix-socket
+// address the placement layer dials via Harness.Connect.
 func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (api.Incarnation, error) {
 	if s == nil || s.SessionUID == "" {
 		return api.Incarnation{}, fmt.Errorf("local: create requires a session uid")
 	}
+	addr, err := b.start()
+	if err != nil {
+		return api.Incarnation{}, err
+	}
 	return api.Incarnation{
 		ID:      s.SessionUID,
 		Worker:  b.worker,
-		Address: "inproc://" + s.SessionUID,
+		Address: addr,
 		Runtime: "local",
 	}, nil
 }
