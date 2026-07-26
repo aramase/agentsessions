@@ -56,5 +56,5 @@ spec:
   # (boot:true) and never restores a snapshot, so it is not exercised until axis 2.
   snapshotsConfig:
     onPause: Full
-    onCommit: None
+    onCommit: Data
     location: gs://ate-snapshots/ate-agentsessions/
