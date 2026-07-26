@@ -35,3 +35,6 @@ go.work.sum
 /agentnode
 /agentctl
 /harnessnode
+
+# substrate-e2e clone (cloned by the workflow / local repro)
+/_substrate/
