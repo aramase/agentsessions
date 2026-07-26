@@ -1,0 +1,5 @@
+# ateom's node-local image cache (internal/imagecache) rejects char-device tar
+# entries (e.g. /dev/console) when unpacking the harness image into the sandbox
+# OCI bundle. ko's default base (cgr.dev/chainguard/static, apko-built) ships
+# such /dev nodes; distroless static does not. Match substrate's own ko base.
+defaultBaseImage: gcr.io/distroless/static-debian13
