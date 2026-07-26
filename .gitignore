@@ -33,3 +33,5 @@ go.work.sum
 
 # demo build output
 /agentnode
+/agentctl
+/harnessnode
