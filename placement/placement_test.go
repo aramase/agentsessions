@@ -124,17 +124,6 @@ func (stubControl) GetActor(context.Context, substrate.ActorRef) (substrate.Acto
 	return substrate.ActorInfo{}, nil
 }
 
-// placeableSubstrate wraps a substrate backend with an in-process harness so it satisfies
-// placement.Backend for the gate test (real substrate dials the actor; here the harness is a stub).
-type placeableSubstrate struct {
-	*substrate.Backend
-	harness api.Harness
-}
-
-func (p placeableSubstrate) Describe(ctx context.Context) (api.Descriptor, error) {
-	return p.harness.Describe(ctx)
-}
-
 // TestNeutralityThroughPlacer is the spike §8 criterion driven end-to-end through the Placer's gate:
 // a REQUIRES_MEMORY_SNAPSHOT harness is REFUSED on runtime/local (MemorySnapshot=false) with
 // ErrUnplaceable — before any compute is provisioned or any record is written — and ACCEPTED on
@@ -164,10 +153,8 @@ func TestNeutralityThroughPlacer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store2.Close()
-	sub := placeableSubstrate{
-		Backend: substrate.New(stubControl{}, "space", substrate.ObjectRef{Name: "echo"}),
-		harness: memSnapshotHarness{},
-	}
+	sub := substrate.New(stubControl{}, "space", substrate.ObjectRef{Name: "echo"},
+		api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}})
 	subPlacer := placement.New(sub, echoagent.Model)
 	if _, err := subPlacer.Exec(context.Background(), store2.Session("s"), "s", nil, 0); errors.Is(err, placement.ErrUnplaceable) {
 		t.Fatalf("substrate (MemorySnapshot=true) must accept a REQUIRES_MEMORY_SNAPSHOT harness, got %v", err)

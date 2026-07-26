@@ -40,7 +40,8 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 }
 
 func newBackend(m *mockControl) *substrate.Backend {
-	return substrate.New(m, "space", substrate.ObjectRef{Namespace: "tmpl", Name: "echo"})
+	return substrate.New(m, "space", substrate.ObjectRef{Namespace: "tmpl", Name: "echo"},
+		api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}})
 }
 
 func TestCreateBootsActor(t *testing.T) {

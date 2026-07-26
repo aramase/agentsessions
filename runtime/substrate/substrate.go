@@ -67,16 +67,26 @@ type ControlClient interface {
 
 // Backend implements api.Runtime over a substrate ControlClient.
 type Backend struct {
-	ctl      ControlClient
-	atespace string
-	template ObjectRef // the ActorTemplate whose OCI image is the harness
+	ctl        ControlClient
+	atespace   string
+	template   ObjectRef      // the ActorTemplate whose OCI image is the harness
+	descriptor api.Descriptor // the harness's declared contract (see Describe)
 }
 
 var _ api.Runtime = (*Backend)(nil)
 
-// New builds the backend targeting one atespace and harness ActorTemplate.
-func New(ctl ControlClient, atespace string, template ObjectRef) *Backend {
-	return &Backend{ctl: ctl, atespace: atespace, template: template}
+// New builds the backend targeting one atespace and harness ActorTemplate. descriptor is the
+// harness's declared contract, used by the placement gate (see Describe).
+func New(ctl ControlClient, atespace string, template ObjectRef, descriptor api.Descriptor) *Backend {
+	return &Backend{ctl: ctl, atespace: atespace, template: template, descriptor: descriptor}
+}
+
+// Describe returns the harness's declared contract. Substrate's harness runs REMOTELY inside the
+// actor, so — unlike runtime/local which reads it in-process — the descriptor is CONFIGURED at
+// construction (from the ActorTemplate/registry). This is the M0 form of the spike's
+// registry-resolution: the placement gate reads it BEFORE Create, without provisioning compute.
+func (b *Backend) Describe(ctx context.Context) (api.Descriptor, error) {
+	return b.descriptor, nil
 }
 
 func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespace, Name: name} }
