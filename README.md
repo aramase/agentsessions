@@ -1,60 +1,108 @@
 # agentsessions
 
-**A neutral, open contract for durable agent sessions.** Create, run, suspend, resume,
-**fork**, and replay an agent session — with a Bring-Your-Own-Harness SPI on top and a
-pluggable compute backend underneath.
+**A neutral, open contract — and working reference implementation — for durable agent sessions.**
+Create, run, suspend, resume, **fork**, and replay an agent session, with a Bring-Your-Own-Harness
+SPI on top and a pluggable compute backend underneath.
 
-It is the **narrow waist** for agent runtimes: **producers plug in on top** (an issue tracker,
-a chat platform, a custom app), **compute plugs in underneath** (pod, Kata, Cloud Hypervisor,
-agent-substrate), and the core knows about neither. Build an agent once; run it managed,
-self-hosted, or in CI — with the same identity, provenance, and suspend / resume / fork, and no
-rewrite when it moves.
-
-> **proto + interfaces only** (v0, for discussion). The contract comes first; implementations
-> follow.
+It is the **narrow waist** for agent runtimes: **producers plug in on top** (an issue tracker, a chat
+platform, a custom app), **compute plugs in underneath** (pod, Kata, Cloud Hypervisor, agent-substrate),
+and the core knows about neither. Build an agent once; run it managed, self-hosted, or in CI — with the
+same identity, provenance, and suspend / resume / fork, and no rewrite when it moves.
 
 ## Why it exists
 
-Agents are becoming durable, long-running, mostly-idle workers. They need a runtime that can
-hold session state, suspend to free compute, resume in place, **fork** to explore in parallel,
-and attribute every action — independent of which framework wrote the agent or which cloud runs
-it. Kubernetes has no durable-session primitive, and most agent runtimes today bind you to
-one framework, one compute model, or one vendor. `agentsessions` makes this layer an **open,
-vendor-neutral contract** anyone can implement and target.
+Agents are becoming durable, long-running, mostly-idle workers. They need a runtime that can hold
+session state, suspend to free compute, resume in place, **fork** to explore in parallel, and attribute
+every action — independent of which framework wrote the agent or which cloud runs it. Kubernetes has no
+durable-session primitive, and most agent runtimes bind you to one framework, one compute model, or one
+vendor. `agentsessions` makes this layer an **open, vendor-neutral contract** anyone can implement and
+target — plus a reference implementation that proves the contract holds.
 
 ## Neutral core, adapters on both edges
 
-- **Producers plug in on top** as adapters that map their world onto sessions and attach context
-  via `Origin` + `annotations`. No producer-specific fields in the core.
-- **Compute plugs in underneath** via the `Runtime` SPI; backend specifics ride in
-  `ComputeRef.attributes`. No kernel-isolation technology is assumed.
+- **Producers plug in on top** as adapters that map their world onto sessions and attach context via
+  `Origin` + `annotations`. No producer-specific fields in the core.
+- **Compute plugs in underneath** via the `Runtime` SPI. No kernel-isolation technology is assumed; the
+  same session runs on a plain pod or on agent-substrate.
 - **Identity is OIDC-neutral** (`issuer` / `subject` / `principal`).
-
-The same `Session` runs one agent on top with one compute backend underneath, and a different
-agent on a different backend — with no change to the proto.
 
 ## The three contracts
 
-- **Sessions** — client-facing lifecycle: create / exec / pause / suspend / resume / fork / replay.
-- **Harness** — Bring-Your-Own-Harness: the host drives one execution; the harness streams typed
-  events. Implement it directly, or adapt an existing agent framework with a thin shim.
-- **Runtime** — compute / sandbox: create / snapshot / restore / fork on pod, Kata, Cloud
-  Hypervisor, agent-substrate, or any backend that implements the SPI.
+- **Sessions** (`api/session.proto`) — client-facing lifecycle: create / exec / suspend / resume / fork
+  / replay.
+- **Harness** (`api/harness.proto`) — Bring-Your-Own-Harness: the host drives one execution; the harness
+  streams typed events over the `Harness.Connect` gRPC stream. Implement it directly, or adapt an agent
+  framework with a thin shim.
+- **Runtime** (`api/runtime.go`) — compute / sandbox: create / snapshot / restore / stop on pod, Kata,
+  Cloud Hypervisor, agent-substrate, or any backend that implements the SPI.
 
-One neutral wire form (`api/*.proto`) with a Go SPI (`api/*.go`). The `Event` type is shared by
-the session log and the harness stream.
+One neutral wire form (`api/*.proto`) with a Go SPI (`api/*.go`). The `Event` type is shared by the
+session log and the harness stream. See [`docs/architecture.md`](docs/architecture.md).
+
+## What's proven
+
+This is not a paper contract. The load-bearing claims are **demonstrated end-to-end**, and the
+determinism guarantees are exercised by a replay-conformance suite (`conformance/`):
+
+- **Runs on a plain pod, survives pod death, resumes by replay — no memory snapshot.** Exec a turn on
+  one incarnation, kill it, and a *different* one reconstructs the session **byte-identically** from the
+  durable journal (`sqlitelog/`), invoking the model **zero** times.
+- **Tamper-evident, language-neutral provenance.** Every event is hash-chained with a canonical form
+  (RFC 8785 JCS over proto3-JSON, `canon/`), so the chain is not Go-specific — a ~30-line non-Go verifier
+  reproduces the Go hash (`hack/verify_chain.py`).
+- **Bring-your-own-harness, out of process.** The harness runs behind the `Harness.Connect` gRPC stream
+  (`harnesswire/`); the host mediates the model over the wire, so the determinism guarantees hold across
+  the process boundary and a harness never touches a provider SDK on the replay path.
+- **Runs on real agent-substrate — both capability tiers, green in CI.** The conformance suite runs
+  against a real `ate-system` in kind (not a mock). **Axis 1** (`STATELESS_REPLAY`, gVisor):
+  byte-identical replay. **Axis 2** (`REQUIRES_MEMORY_SNAPSHOT`, micro-VM): drive → suspend (memory
+  snapshot) → restore → the in-RAM state **continues**, with the chain verifying across the snapshot
+  boundary — what a plain pod structurally cannot do. `CanPlace` gates the tiers, and the neutral core
+  imports **zero** substrate code (a CI gate asserts it). See
+  [`docs/substrate-conformance.md`](docs/substrate-conformance.md).
 
 ## How it behaves
 
-- **Resumability** defaults to `STATELESS_REPLAY` — history is replayed into the harness on
-  resume / fork, so a session runs on any runtime (even a plain pod). Stateful harnesses opt into
+- **Resumability** defaults to `STATELESS_REPLAY` — history is replayed into the harness on resume /
+  fork, so a session runs on any runtime (even a plain pod). Stateful harnesses opt into
   `REQUIRES_MEMORY_SNAPSHOT`, which the host schedules only on a memory-snapshot-capable runtime.
-- **Tool calls** default to `IN_HARNESS_REPORTED` (fast path, reported for audit); sensitive
-  tools opt into host-mediated execution or human / policy approval.
-- **Capability matching:** a harness declares `Capabilities`, a runtime declares
-  `RuntimeCapabilities`, and the host places a harness only on a runtime that satisfies it —
-  degrading honestly instead of resuming wrong.
+- **Capability matching:** a harness declares `Capabilities`, a runtime declares `RuntimeCapabilities`,
+  and `CanPlace` places a harness only on a runtime that satisfies it — degrading honestly instead of
+  resuming wrong.
+- **Tool calls** default to `IN_HARNESS_REPORTED` (fast path, reported for audit); sensitive tools opt
+  into host-mediated execution (`CONTROLLER_MEDIATED`), with crash-mid-tool at-most-once re-drive. A
+  `REQUIRES_APPROVAL` tier is declared; the approval gate is a tracked follow-up.
 - **Recovery:** an `Exec` with no inputs re-drives the last interrupted execution from history.
+
+## Repo layout
+
+| Path | What |
+|---|---|
+| `api/` | The wire proto (`*.proto`) + Go SPI (`*.go`): Sessions, Harness, Runtime, Event. |
+| `controller/` | Single-writer, event-sourced core: drives one session, mediates the model, enforces the determinism invariants. |
+| `eventlog/`, `sqlitelog/` | The durable event log: CAS + fencing token + hash chain (in-memory reference + sqlite backend). |
+| `canon/` | Language-neutral canonical serialization (RFC 8785 JCS) for the hash chain. |
+| `harnesswire/` | Bridges the in-process `api.Harness` SPI and the out-of-process `Harness.Connect` gRPC stream. |
+| `placement/` | The `Placer`: wires Sessions to the `Runtime` SPI, mints/binds fences, gates via `CanPlace`. |
+| `runtime/local`, `runtime/substrate` | `Runtime` backends: a filesystem-only local backend, and agent-substrate. |
+| `harness/echoagent`, `harness/counteragent` | Reference harnesses: `STATELESS_REPLAY` echo, `REQUIRES_MEMORY_SNAPSHOT` counter. |
+| `session/`, `host/` | The `Sessions` gRPC service + the reference host. |
+| `cmd/agentctl` | Client CLI (create / exec / replay / fork / suspend / resume). |
+| `conformance/` | The replay-conformance suite (the neutral determinism checks). |
+| `integrations/substrate/` | The substrate `ControlClient` adapter — a **separate module** so the core stays substrate-free. |
+| `deploy/substrate/`, `.github/workflows/substrate-e2e.yml` | Manifests + CI for the real-substrate conformance. |
+
+## Try it
+
+```bash
+go build ./...
+go test ./...                       # unit + replay-conformance suite
+go test ./conformance/ -v           # just the determinism checks
+```
+
+The real-substrate conformance (both tiers) runs in the `substrate-conformance` workflow
+(`.github/workflows/substrate-e2e.yml`), nightly and on manual dispatch. See
+[`docs/substrate-conformance.md`](docs/substrate-conformance.md) to reproduce it.
 
 ## Ecosystem
 
@@ -70,6 +118,9 @@ the session log and the harness stream.
 
 ## Status
 
-- v0 — proto + interfaces only. No host, runtime, or CLI yet.
-- Build: `go build ./...`. Layout: `api/*.proto` (wire) + `api/*.go` (Go SPI).
-- `TODO(spike):` map the `Runtime` SPI onto agent-substrate to prove "substrate underneath."
+Working reference implementation (Go 1.26). The Sessions API, the single-writer event-sourced controller,
+the durable hash-chained log, BYOH over `Harness.Connect`, the `Runtime` SPI with local + substrate
+backends, the replay-conformance suite, and real-substrate conformance across both capability tiers all
+run today. Productization (managed control plane, enterprise identity/provenance, confidential/GPU
+snapshots) and session-level suspend/resume *orchestrated through the `Placer`* (the conformance driver
+exercises the raw SPI today) are in progress.
