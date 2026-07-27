@@ -1,0 +1,64 @@
+# Axis-2 micro-VM manifests: the in-RAM counter harness packaged as a micro-VM (kata + cloud-hypervisor)
+# ActorTemplate + WorkerPool. Axis 2 is the REQUIRES_MEMORY_SNAPSHOT path — the differentiator a plain
+# pod (a filesystem-only runtime) cannot do: the counter's state lives ONLY in guest RAM, so it survives
+# suspend/resume solely via a memory snapshot (onPause: Full -> SuspendActor -> ResumeActor{boot:false}).
+#
+# Grounded in agent-substrate demos/counter/counter-microvm.yaml.tmpl. Differences from that demo:
+#   - Our harness is cmd/harnessnode with HARNESS_KIND=counter (the harnesswire gRPC counter), reached
+#     by a direct PodIP:80 dial (Path A), not the demo's HTTP-over-mesh counter.
+#   - No durableDir volume: the count is PURE in-RAM (the axis-2 point), so onCommit is Full, not Data.
+#
+# The micro-VM sandbox binaries (cloud-hypervisor, virtiofsd, kata kernel/rootfs/config) come from the
+# cluster-scoped `counter-microvm` SandboxConfig, whose assets are staged to the object store by
+# substrate's run-microvm-demo[-kind].sh.
+# TODO(axis-2): a dedicated agentsessions-microvm SandboxConfig referencing the same staged kata-assets,
+# so this does not depend on the demo's SandboxConfig being installed.
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: counter-microvm
+  namespace: ate-agentsessions
+  labels:
+    workload: counter-microvm
+spec:
+  replicas: 2
+  sandboxClass: microvm
+  sandboxConfigName: counter-microvm
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-microvm
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: counter-microvm
+  namespace: ate-agentsessions
+spec:
+  # Must match the WorkerPool's sandboxClass: a snapshot is not portable across sandbox classes, so only
+  # pools of the same class are eligible to run this template's actors.
+  sandboxClass: microvm
+  pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+  containers:
+    - name: harness
+      # cmd/harnessnode with HARNESS_KIND=counter serves the in-RAM counter over harnesswire on :80.
+      image: ko://github.com/aramase/agentsessions/cmd/harnessnode
+      command:
+        - /ko-app/harnessnode
+      env:
+        - name: HARNESS_KIND
+          value: counter
+      readyz:
+        httpGet:
+          path: /readyz
+          port: 8081
+  workerSelector:
+    matchLabels:
+      workload: counter-microvm
+  # onPause: Full captures guest RAM on suspend — the load-bearing bit: ResumeActor{boot:false} restores
+  # the in-RAM count, which no journal replay could reconstruct. onCommit: Full builds the golden without
+  # a durableDir (the count is pure RAM, so there is no Data-scope volume to snapshot).
+  snapshotsConfig:
+    onPause: Full
+    onCommit: Full
+    location: gs://ate-snapshots/ate-agentsessions-microvm/
