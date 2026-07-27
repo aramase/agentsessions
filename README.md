@@ -48,7 +48,7 @@ determinism guarantees are exercised by a replay-conformance suite (`conformance
   one incarnation, kill it, and a *different* one reconstructs the session **byte-identically** from the
   durable journal (`sqlitelog/`), invoking the model **zero** times.
 - **Tamper-evident, language-neutral provenance.** Every event is hash-chained with a canonical form
-  (RFC 8785 JCS over proto3-JSON, `canon/`), so the chain is not Go-specific — a ~30-line non-Go verifier
+  (RFC 8785 JCS over proto3-JSON, `canon/`), so the chain is not Go-specific — a non-Go verifier
   reproduces the Go hash (`hack/verify_chain.py`).
 - **Bring-your-own-harness, out of process.** The harness runs behind the `Harness.Connect` gRPC stream
   (`harnesswire/`); the host mediates the model over the wire, so the determinism guarantees hold across
