@@ -4,7 +4,10 @@
 # /dev/kvm udev rule, kind bring-up). Axis 1 = gVisor + the echo harness + ResumeActor{boot:true} +
 # journal replay, driven by an IN-CLUSTER Job: the atenet mesh is HTTP/1.1-only to actors (Q1 resolved),
 # so the harness is reached by a direct gRPC dial to the actor's PodIP:80 (like google/ax), not the
-# router. Axis 2 (micro-VM memory snapshot) is added later.
+# router. Axis 2 = the in-RAM counter (REQUIRES_MEMORY_SNAPSHOT) on a micro-VM: drive to N -> suspend
+# (memory snapshot) -> resume -> the count continues (N+1), which no journal replay could reconstruct —
+# the differentiator a plain pod cannot do. Both axes run in one cluster; axis-2's micro-VM setup reuses
+# substrate's run-microvm-demo-kind recipe (kata + cloud-hypervisor asset cache).
 name: substrate-e2e
 
 on:
@@ -22,7 +25,7 @@ env:
   KO_DOCKER_REPO: localhost:5001
 
 jobs:
-  axis1-gvisor:
+  substrate-conformance:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agentsessions
@@ -48,14 +51,22 @@ jobs:
           git clone https://github.com/agent-substrate/substrate _substrate
           git -C _substrate checkout "${SUBSTRATE_REF}"
 
+      - name: Cache micro-VM assets (kata-static + cloud-hypervisor + virtiofsd)
+        # Assembling the assets is fully pinned by assemble.sh (all downloads on amd64), so key the
+        # cache on its hash. run-microvm-demo-kind.sh skips assembling when these are present.
+        uses: actions/cache@v4
+        with:
+          path: _substrate/bin/microvm-assets/amd64
+          key: microvm-assets-amd64-${{ hashFiles('_substrate/hack/microvm-assets/assemble.sh') }}
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
       - name: Enable KVM
-        # create-kind-cluster.sh mounts /dev/kvm into the node; grant access via the udev rule
-        # substrate's own CI uses. (gVisor itself does not need KVM, but the bring-up script expects it.)
+        # Grant /dev/kvm via the udev rule substrate's CI uses: axis-2's micro-VM (kata + cloud-
+        # hypervisor) needs it, and create-kind-cluster.sh mounts it into the node. (gVisor does not.)
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -101,6 +112,46 @@ jobs:
           done
           echo "=== axis-1 driver logs ==="
           kubectl --context kind-kind logs -n ate-agentsessions job/axis1-conformance --tail=50 || true
+          echo "=== Job result: ${result:-timeout} ==="
+          test "$result" = "succeeded"
+
+      - name: Deploy the micro-VM sandbox class (axis 2)
+        # run-microvm-demo-kind stages the (cached) kata-assets into rustfs and installs the
+        # cluster-scoped micro-VM SandboxConfig our counter-microvm ActorTemplate reuses. It also
+        # re-applies ate-system (idempotent) and deploys substrate's own counter demo (harmless).
+        working-directory: _substrate
+        run: hack/run-microvm-demo-kind.sh --ateapi-client-auth=token
+
+      - name: Build + apply the counter harness micro-VM ActorTemplate + WorkerPool
+        run: |
+          HARNESS_IMG="$(ko build ./cmd/harnessnode)"
+          ATEOM_MV_IMG="$(cd _substrate && ko build ./cmd/ateom-microvm)"
+          sed -e "s#ko://github.com/aramase/agentsessions/cmd/harnessnode#${HARNESS_IMG}#" \
+              -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
+              deploy/substrate/counter-microvm-actortemplate.yaml | kubectl --context kind-kind apply -f -
+          kubectl --context kind-kind wait --for=condition=Ready \
+            actortemplate/counter-microvm -n ate-agentsessions --timeout=600s
+
+      - name: Axis-2 conformance (in-cluster Job — memory continuity across suspend/restore)
+        # Drive the in-RAM counter to N, SuspendActor (memory snapshot), ResumeActor{boot:false}, and
+        # assert continuity (N+1), no double-application, chain-verify across the boundary, fresh fence.
+        # The differentiator a plain pod cannot do.
+        run: |
+          JOB_IMG="$(cd integrations/substrate && ko build ./cmd/axis2)"
+          kubectl --context kind-kind delete job axis2-conformance -n ate-agentsessions --ignore-not-found --wait=true
+          sed -e "s#ko://github.com/aramase/agentsessions/integrations/substrate/cmd/axis2#${JOB_IMG}#" \
+              deploy/substrate/axis2-job.yaml | kubectl --context kind-kind apply -f -
+          echo "Waiting for the axis-2 Job to finish..."
+          result=""
+          for i in $(seq 1 120); do
+            s="$(kubectl --context kind-kind get job axis2-conformance -n ate-agentsessions -o jsonpath='{.status.succeeded}' 2>/dev/null)"
+            f="$(kubectl --context kind-kind get job axis2-conformance -n ate-agentsessions -o jsonpath='{.status.failed}' 2>/dev/null)"
+            if [ "$s" = "1" ]; then result=succeeded; break; fi
+            if [ -n "$f" ] && [ "$f" != "0" ]; then result=failed; break; fi
+            sleep 3
+          done
+          echo "=== axis-2 driver logs ==="
+          kubectl --context kind-kind logs -n ate-agentsessions job/axis2-conformance --tail=50 || true
           echo "=== Job result: ${result:-timeout} ==="
           test "$result" = "succeeded"
 
