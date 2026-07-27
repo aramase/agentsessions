@@ -20,7 +20,9 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/harness/counteragent"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/harnesswire"
 	"github.com/aramase/agentsessions/runtime/substrate"
@@ -46,7 +48,7 @@ func main() {
 		log.Fatalf("harnessnode: listen %s: %v", grpcAddr, err)
 	}
 	srv := grpc.NewServer()
-	v1.RegisterHarnessServer(srv, harnesswire.NewServer(echoagent.Harness{}))
+	v1.RegisterHarnessServer(srv, harnesswire.NewServer(selectHarness()))
 
 	// readyz on a side port so the actor is reported live once the gRPC server is accepting.
 	readyz := &http.Server{
@@ -65,8 +67,20 @@ func main() {
 		_ = readyz.Close()
 	}()
 
-	log.Printf("harnessnode: echo harness serving harnesswire on %s, readyz on %s", grpcAddr, readyzAddr)
+	log.Printf("harnessnode: %q harness serving harnesswire on %s, readyz on %s", env("HARNESS_KIND", "echo"), grpcAddr, readyzAddr)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatalf("harnessnode: serve: %v", err)
+	}
+}
+
+// selectHarness picks the harness this node serves, by HARNESS_KIND (default "echo"). One image
+// serves both axes: "echo" is STATELESS_REPLAY (axis 1); "counter" is REQUIRES_MEMORY_SNAPSHOT
+// (axis 2, micro-VM) and holds in-RAM state that only a memory snapshot can preserve.
+func selectHarness() api.Harness {
+	switch env("HARNESS_KIND", "echo") {
+	case "counter":
+		return &counteragent.Harness{}
+	default:
+		return echoagent.Harness{}
 	}
 }
