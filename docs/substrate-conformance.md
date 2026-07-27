@@ -60,9 +60,14 @@ The harness is a `harnesswire` gRPC server. The key finding (verified empiricall
 
 ```mermaid
 flowchart LR
-  job[axis conformance Job<br/>in-cluster] -->|Control gRPC<br/>ClusterIP + SA token| api[ate-api-server]
-  job -->|Harness.Connect h2c<br/>direct PodIP:80| actor[actor harness<br/>in gVisor / micro-VM]
-  job -. mesh is HTTP/1.1 to actors,<br/>so gRPC bypasses the router .-> router[atenet-router]
+  job["axis conformance Job<br/>in-cluster"]
+  api["ate-api-server"]
+  actor["actor harness<br/>gVisor / micro-VM"]
+  router["atenet-router"]
+
+  job -->|"Control gRPC<br/>ClusterIP + SA token"| api
+  job -->|"Harness.Connect h2c<br/>direct PodIP:80"| actor
+  job -.->|"mesh is HTTP/1.1 to actors;<br/>gRPC bypasses the router"| router
 ```
 
 Because pod IPs only route in-cluster, the conformance driver runs as a **Kubernetes Job**: it reaches
