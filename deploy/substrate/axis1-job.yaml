@@ -1,0 +1,54 @@
+# Axis-1 conformance as an in-cluster Job. The former external driver (kubectl port-forward + a locally
+# minted token) is superseded: the atenet mesh is HTTP/1.1-only to actors, so the harness is reached by
+# a DIRECT gRPC dial to the actor's PodIP:HarnessPort, which only routes from inside the cluster. So the
+# driver runs here as a Job (matching google/ax's in-cluster server): Control over the ate-api-server
+# ClusterIP, the actor over its pod IP.
+#
+# Auth is the mounted projected ServiceAccount token the api-server's --ateapi-client-auth=token expects
+# (audience api.ate-system.svc). The default SA suffices — the api-server authenticates any valid SA JWT
+# (no per-identity authz) and the driver needs no Kubernetes API access (the pod IP comes from
+# ResumeActor, not the k8s API).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: axis1-conformance
+  namespace: ate-agentsessions
+spec:
+  backoffLimit: 0 # no retries: a failed conformance run must fail loudly, not be masked by a retry
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: axis1-conformance
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: axis1
+          # Built from the substrate integration module by ko (a normal pod image, not an ateom sandbox
+          # image, so no distroless-base constraint applies).
+          image: ko://github.com/aramase/agentsessions/integrations/substrate/cmd/axis1
+          env:
+            - name: ATEAPI_ADDR
+              value: "api.ate-system.svc:443"
+            - name: ATEAPI_SERVER_NAME
+              value: "api.ate-system.svc"
+            - name: ATEAPI_TOKEN_FILE
+              value: "/var/run/secrets/tokens/ateapi-token"
+            - name: SUBSTRATE_ATESPACE
+              value: "axis1"
+            - name: ACTORTEMPLATE_NS
+              value: "ate-agentsessions"
+            - name: ACTORTEMPLATE_NAME
+              value: "echo-harness"
+          volumeMounts:
+            - name: ateapi-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+      volumes:
+        - name: ateapi-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 3600
+                  path: ateapi-token

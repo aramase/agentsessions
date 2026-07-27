@@ -2,8 +2,9 @@
 # this is heavy (kind + KVM + ate-system + micro-VM assets on other axes), so it runs nightly and on
 # manual dispatch, NOT on every PR. It copies agent-substrate's own pr-workflow.yaml recipe (free-disk,
 # /dev/kvm udev rule, kind bring-up). Axis 1 = gVisor + the echo harness + ResumeActor{boot:true} +
-# journal replay — the cheapest always-green path that empirically closes the gRPC-over-router (Q1)
-# and ResumeActor-vs-auto-resume (§3b) questions. Axis 2 (micro-VM memory snapshot) is added later.
+# journal replay, driven by an IN-CLUSTER Job: the atenet mesh is HTTP/1.1-only to actors (Q1 resolved),
+# so the harness is reached by a direct gRPC dial to the actor's PodIP:80 (like google/ax), not the
+# router. Axis 2 (micro-VM memory snapshot) is added later.
 name: substrate-e2e
 
 on:
@@ -71,7 +72,6 @@ jobs:
       - name: Build + apply the echo harness ActorTemplate + WorkerPool
         # Two ko:// image refs span two modules: our harnessnode (this repo) and substrate's
         # ateom-gvisor (the clone). Resolve each in its own module, substitute into the manifest, apply.
-        # TODO(first-CI): confirm the exact resolve/apply path — substrate may expect `kubectl ate`.
         run: |
           HARNESS_IMG="$(ko build ./cmd/harnessnode)"
           ATEOM_IMG="$(cd _substrate && ko build ./cmd/ateom-gvisor)"
@@ -81,17 +81,33 @@ jobs:
           kubectl --context kind-kind wait --for=condition=Ready \
             actortemplate/echo-harness -n ate-agentsessions --timeout=600s
 
-      - name: Axis-1 conformance (placed exec + byte-identical replay on substrate)
-        env:
-          SUBSTRATE_E2E: "1"
+      - name: Axis-1 conformance (in-cluster Job — placed exec + byte-identical replay on substrate)
+        # The atenet mesh is HTTP/1.1-only to actors, so the harness is reached by a direct gRPC dial to
+        # the actor's PodIP:80 — which only routes in-cluster. The driver runs as a Job (like ax): Control
+        # via the ate-api-server ClusterIP + a mounted SA token, the actor via its pod IP. Exit 0 = pass.
         run: |
-          cd integrations/substrate
-          go test -v -run TestAxis1PlacedExecReplayOnSubstrate ./e2e/
+          JOB_IMG="$(cd integrations/substrate && ko build ./cmd/axis1)"
+          kubectl --context kind-kind delete job axis1-conformance -n ate-agentsessions --ignore-not-found --wait=true
+          sed -e "s#ko://github.com/aramase/agentsessions/integrations/substrate/cmd/axis1#${JOB_IMG}#" \
+              deploy/substrate/axis1-job.yaml | kubectl --context kind-kind apply -f -
+          echo "Waiting for the axis-1 Job to finish..."
+          result=""
+          for i in $(seq 1 100); do
+            s="$(kubectl --context kind-kind get job axis1-conformance -n ate-agentsessions -o jsonpath='{.status.succeeded}' 2>/dev/null)"
+            f="$(kubectl --context kind-kind get job axis1-conformance -n ate-agentsessions -o jsonpath='{.status.failed}' 2>/dev/null)"
+            if [ "$s" = "1" ]; then result=succeeded; break; fi
+            if [ -n "$f" ] && [ "$f" != "0" ]; then result=failed; break; fi
+            sleep 3
+          done
+          echo "=== axis-1 driver logs ==="
+          kubectl --context kind-kind logs -n ate-agentsessions job/axis1-conformance --tail=50 || true
+          echo "=== Job result: ${result:-timeout} ==="
+          test "$result" = "succeeded"
 
       - name: Dump diagnostics on failure
         if: failure()
         run: |
-          kubectl --context kind-kind get actortemplate,workerpool,pods -A -o wide || true
+          kubectl --context kind-kind get actortemplate,workerpool,jobs,pods -A -o wide || true
           for ns in ate-agentsessions ate-system; do
             for p in $(kubectl --context kind-kind get pods -n "$ns" -o name 2>/dev/null); do
               echo "=== logs: $ns/$p ==="
