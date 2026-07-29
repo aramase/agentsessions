@@ -58,7 +58,7 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (bool, error) 
 	}
 
 	sink := &resumeSink{live: liveSink{c: c}, stream: stream}
-	if err := har.Run(ctx, &api.Start{Inputs: inputs, History: histEvents}, sink); err != nil {
+	if err := har.Run(ctx, &api.Start{Inputs: inputs, History: histEvents, Identity: c.identity()}, sink); err != nil {
 		_, _ = c.appendSeq(api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
 		return true, err
 	}
@@ -166,4 +166,11 @@ func (s *resumeSink) Usage(u api.Usage) error {
 		return s.live.Usage(u)
 	}
 	return nil // usage is not part of the served effect stream
+}
+
+// Credential is always live, on both sides of the crash point: no token was recorded, and a
+// credential re-drive is safe — vending is idempotent from the harness's point of view (it gets a
+// fresh, equally scoped token) and the audit record of the retry is the truth of what happened.
+func (s *resumeSink) Credential(req api.CredentialRequest) (api.Credential, error) {
+	return s.live.Credential(req)
 }

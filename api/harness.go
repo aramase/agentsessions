@@ -69,16 +69,14 @@ type Start struct {
 	ResumeFromSeq int64
 }
 
-// IdentityContext carries the session principal and, optionally, a minter so the
-// harness can obtain scoped, delegated tokens (Transaction Tokens) for tool calls
-// rather than passing the raw principal downstream.
+// IdentityContext carries the session principal the harness acts as, and whether the
+// host will vend credentials for it. Acquiring one is an EventSink.Credential call, so
+// it works identically in-process and over the Harness.Connect stream — the harness
+// never holds a standing secret and never reaches a credential source itself.
 type IdentityContext struct {
-	Principal IdentityRef
-	MintToken TokenMinter // nil when identity is not configured (dev)
+	Principal     IdentityRef
+	CanMintTokens bool // the host has a credential source configured
 }
-
-// TokenMinter returns a scoped token for a downstream audience.
-type TokenMinter func(ctx context.Context, audience []string) (string, error)
 
 // EventSink is the harness author's handle for emitting events. The SDK hides the gRPC
 // stream, sequence assignment, and the emit -> wait-for-host round-trip.
@@ -101,6 +99,14 @@ type EventSink interface {
 	Report(ToolResult) error
 	// Usage records token/cost accounting.
 	Usage(Usage) error
+	// Credential asks the host for a short-lived credential for the session's principal:
+	// a downstream credential the platform holds (Provider) or a scoped delegated token
+	// minted for an audience (Audience). The host records the REQUEST and returns the
+	// token in-band without journaling it, so authority is auditable but never durable.
+	// Unlike Model, a credential is re-vended on replay rather than served from the
+	// journal: a token is a capability with a lifetime, not content, and it never enters
+	// the hash chain.
+	Credential(CredentialRequest) (Credential, error)
 }
 
 // ModelRequest is a model call: the message context + model selection.

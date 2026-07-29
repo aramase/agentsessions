@@ -52,6 +52,20 @@ type ModelFunc func(api.ModelRequest) (api.ModelResponse, error)
 // call under the same key, and an idempotent tool MUST NOT repeat the external effect.
 type ToolFunc func(api.ToolCall) (api.ToolResult, error)
 
+// CredentialFunc vends a short-lived credential for the session's principal: a downstream
+// credential the platform holds on its behalf (req.Provider) or a scoped delegated token minted
+// for an audience (req.Audience). It is the host's authority seam — the harness never reaches a
+// credential source itself, in-process or in a sandbox.
+//
+// Unlike ModelFunc this is NOT a recorded effect: the controller journals the request and returns
+// the token in-band without writing it, so the log is a complete audit of the authority a turn
+// exercised and never a store of the secrets themselves.
+type CredentialFunc func(principal api.IdentityRef, req api.CredentialRequest) (api.Credential, error)
+
+// ErrNoCredentialSource is returned to a harness that asks for a credential on a host with no
+// credential source configured. It fails closed: a harness must not silently proceed unauthorized.
+var ErrNoCredentialSource = errors.New("controller: no credential source configured")
+
 // Option configures a Controller at construction.
 type Option func(*Controller)
 
@@ -65,6 +79,18 @@ func WithToolExecutor(tool ToolFunc) Option { return func(c *Controller) { c.too
 // stays the single fence authority. Fences are >= 1, so WithFence(0) is a no-op (mint-my-own).
 func WithFence(token int64) Option { return func(c *Controller) { c.fence = token } }
 
+// WithCredentialSource sets the host's authority seam: what vends credentials to the harness.
+// Without it, a harness that asks for one gets ErrNoCredentialSource and Start reports
+// CanMintTokens=false, so a harness can degrade rather than fail blind.
+func WithCredentialSource(creds CredentialFunc) Option {
+	return func(c *Controller) { c.creds = creds }
+}
+
+// WithPrincipal binds the session's principal to the controller. It travels to the harness in
+// Start.Identity and is what the credential source vends FOR, so a harness never names the
+// subject it acts as — the host does.
+func WithPrincipal(p api.IdentityRef) Option { return func(c *Controller) { c.principal = p } }
+
 // Controller drives one session's log with a single incarnation (fence). It is meant to be driven
 // by a single goroutine: Exec and Replay are NOT safe to call concurrently on the same Controller
 // (liveModelCalls is unsynchronized). Concurrency BETWEEN controllers/processes is safe — the log's
@@ -73,6 +99,8 @@ type Controller struct {
 	log            eventlog.Store
 	model          ModelFunc
 	tool           ToolFunc
+	creds          CredentialFunc
+	principal      api.IdentityRef
 	fence          int64
 	liveModelCalls int
 }
@@ -121,7 +149,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		}
 		last = rec.Seq
 	}
-	if err := har.Run(ctx, &api.Start{History: history, Inputs: inputs}, &liveSink{c: c}); err != nil {
+	if err := har.Run(ctx, &api.Start{History: history, Inputs: inputs, Identity: c.identity()}, &liveSink{c: c}); err != nil {
 		// Best-effort: record the failure. If this append itself fails we still surface the
 		// original harness error to the caller.
 		_, _ = c.appendSeq(api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
@@ -153,8 +181,8 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) ([]string, err
 		}
 	}
 	before := c.liveModelCalls
-	sink := &replaySink{stream: stream}
-	if err := har.Run(ctx, &api.Start{Inputs: inputs, History: history}, sink); err != nil {
+	sink := &replaySink{c: c, stream: stream}
+	if err := har.Run(ctx, &api.Start{Inputs: inputs, History: history, Identity: c.identity()}, sink); err != nil {
 		return nil, err
 	}
 	if c.liveModelCalls != before {
@@ -189,6 +217,12 @@ func (c *Controller) ModelInvocations() int { return c.liveModelCalls }
 
 // Head returns the current log head seq.
 func (c *Controller) Head() (int64, error) { return c.log.Head() }
+
+// identity is what the harness is told about who it acts as: the bound principal, and whether the
+// host can vend credentials for it.
+func (c *Controller) identity() api.IdentityContext {
+	return api.IdentityContext{Principal: c.principal, CanMintTokens: c.creds != nil}
+}
 
 func (c *Controller) appendSeq(ev api.Event) (eventlog.Record, error) {
 	head, err := c.log.Head()

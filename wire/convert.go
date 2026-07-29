@@ -55,6 +55,8 @@ func EventToProto(e api.Event) *v1.Event {
 		out.Body = &v1.Event_End{End: endToProto(e.End)}
 	case e.Err != nil:
 		out.Body = &v1.Event_Error{Error: errorToProto(e.Err)}
+	case e.Credential != nil:
+		out.Body = &v1.Event_Credential{Credential: credentialReqToProto(e.Credential)}
 	}
 	return out
 }
@@ -94,6 +96,8 @@ func EventFromProto(p *v1.Event) api.Event {
 		out.End = endFromProto(b.End)
 	case *v1.Event_Error:
 		out.Err = errorFromProto(b.Error)
+	case *v1.Event_Credential:
+		out.Credential = credentialReqFromProto(b.Credential)
 	}
 	return out
 }
@@ -469,6 +473,8 @@ func kindToProto(k api.EventKind) v1.EventKind {
 		return v1.EventKind_EVENT_END
 	case api.EventError:
 		return v1.EventKind_EVENT_ERROR
+	case api.EventCredentialRequest:
+		return v1.EventKind_EVENT_CREDENTIAL_REQUEST
 	default:
 		return v1.EventKind_EVENT_KIND_UNSPECIFIED
 	}
@@ -498,9 +504,28 @@ func kindFromProto(k v1.EventKind) api.EventKind {
 		return api.EventEnd
 	case v1.EventKind_EVENT_ERROR:
 		return api.EventError
+	case v1.EventKind_EVENT_CREDENTIAL_REQUEST:
+		return api.EventCredentialRequest
 	default:
 		return ""
 	}
+}
+
+// credentialReqToProto converts a credential REQUEST. There is no converter for the served
+// credential: the token is wire-only (harness.proto CredentialResult) and never reaches the log,
+// so it has no domain-event form to convert.
+func credentialReqToProto(c *api.CredentialRequest) *v1.CredentialRequest {
+	if c == nil {
+		return nil
+	}
+	return &v1.CredentialRequest{Provider: c.Provider, Audience: c.Audience}
+}
+
+func credentialReqFromProto(p *v1.CredentialRequest) *api.CredentialRequest {
+	if p == nil {
+		return nil
+	}
+	return &api.CredentialRequest{Provider: p.GetProvider(), Audience: p.GetAudience()}
 }
 
 func mediationToProto(m api.Mediation) v1.Mediation {
