@@ -71,7 +71,7 @@ func TestWireFailedHarnessSurfacesError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c.Exec(context.Background(), har, []api.Message{*api.TextMessage("user", "hi")}, 0)
+	err = c.Advance(context.Background(), har, []api.Message{*api.TextMessage("user", "hi")}, 0)
 	if err == nil {
 		t.Fatal("exec of a failing remote harness returned nil; the failure was swallowed")
 	}
@@ -111,7 +111,7 @@ func TestWireNondeterministicReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), har, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+	if err := c.Advance(context.Background(), har, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
 		t.Fatalf("wire exec: %v", err)
 	}
 	live, _ := c.Outputs()
@@ -154,7 +154,7 @@ func TestWireControllerMediatedTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), har, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
+	if err := c.Advance(context.Background(), har, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
 		t.Fatalf("wire exec: %v", err)
 	}
 	if tool.effects["k1"] != 1 {

@@ -70,7 +70,7 @@ func main() {
 		if err != nil {
 			fatalf(host, "new controller: %v", err)
 		}
-		if err := c.Exec(ctx, echoagent.Harness{}, []api.Message{*api.TextMessage("user", input)}, 0); err != nil {
+		if err := c.Advance(ctx, echoagent.Harness{}, []api.Message{*api.TextMessage("user", input)}, 0); err != nil {
 			fatalf(host, "exec: %v", err)
 		}
 		out, _ := c.Outputs()

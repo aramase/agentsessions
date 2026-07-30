@@ -66,7 +66,7 @@ func TestReplayReconstructsNondeterministicOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+	if err := c.Advance(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	live, _ := c.Outputs()
@@ -110,7 +110,7 @@ func TestMultiTurnResumeContinue(t *testing.T) {
 			s.Close()
 			t.Fatal(err)
 		}
-		if err := c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", in)}, head); err != nil {
+		if err := c.Advance(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", in)}, head); err != nil {
 			s.Close()
 			t.Fatalf("turn %d (%q): %v", i, in, err)
 		}
@@ -146,7 +146,7 @@ func TestCrashMidTurnRedriveAtMostOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c1.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+	if err := c1.Advance(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	recorded, _ := c1.Outputs()
@@ -199,7 +199,7 @@ func TestForkEquivalence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+	if err := c.Advance(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	head, _ := parent.Head()
@@ -234,14 +234,14 @@ func TestSingleWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c1.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "one")}, 0); err != nil {
+	if err := c1.Advance(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "one")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	c2, err := controller.New(log, echoagent.Model)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c2.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "two")}, 0); err == nil {
+	if err := c2.Advance(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "two")}, 0); err == nil {
 		t.Fatal("expected a stale expected_last_seq to be rejected")
 	}
 }
@@ -330,7 +330,7 @@ func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c1.Exec(context.Background(), toolHarness{key: "k1"}, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
+	if err := c1.Advance(context.Background(), toolHarness{key: "k1"}, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	// Journal now: INPUT(1) TOOL_CALL(2) TOOL_RESULT(3) END(4); the effect ran exactly once.
@@ -396,7 +396,7 @@ func TestControllerMediatedToolRequiresKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c.Exec(context.Background(), toolHarness{key: ""}, []api.Message{*api.TextMessage("user", "go")}, 0)
+	err = c.Advance(context.Background(), toolHarness{key: ""}, []api.Message{*api.TextMessage("user", "go")}, 0)
 	if !errors.Is(err, controller.ErrMissingIdempotencyKey) {
 		t.Fatalf("want ErrMissingIdempotencyKey, got %v", err)
 	}
@@ -435,7 +435,7 @@ func TestUnmediatedToolCallRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), unmediatedToolHarness{}, []api.Message{*api.TextMessage("user", "go")}, 0); !errors.Is(err, controller.ErrUnmediatedToolCall) {
+	if err := c.Advance(context.Background(), unmediatedToolHarness{}, []api.Message{*api.TextMessage("user", "go")}, 0); !errors.Is(err, controller.ErrUnmediatedToolCall) {
 		t.Fatalf("want ErrUnmediatedToolCall (I3 bypass open), got %v", err)
 	}
 	recs, _ := log.Read(1)

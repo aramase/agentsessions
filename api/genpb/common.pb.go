@@ -1,6 +1,6 @@
 // Shared wire types for the agentsessions Session and Harness services.
 //
-// The Event message is used by BOTH the session log (Sessions.Exec / Replay) and the
+// The Event message is used by BOTH the session log (Sessions.Advance / Replay) and the
 // harness stream (Harness.Connect) — the harness's events become the session log.
 //
 // The content model (Part) is aligned with A2A `Part` + MCP content for interop; the

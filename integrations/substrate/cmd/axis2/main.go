@@ -124,7 +124,7 @@ func run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if err := c1.Exec(ctx, har1, []api.Message{*api.TextMessage("user", "inc")}, head); err != nil {
+		if err := c1.Advance(ctx, har1, []api.Message{*api.TextMessage("user", "inc")}, head); err != nil {
 			_ = close1()
 			return fmt.Errorf("drive turn %d: %w", i+1, err)
 		}
@@ -174,7 +174,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := c2.Exec(ctx, har2, []api.Message{*api.TextMessage("user", "inc")}, head); err != nil {
+	if err := c2.Advance(ctx, har2, []api.Message{*api.TextMessage("user", "inc")}, head); err != nil {
 		_ = close2()
 		return fmt.Errorf("drive post-restore turn: %w", err)
 	}

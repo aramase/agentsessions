@@ -24,11 +24,11 @@ func newLocalPlacer(t *testing.T, h api.Harness) *placement.Placer {
 	return placement.New(b, echoagent.Model)
 }
 
-// TestPlacerExecRoutesThroughRuntime proves a turn placed via the Placer runs through Runtime.Create
+// TestPlacerAdvanceRoutesThroughRuntime proves a turn placed via the Placer runs through Runtime.Create
 // and the backend-provided harness, binds the controller to a log-minted fence stamped on the
 // incarnation, and produces a verifiable journal — the in-process realization of "the controller
 // drives the Runtime SPI" instead of a co-located controller.
-func TestPlacerExecRoutesThroughRuntime(t *testing.T) {
+func TestPlacerAdvanceRoutesThroughRuntime(t *testing.T) {
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func TestPlacerExecRoutesThroughRuntime(t *testing.T) {
 	log := store.Session("s")
 
 	p := newLocalPlacer(t, echoagent.Harness{})
-	inc, err := p.Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "hi")}, 0)
+	inc, err := p.Advance(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "hi")}, 0)
 	if err != nil {
 		t.Fatalf("placed exec: %v", err)
 	}
@@ -72,12 +72,12 @@ func TestPlacerFenceBinding(t *testing.T) {
 	log := store.Session("s")
 	p := newLocalPlacer(t, echoagent.Harness{})
 
-	inc1, err := p.Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "one")}, 0)
+	inc1, err := p.Advance(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "one")}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	head, _ := log.Head()
-	inc2, err := p.Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "two")}, head)
+	inc2, err := p.Advance(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "two")}, head)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestPlacerFenceBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stale.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "stale")}, head2); !errors.Is(err, eventlog.ErrFenced) {
+	if err := stale.Advance(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "stale")}, head2); !errors.Is(err, eventlog.ErrFenced) {
 		t.Fatalf("a controller bound to the superseded fence must be fenced out, got %v", err)
 	}
 	if err := log.Verify(); err != nil {
@@ -138,7 +138,7 @@ func TestNeutralityThroughPlacer(t *testing.T) {
 	defer store1.Close()
 	log1 := store1.Session("s")
 	localPlacer := newLocalPlacer(t, memSnapshotHarness{})
-	if _, err := localPlacer.Exec(context.Background(), log1, "s", nil, 0); !errors.Is(err, placement.ErrUnplaceable) {
+	if _, err := localPlacer.Advance(context.Background(), log1, "s", nil, 0); !errors.Is(err, placement.ErrUnplaceable) {
 		t.Fatalf("local (MemorySnapshot=false) must refuse a REQUIRES_MEMORY_SNAPSHOT harness, got %v", err)
 	}
 	if h, _ := log1.Head(); h != 0 {
@@ -156,7 +156,7 @@ func TestNeutralityThroughPlacer(t *testing.T) {
 	sub := substrate.New(stubControl{}, "space", substrate.ObjectRef{Name: "echo"},
 		api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}})
 	subPlacer := placement.New(sub, echoagent.Model)
-	if _, err := subPlacer.Exec(context.Background(), store2.Session("s"), "s", nil, 0); errors.Is(err, placement.ErrUnplaceable) {
+	if _, err := subPlacer.Advance(context.Background(), store2.Session("s"), "s", nil, 0); errors.Is(err, placement.ErrUnplaceable) {
 		t.Fatalf("substrate (MemorySnapshot=true) must accept a REQUIRES_MEMORY_SNAPSHOT harness, got %v", err)
 	}
 }
@@ -174,7 +174,7 @@ func TestSuspendResumeRoundtripThroughSPI(t *testing.T) {
 	log := store.Session("s")
 	p := newLocalPlacer(t, echoagent.Harness{})
 
-	if _, err := p.Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+	if _, err := p.Advance(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
 

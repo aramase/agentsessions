@@ -66,7 +66,7 @@ func WithToolExecutor(tool ToolFunc) Option { return func(c *Controller) { c.too
 func WithFence(token int64) Option { return func(c *Controller) { c.fence = token } }
 
 // Controller drives one session's log with a single incarnation (fence). It is meant to be driven
-// by a single goroutine: Exec and Replay are NOT safe to call concurrently on the same Controller
+// by a single goroutine: Advance and Replay are NOT safe to call concurrently on the same Controller
 // (liveModelCalls is unsynchronized). Concurrency BETWEEN controllers/processes is safe — the log's
 // CAS + fencing reject a superseded writer.
 type Controller struct {
@@ -97,10 +97,10 @@ func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, erro
 	return c, nil
 }
 
-// Exec runs one live execution/turn. The first INPUT append is guarded by the caller's
+// Advance runs one live execution/turn. The first INPUT append is guarded by the caller's
 // expectedLastSeq (the single-writer CAS at the session boundary); the harness then runs
 // host-mediated, and the turn ends with an END event.
-func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) error {
+func (c *Controller) Advance(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) error {
 	// The harness receives the committed conversation so far as History (a stateless harness
 	// reconstructs its context from it); the echo harness ignores it, but a real one needs it.
 	prior, err := c.log.Read(1)

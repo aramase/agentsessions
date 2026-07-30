@@ -1,7 +1,7 @@
 // The Sessions control-plane API (client-facing) and the Runtime compute types.
 //
 // A Session is a durable conversation (event log) plus zero-or-one live incarnation.
-// Each Exec is one execution/turn. Fork branches the log at a sequence.
+// Each Advance runs one execution/turn. Fork branches the log at a sequence.
 syntax = "proto3";
 
 package agentsessions.v1;
@@ -106,7 +106,7 @@ message ListSessionsRequest { string project = 1; }
 message ListSessionsResponse { repeated Session sessions = 1; }
 message DeleteSessionRequest { string uid = 1; }
 
-message ExecRequest {
+message AdvanceRequest {
   string session = 1;
   // Input messages for this turn. Empty = resume/re-drive the last non-terminal
   // execution with no new input (recovery after a crash/interruption).
@@ -153,9 +153,9 @@ message HeartbeatRequest {
   string execution_id = 2;
 }
 
-// ExecUpdate is what the live Exec stream carries: a committed LogRecord, or an ephemeral
+// AdvanceUpdate is what the live Advance stream carries: a committed LogRecord, or an ephemeral
 // streaming Delta (transport only — not logged, not hash-chained).
-message ExecUpdate {
+message AdvanceUpdate {
   oneof update {
     LogRecord record = 1;
     Delta delta = 2;
@@ -177,9 +177,10 @@ service Sessions {
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc DeleteSession(DeleteSessionRequest) returns (Session);
 
-  // Exec runs one execution/turn. The live stream carries committed LogRecords plus
-  // ephemeral Deltas; Replay re-delivers committed records only (read-only).
-  rpc Exec(ExecRequest) returns (stream ExecUpdate);
+  // Advance runs one execution/turn, moving the session forward from the head the caller
+  // expects. The live stream carries committed LogRecords plus ephemeral Deltas; Replay
+  // re-delivers committed records only (read-only).
+  rpc Advance(AdvanceRequest) returns (stream AdvanceUpdate);
   rpc Replay(ReplayRequest) returns (stream LogRecord);
 
   // In-flight control.

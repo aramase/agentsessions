@@ -52,10 +52,10 @@ func New(model func(ModelRequest) ModelResponse) *Host {
 	return &Host{log: l, fence: l.NewFence(), model: model}
 }
 
-// Exec runs one execution/turn. The first append (INPUT) is guarded by the caller's
+// Advance runs one execution/turn. The first append (INPUT) is guarded by the caller's
 // expectedLastSeq (the single-writer CAS at the session API); subsequent appends are
 // sequential within this incarnation.
-func (h *Host) Exec(expectedLastSeq int64, har Harness, input string) error {
+func (h *Host) Advance(expectedLastSeq int64, har Harness, input string) error {
 	if _, err := h.log.Append(expectedLastSeq, h.fence,
 		api.Event{Kind: api.EventInput, Message: api.TextMessage("user", input)}); err != nil {
 		return err

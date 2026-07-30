@@ -96,7 +96,7 @@ func run(ctx context.Context) error {
 	p := placement.New(backend, echoagent.Model)
 
 	// Place + drive one turn: Create the actor (boot:true), dial the harness at PodIP:HarnessPort, run.
-	inc, err := p.Exec(ctx, journal, session, []api.Message{*api.TextMessage("user", "hi")}, 0)
+	inc, err := p.Advance(ctx, journal, session, []api.Message{*api.TextMessage("user", "hi")}, 0)
 	if inc.ID != "" {
 		// Best-effort cleanup so repeated runs don't leak actors onto workers. Runs at return, after the
 		// replay below, on a fresh context (the main one may be near its deadline).

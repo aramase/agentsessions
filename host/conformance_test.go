@@ -31,7 +31,7 @@ func equal(a, b []string) bool {
 // invokes the model zero times.
 func TestRecordReplayIdentity(t *testing.T) {
 	h := host.New(echoModel)
-	if err := h.Exec(0, echo.Harness{}, "hello"); err != nil {
+	if err := h.Advance(0, echo.Harness{}, "hello"); err != nil {
 		t.Fatalf("exec: %v", err)
 	}
 	recorded := h.Outputs()
@@ -58,7 +58,7 @@ func TestRecordReplayIdentity(t *testing.T) {
 func TestReplayDetectsNondeterminism(t *testing.T) {
 	n := 0
 	h := host.New(echoModel)
-	if err := h.Exec(0, &flaky{&n}, "hello"); err != nil {
+	if err := h.Advance(0, &flaky{&n}, "hello"); err != nil {
 		t.Fatalf("exec: %v", err)
 	}
 	_, err := h.Replay(&flaky{&n})
@@ -79,13 +79,13 @@ func (f *flaky) Run(e host.Effects, input string) error {
 	return e.Emit(resp.Text)
 }
 
-// §5 — single-writer: a second Exec with a stale expected_last_seq is rejected.
-func TestSingleWriterExecCAS(t *testing.T) {
+// §5 — single-writer: a second Advance with a stale expected_last_seq is rejected.
+func TestSingleWriterAdvanceCAS(t *testing.T) {
 	h := host.New(echoModel)
-	if err := h.Exec(0, echo.Harness{}, "a"); err != nil {
+	if err := h.Advance(0, echo.Harness{}, "a"); err != nil {
 		t.Fatalf("first exec: %v", err)
 	}
-	err := h.Exec(0, echo.Harness{}, "b") // still believes head == 0
+	err := h.Advance(0, echo.Harness{}, "b") // still believes head == 0
 	if !errors.Is(err, eventlog.ErrConflict) {
 		t.Fatalf("stale expected_last_seq: want ErrConflict, got %v", err)
 	}
@@ -95,7 +95,7 @@ func TestSingleWriterExecCAS(t *testing.T) {
 // state at R, and continues independently without mutating the parent.
 func TestForkCreationEquivalence(t *testing.T) {
 	h := host.New(echoModel)
-	if err := h.Exec(0, echo.Harness{}, "hello"); err != nil {
+	if err := h.Advance(0, echo.Harness{}, "hello"); err != nil {
 		t.Fatalf("exec: %v", err)
 	}
 	parentOut := h.Outputs()
@@ -111,7 +111,7 @@ func TestForkCreationEquivalence(t *testing.T) {
 	}
 
 	// Child continues on its own branch; parent is unaffected.
-	if err := child.Exec(child.Head(), echo.Harness{}, "world"); err != nil {
+	if err := child.Advance(child.Head(), echo.Harness{}, "world"); err != nil {
 		t.Fatalf("child continuation: %v", err)
 	}
 	if len(h.Outputs()) != len(parentOut) {
