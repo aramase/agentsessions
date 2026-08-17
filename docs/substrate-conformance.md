@@ -107,11 +107,14 @@ capability on `runtime/local`, accepts on substrate) is `placement`'s `TestNeutr
 
 ## CI
 
-`.github/workflows/substrate-e2e.yml` runs both axes in one cluster, nightly + on dispatch (heavy — kind +
-KVM + micro-VM assets, never the fast per-PR gate). It copies substrate's own recipe: `create-kind-cluster`
-+ `install-ate-kind`, then for axis 2 `run-microvm-demo-kind` (stages the kata + cloud-hypervisor asset
-cache and installs the micro-VM SandboxConfig). Each axis builds its driver with `ko`, runs it as a Job,
-and fails the step unless the Job succeeds. The nested-module test step asserts core neutrality.
+`.github/workflows/substrate-e2e.yml` runs both axes in one cluster, on every PR and nightly (heavy —
+kind + KVM + micro-VM assets — but ~15 min, and the claims it checks are the ones no unit test can
+make). A concurrency group cancels a superseded run so one push does not leave two clusters standing.
+It copies substrate's own recipe: `create-kind-cluster` + `install-ate-kind`, then for axis 2
+`run-microvm-demo-kind` (stages the kata + cloud-hypervisor asset cache and installs the micro-VM
+SandboxConfig). Each axis builds its driver with `ko`, runs it as a Job, and fails the step unless the
+Job succeeds. The nested-module test and core-neutrality gate also run per-PR in
+`.github/workflows/ci.yml`.
 
 Reproduce:
 

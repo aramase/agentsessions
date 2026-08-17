@@ -1,22 +1,31 @@
-# Axis-1 conformance on REAL agent-substrate, in kind. Separate from the fast per-PR gate (ci.yml):
-# this is heavy (kind + KVM + ate-system + micro-VM assets on other axes), so it runs nightly and on
-# manual dispatch, NOT on every PR. It copies agent-substrate's own pr-workflow.yaml recipe (free-disk,
-# /dev/kvm udev rule, kind bring-up). Axis 1 = gVisor + the echo harness + ResumeActor{boot:true} +
-# journal replay, driven by an IN-CLUSTER Job: the atenet mesh is HTTP/1.1-only to actors (Q1 resolved),
-# so the harness is reached by a direct gRPC dial to the actor's PodIP:80 (like google/ax), not the
-# router. Axis 2 = the in-RAM counter (REQUIRES_MEMORY_SNAPSHOT) on a micro-VM: drive to N -> suspend
-# (memory snapshot) -> resume -> the count continues (N+1), which no journal replay could reconstruct —
-# the differentiator a plain pod cannot do. Both axes run in one cluster; axis-2's micro-VM setup reuses
-# substrate's run-microvm-demo-kind recipe (kata + cloud-hypervisor asset cache).
+# Real-substrate conformance in kind. Heavy (kind + KVM + ate-system + micro-VM assets) but ~15 min and
+# stable, so it gates every PR as well as running nightly. It copies agent-substrate's own
+# pr-workflow.yaml recipe (free-disk, /dev/kvm udev rule, kind bring-up). Axis 1 = gVisor + the echo
+# harness + ResumeActor{boot:true} + journal replay, driven by an IN-CLUSTER Job: the atenet mesh is
+# HTTP/1.1-only to actors (Q1 resolved), so the harness is reached by a direct gRPC dial to the actor's
+# PodIP:80 (like google/ax), not the router. Axis 2 = the in-RAM counter (REQUIRES_MEMORY_SNAPSHOT) on a
+# micro-VM: drive to N -> suspend (memory snapshot) -> resume -> the count continues (N+1), which no
+# journal replay could reconstruct — the differentiator a plain pod cannot do. Both axes run in one
+# cluster; axis-2's micro-VM setup reuses substrate's run-microvm-demo-kind recipe (kata +
+# cloud-hypervisor asset cache).
 name: substrate-e2e
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   schedule:
-    - cron: "0 7 * * *" # nightly
+    - cron: "0 7 * * *" # nightly, so a green main is re-proven against a fresh cluster
   workflow_dispatch: {}
 
 permissions:
   contents: read
+
+# One cluster run per ref: a new push supersedes the in-flight run rather than burning a second
+# cluster alongside it. Scheduled and main runs key on their own ref and are a day apart.
+concurrency:
+  group: substrate-e2e-${{ github.ref }}
+  cancel-in-progress: true
 
 # The agent-substrate commit our adapter's go.mod pins; keep them in lockstep so the cluster's
 # ateapi and our generated client agree.
@@ -40,8 +49,8 @@ jobs:
         uses: ko-build/setup-ko@v0.7
 
       - name: Nested substrate module builds + tests (core stays substrate-free)
-        # The adapter lives in its own module; the core module must import zero substrate. This asserts
-        # both: the nested module tests pass, and `go list -deps` on core has no agent-substrate.
+        # Fail fast before the expensive cluster bring-up. Both checks also run in ci.yml (jobs
+        # `integrations` and `core links no backend vendor`), which finishes in a fraction of the time.
         run: |
           cd integrations/substrate && go test ./... && cd -
           test "$(go list -deps ./... | grep -c agent-substrate)" = "0"
