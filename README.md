@@ -101,7 +101,7 @@ go test ./conformance/ -v           # just the determinism checks
 ```
 
 The real-substrate conformance (both tiers) runs in the `substrate-conformance` workflow
-(`.github/workflows/substrate-e2e.yml`), nightly and on manual dispatch. See
+(`.github/workflows/substrate-e2e.yml`), on every pull request and nightly. See
 [`docs/substrate-conformance.md`](docs/substrate-conformance.md) to reproduce it.
 
 ## Ecosystem

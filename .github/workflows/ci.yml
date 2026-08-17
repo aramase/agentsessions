@@ -33,12 +33,16 @@ jobs:
           git add -N api/genpb
           git diff --exit-code -- api/genpb
 
-      # Proto contract gates for the neutral schema: style + backward compatibility. The breaking
-      # gate compares the change against main so an incompatible schema edit fails the build.
+      # Proto contract gates for the neutral schema: style + backward compatibility. The breaking gate
+      # compares the change against the PR's base branch so an incompatible schema edit fails the build.
+      # It must name a REMOTE-TRACKING ref: actions/checkout leaves no local branch for the base, so
+      # `.git#branch=main` fails with "couldn't find remote ref main" on every pull_request run.
       - name: buf lint
         run: buf lint
       - name: buf breaking
-        run: buf breaking --against '.git#branch=main'
+        env:
+          BASE: ${{ github.base_ref || github.event.repository.default_branch }}
+        run: buf breaking --against ".git#ref=origin/${BASE}"
 
       - name: gofmt
         run: |
@@ -52,9 +56,35 @@ jobs:
       # -race guards the single-writer log and the streaming sinks.
       - run: go test -race ./...
 
+      # Vendor-neutrality gate: the core module must not link any backend vendor. This is the
+      # architectural invariant the whole design rests on, so it is enforced per-PR and not only
+      # nightly — a stray import from core into the substrate adapter has to fail here.
+      - name: core links no backend vendor
+        run: test "$(go list -deps ./... | grep -c agent-substrate)" = "0"
+
       # Cheap always-on integrity gate: the zero-dep golden self-check (stdlib only, no venv).
       - name: integrity golden self-check
         run: python3 hack/verify_chain.py --golden
+
+  integrations:
+    # `integrations/substrate` is a SEPARATE Go module, so the root job's ./... never reaches it and a
+    # break there would otherwise surface only in the nightly substrate-e2e run. Compiling and testing
+    # it needs no cluster, so it belongs on the per-PR gate. (gofmt is covered by the root job, which
+    # walks the tree, not the module graph.)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/substrate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: integrations/substrate/go.mod
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
 
   integrity:
     # Full cross-language provenance audit: record a real journal, have an INDEPENDENT Python
