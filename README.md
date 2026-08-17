@@ -74,6 +74,17 @@ determinism guarantees are exercised by a replay-conformance suite (`conformance
   `REQUIRES_APPROVAL` tier is declared; the approval gate is a tracked follow-up.
 - **Recovery:** an `Exec` with no inputs re-drives the last interrupted execution from history.
 
+## Documentation
+
+Full docs live in [`docs/`](docs/README.md):
+
+- [**Concepts**](docs/concepts.md): the mental model: sessions, typed events, the log, fences, resumability.
+- [**Quickstart**](docs/quickstart.md): exec / replay / fork / suspend / resume and verify the chain, locally.
+- [**Writing a harness**](docs/harness-authoring.md): plug your agent into the `api.Harness` SPI.
+- [**Architecture**](docs/architecture.md): how the neutral core is built.
+- [**Running on agent-substrate**](docs/substrate-conformance.md): both capability tiers, green in CI.
+- [**FAQ**](docs/faq.md): what this is, what it is not, and how it behaves.
+
 ## Repo layout
 
 | Path | What |
@@ -99,6 +110,9 @@ go build ./...
 go test ./...                       # unit + replay-conformance suite
 go test ./conformance/ -v           # just the determinism checks
 ```
+
+For a narrated end-to-end walkthrough (exec, replay with zero model calls, fork, suspend / resume, and
+independent chain verification), follow [`docs/quickstart.md`](docs/quickstart.md).
 
 The real-substrate conformance (both tiers) runs in the `substrate-conformance` workflow
 (`.github/workflows/substrate-e2e.yml`), on every pull request and nightly. See
