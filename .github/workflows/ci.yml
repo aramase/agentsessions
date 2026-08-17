@@ -33,12 +33,16 @@ jobs:
           git add -N api/genpb
           git diff --exit-code -- api/genpb
 
-      # Proto contract gates for the neutral schema: style + backward compatibility. The breaking
-      # gate compares the change against main so an incompatible schema edit fails the build.
+      # Proto contract gates for the neutral schema: style + backward compatibility. The breaking gate
+      # compares the change against the PR's base branch so an incompatible schema edit fails the build.
+      # It must name a REMOTE-TRACKING ref: actions/checkout leaves no local branch for the base, so
+      # `.git#branch=main` fails with "couldn't find remote ref main" on every pull_request run.
       - name: buf lint
         run: buf lint
       - name: buf breaking
-        run: buf breaking --against '.git#branch=main'
+        env:
+          BASE: ${{ github.base_ref || github.event.repository.default_branch }}
+        run: buf breaking --against ".git#ref=origin/${BASE}"
 
       - name: gofmt
         run: |
