@@ -60,6 +60,16 @@ jobs:
           git clone https://github.com/agent-substrate/substrate _substrate
           git -C _substrate checkout "${SUBSTRATE_REF}"
 
+      - name: Relax ate-system rollout timeouts
+        # install-ate.sh waits on deployment/ate-api-server BEFORE statefulset/valkey-cluster, but the
+        # api-server crash-loops until valkey has formed a cluster ("redis: cluster has no nodes"). With
+        # the upstream 120s budget, whether the api-server converges in time is down to how fast the
+        # runner pulls images, which made the gate flaky. `rollout status` returns as soon as the
+        # rollout is ready, so a larger budget costs nothing on a healthy cluster and only buys slack on
+        # a cold one. Applied to the pinned clone, so it is deterministic.
+        working-directory: _substrate
+        run: sed -i 's/--timeout=120s/--timeout=600s/g' hack/install-ate.sh
+
       - name: Cache micro-VM assets (kata-static + cloud-hypervisor + virtiofsd)
         # Assembling the assets is fully pinned by assemble.sh (all downloads on amd64), so key the
         # cache on its hash. run-microvm-demo-kind.sh skips assembling when these are present.
