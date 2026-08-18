@@ -16,10 +16,13 @@ package substrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/observability"
 )
 
 // ActorStatus is substrate's actor lifecycle, narrowed to what the backend maps.
@@ -72,14 +75,34 @@ type Backend struct {
 	atespace   string
 	template   ObjectRef      // the ActorTemplate whose OCI image is the harness
 	descriptor api.Descriptor // the harness's declared contract (see Describe)
+	logger     *slog.Logger
 }
 
 var _ api.Runtime = (*Backend)(nil)
 
+// Option configures a substrate Backend.
+type Option func(*Backend)
+
+// WithLogger enables structured operational logs.
+func WithLogger(logger *slog.Logger) Option { return func(b *Backend) { b.logger = logger } }
+
 // New builds the backend targeting one atespace and harness ActorTemplate. descriptor is the
 // harness's declared contract, used by the placement gate (see Describe).
-func New(ctl ControlClient, atespace string, template ObjectRef, descriptor api.Descriptor) *Backend {
-	return &Backend{ctl: ctl, atespace: atespace, template: template, descriptor: descriptor}
+func New(ctl ControlClient, atespace string, template ObjectRef, descriptor api.Descriptor, opts ...Option) *Backend {
+	b := &Backend{
+		ctl:        ctl,
+		atespace:   atespace,
+		template:   template,
+		descriptor: descriptor,
+		logger:     slog.New(slog.DiscardHandler),
+	}
+	for _, opt := range opts {
+		opt(b)
+	}
+	if b.logger == nil {
+		b.logger = slog.New(slog.DiscardHandler)
+	}
+	return b
 }
 
 // Describe returns the harness's declared contract. Substrate's harness runs REMOTELY inside the
@@ -93,48 +116,114 @@ func (b *Backend) Describe(ctx context.Context) (api.Descriptor, error) {
 func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespace, Name: name} }
 
 // Create provisions a cold actor for the session and boots it onto a worker.
-func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (api.Incarnation, error) {
+func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incarnation, err error) {
+	sessionUID := s.SessionUID
+	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "create_compute",
+		"session_uid", sessionUID,
+		"atespace", b.atespace,
+	)
+	defer func() {
+		finish(err, "error_kind", substrateErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
+	}()
 	ref := b.ref(s.SessionUID)
+	createFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "create_actor",
+		"actor", ref.Name,
+		"atespace", ref.Atespace,
+	)
 	if err := b.ctl.CreateActor(ctx, ref, b.template); err != nil {
+		createFinished(err, "error_kind", "create_actor_failed")
 		return api.Incarnation{}, fmt.Errorf("substrate: create actor: %w", err)
 	}
+	createFinished(nil)
+
+	resumeFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
+		"actor", ref.Name,
+		"atespace", ref.Atespace,
+		"boot", true,
+	)
 	info, err := b.ctl.ResumeActor(ctx, ref, true) // cold boot (STATELESS_REPLAY realization)
 	if err != nil {
+		resumeFinished(err, "error_kind", "resume_actor_failed")
 		return api.Incarnation{}, fmt.Errorf("substrate: resume actor: %w", err)
 	}
-	return b.incarnation(s.SessionUID, info)
+	resumeFinished(nil, "actor_status", info.Status)
+	inc, err = b.incarnation(s.SessionUID, info)
+	return inc, err
 }
 
 // Snapshot suspends the actor: RAM+disk snapshot to external storage, worker freed. Only the
 // external (cold/suspend) kind is supported; substrate has no node-local warm checkpoint API today.
-func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (api.SnapshotRef, error) {
+func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
+	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
+		"actor", in.ID,
+		"atespace", b.atespace,
+		"snapshot_kind", kind,
+	)
+	defer func() {
+		finish(err, "error_kind", substrateErrorKind(err), "memory_snapshot", snapshot.Memory)
+	}()
+
 	if kind == api.SnapshotLocal {
 		return api.SnapshotRef{}, fmt.Errorf("substrate: local (warm) snapshot not supported; use EXTERNAL")
 	}
+	suspendFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "suspend_actor",
+		"actor", in.ID,
+		"atespace", b.atespace,
+		"reason", "snapshot",
+	)
 	uri, err := b.ctl.SuspendActor(ctx, b.ref(in.ID))
 	if err != nil {
+		suspendFinished(err, "error_kind", "suspend_actor_failed")
 		return api.SnapshotRef{}, fmt.Errorf("substrate: suspend actor: %w", err)
 	}
+	suspendFinished(nil)
 	// Local carries the actor name (the handle Restore/ResumeActor needs); ExternalURI is the blob.
-	return api.SnapshotRef{Local: in.ID, ExternalURI: uri, Memory: true}, nil
+	snapshot = api.SnapshotRef{Local: in.ID, ExternalURI: uri, Memory: true}
+	return snapshot, nil
 }
 
 // Restore brings the actor back from its snapshot onto a (possibly different) worker.
-func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarnation, error) {
+func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Incarnation, err error) {
+	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "restore_compute",
+		"actor", ref.Local,
+		"atespace", b.atespace,
+	)
+	defer func() {
+		finish(err, "error_kind", substrateErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
+	}()
+
 	name := ref.Local
 	if name == "" {
 		return api.Incarnation{}, fmt.Errorf("substrate: snapshot ref missing actor name")
 	}
+	resumeFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "resume_actor",
+		"actor", name,
+		"atespace", b.atespace,
+		"boot", false,
+	)
 	info, err := b.ctl.ResumeActor(ctx, b.ref(name), false) // restore snapshot
 	if err != nil {
+		resumeFinished(err, "error_kind", "resume_actor_failed")
 		return api.Incarnation{}, fmt.Errorf("substrate: resume (restore) actor: %w", err)
 	}
-	return b.incarnation(name, info)
+	resumeFinished(nil, "actor_status", info.Status)
+	inc, err = b.incarnation(name, info)
+	return inc, err
 }
 
 // Fork is realized as a replay-fork: substrate has no clone-from-arbitrary-snapshot API, so a fresh
 // cold actor is created for the child and the host replays the journal into it (spike §2, §7).
-func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (api.Incarnation, error) {
+func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (inc api.Incarnation, err error) {
+	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "fork_compute",
+		"parent_actor", ref.Local,
+		"child_actor", opts.ChildSessionUID,
+		"atespace", b.atespace,
+		"strategy", "replay",
+	)
+	defer func() {
+		finish(err, "error_kind", substrateErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
+	}()
+
 	child := opts.ChildSessionUID
 	if child == "" {
 		return api.Incarnation{}, fmt.Errorf("substrate: fork requires a child session uid")
@@ -143,33 +232,58 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 }
 
 // Stop suspends then deletes the actor (substrate requires SUSPENDED before delete).
-func (b *Backend) Stop(ctx context.Context, in api.Incarnation) error {
+func (b *Backend) Stop(ctx context.Context, in api.Incarnation) (err error) {
+	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "stop_compute",
+		"actor", in.ID,
+		"atespace", b.atespace,
+	)
+	defer func() { finish(err, "error_kind", substrateErrorKind(err)) }()
+
 	ref := b.ref(in.ID)
+	suspendFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "suspend_actor",
+		"actor", ref.Name,
+		"atespace", ref.Atespace,
+	)
 	if _, err := b.ctl.SuspendActor(ctx, ref); err != nil {
+		suspendFinished(err, "error_kind", "suspend_actor_failed")
 		return fmt.Errorf("substrate: suspend before delete: %w", err)
 	}
+	suspendFinished(nil)
+	deleteFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "delete_actor",
+		"actor", ref.Name,
+		"atespace", ref.Atespace,
+	)
 	if err := b.ctl.DeleteActor(ctx, ref); err != nil {
+		deleteFinished(err, "error_kind", "delete_actor_failed")
 		return fmt.Errorf("substrate: delete actor: %w", err)
 	}
+	deleteFinished(nil)
 	return nil
 }
 
 // Status maps the actor's substrate status onto the agentsessions compute-lifecycle axis.
-func (b *Backend) Status(ctx context.Context, in api.Incarnation) (api.ComputeState, error) {
+func (b *Backend) Status(ctx context.Context, in api.Incarnation) (state api.ComputeState, err error) {
+	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "get_actor_status",
+		"actor", in.ID,
+		"atespace", b.atespace,
+	)
+	defer func() { finish(err, "error_kind", substrateErrorKind(err), "compute_state", state) }()
+
 	info, err := b.ctl.GetActor(ctx, b.ref(in.ID))
 	if err != nil {
 		return api.ComputeState(""), fmt.Errorf("substrate: get actor: %w", err)
 	}
 	switch info.Status {
 	case StatusRunning:
-		return api.ComputeLive, nil
+		state = api.ComputeLive
 	case StatusSuspended:
-		return api.ComputeCold, nil
+		state = api.ComputeCold
 	case StatusTerminated:
-		return api.ComputeTerminated, nil
+		state = api.ComputeTerminated
 	default:
-		return api.ComputeNone, nil
+		state = api.ComputeNone
 	}
+	return state, nil
 }
 
 // Capabilities reports what substrate supports. MemorySnapshot=true is the headline differentiator
@@ -204,4 +318,17 @@ func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, erro
 		Address: net.JoinHostPort(info.PodIP, HarnessPort),
 		Runtime: "substrate",
 	}, nil
+}
+
+func substrateErrorKind(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	default:
+		return "runtime_operation_failed"
+	}
 }

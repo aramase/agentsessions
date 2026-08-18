@@ -24,6 +24,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -43,6 +44,7 @@ import (
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/harnesswire"
 	ateadapter "github.com/aramase/agentsessions/integrations/substrate"
+	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/runtime/substrate"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
@@ -65,6 +67,7 @@ func main() {
 }
 
 func run(ctx context.Context) error {
+	ctx = observability.EnsureRequestID(ctx)
 	controlAddr := env("ATEAPI_ADDR", "api.ate-system.svc:443")
 	tokenFile := env("ATEAPI_TOKEN_FILE", "/var/run/secrets/tokens/ateapi-token")
 	serverName := env("ATEAPI_SERVER_NAME", "api.ate-system.svc")
@@ -88,8 +91,15 @@ func run(ctx context.Context) error {
 
 	// The counter declares REQUIRES_MEMORY_SNAPSHOT (in-RAM state); the gate must ACCEPT it on
 	// substrate (MemorySnapshot=true). The refusal counterpart (runtime/local) is a unit test.
+	logger := slog.Default()
 	counter := api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}
-	backend := substrate.New(ateadapter.New(conn, ""), atespace, substrate.ObjectRef{Namespace: tmplNS, Name: tmplName}, counter)
+	backend := substrate.New(
+		ateadapter.New(conn, ""),
+		atespace,
+		substrate.ObjectRef{Namespace: tmplNS, Name: tmplName},
+		counter,
+		substrate.WithLogger(logger),
+	)
 	if !controller.CanPlace(counter.Capabilities, backend.Capabilities()) {
 		return fmt.Errorf("substrate refused a REQUIRES_MEMORY_SNAPSHOT harness (CanPlace=false)")
 	}
@@ -111,7 +121,13 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	c1, err := controller.New(journal, echoagent.Model, controller.WithFence(fence1))
+	c1, err := controller.New(
+		journal,
+		echoagent.Model,
+		controller.WithFence(fence1),
+		controller.WithLogger(logger),
+		controller.WithSessionUID(session),
+	)
 	if err != nil {
 		return err
 	}
@@ -162,7 +178,13 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	c2, err := controller.New(journal, echoagent.Model, controller.WithFence(fence2))
+	c2, err := controller.New(
+		journal,
+		echoagent.Model,
+		controller.WithFence(fence2),
+		controller.WithLogger(logger),
+		controller.WithSessionUID(session),
+	)
 	if err != nil {
 		return err
 	}
@@ -266,7 +288,12 @@ func ensureAtespace(ctx context.Context, conn *grpc.ClientConn, name string) err
 
 // dialActor opens a harnesswire client to the actor's harness over h2c at PodIP:HarnessPort.
 func dialActor(address string) (api.Harness, func() error, error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
+		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
+	)
 	if err != nil {
 		return nil, nil, err
 	}

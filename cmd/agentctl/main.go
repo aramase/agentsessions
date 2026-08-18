@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/session"
@@ -77,7 +79,12 @@ func commonFlags(fs *flag.FlagSet) *config {
 // embedded Sessions server over a unix socket, backed by the local sqlite journal, and dials that.
 func dial(cfg *config) (v1.SessionsClient, func(), error) {
 	if cfg.server != "" {
-		conn, err := grpc.NewClient(cfg.server, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(
+			cfg.server,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
+			grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
+		)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -88,8 +95,13 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	backend := local.New(echoagent.Harness{})
-	svc := session.NewService(store, placement.New(backend, echoagent.Model))
+	logger := slog.Default()
+	backend := local.New(echoagent.Harness{}, local.WithLogger(logger))
+	svc := session.NewService(store, placement.New(
+		backend,
+		echoagent.Model,
+		placement.WithLogger(logger),
+	), session.WithLogger(logger))
 	sock := fmt.Sprintf("%s/agentctl-%d.sock", os.TempDir(), os.Getpid())
 	_ = os.Remove(sock)
 	lis, err := net.Listen("unix", sock)
@@ -98,13 +110,18 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 		store.Close()
 		return nil, nil, err
 	}
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
+		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
+	)
 	v1.RegisterSessionsServer(srv, svc)
 	go srv.Serve(lis)
 
 	conn, err := grpc.NewClient(
 		"passthrough:///embedded",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
+		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
 		}),

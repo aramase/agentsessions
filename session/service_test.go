@@ -1,9 +1,14 @@
 package session_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -15,6 +20,7 @@ import (
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/session"
@@ -53,6 +59,241 @@ func newClientWith(t *testing.T, backend placement.Backend) v1.SessionsClient {
 	}
 	t.Cleanup(func() { conn.Close() })
 	return v1.NewSessionsClient(conn)
+}
+
+func TestRequestFlowLogsAreCorrelated(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	backend := local.New(echoagent.Harness{}, local.WithLogger(logger))
+	t.Cleanup(func() { _ = backend.Close() })
+
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
+		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
+	)
+	v1.RegisterSessionsServer(srv, session.NewService(
+		store,
+		placement.New(backend, echoagent.Model, placement.WithLogger(logger)),
+		session.WithLogger(logger),
+	))
+	go srv.Serve(lis)
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.NewClient(
+		"passthrough:///bufnet",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
+		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := v1.NewSessionsClient(conn)
+	stream, err := client.Exec(context.Background(), &v1.ExecRequest{
+		Session: "observed-session",
+		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "do-not-log-this"))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := stream.Recv(); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if strings.Contains(output.String(), "do-not-log-this") {
+		t.Fatalf("logs contain input contents: %s", output.String())
+	}
+	required := map[string]bool{
+		"grpc/request":                     false,
+		"session/exec":                     false,
+		"placement/resolve_execution_path": false,
+		"runtime.local/create_compute":     false,
+		"controller/exec":                  false,
+	}
+	requestIDs := map[string]struct{}{}
+	infoRecords := 0
+	scanner := bufio.NewScanner(bytes.NewReader(output.Bytes()))
+	for scanner.Scan() {
+		var record map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			t.Fatal(err)
+		}
+		component, _ := record["component"].(string)
+		operation, _ := record["operation"].(string)
+		if record["level"] == "INFO" {
+			infoRecords++
+		}
+		if key := component + "/" + operation; record["phase"] == "finish" {
+			if _, ok := required[key]; ok {
+				required[key] = true
+			}
+		}
+		if component == "controller" && record["session_uid"] != "observed-session" {
+			t.Fatalf("controller record missing session correlation: %v", record)
+		}
+		if requestID, _ := record["request_id"].(string); requestID != "" {
+			requestIDs[requestID] = struct{}{}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for event, found := range required {
+		if !found {
+			t.Errorf("missing correlated event %s", event)
+		}
+	}
+	if len(requestIDs) != 1 {
+		t.Fatalf("request flow used %d request IDs, want 1: %v", len(requestIDs), requestIDs)
+	}
+	if infoRecords != 6 {
+		t.Fatalf("request flow emitted %d INFO records, want 6", infoRecords)
+	}
+
+	output.Reset()
+	stream, err = client.Exec(context.Background(), &v1.ExecRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("empty session: want InvalidArgument, got %v", err)
+	}
+	scanner = bufio.NewScanner(bytes.NewReader(output.Bytes()))
+	for scanner.Scan() {
+		var record map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record["level"] == "ERROR" {
+			t.Fatalf("caller-caused InvalidArgument logged at ERROR: %v", record)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	output.Reset()
+	stream, err = client.Exec(context.Background(), &v1.ExecRequest{
+		Session:         "observed-session",
+		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", "retry"))},
+		ExpectedLastSeq: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.Aborted {
+		t.Fatalf("stale cursor: want Aborted, got %v", err)
+	}
+	scanner = bufio.NewScanner(bytes.NewReader(output.Bytes()))
+	for scanner.Scan() {
+		var record map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			t.Fatal(err)
+		}
+		if record["level"] == "ERROR" {
+			t.Fatalf("expected CAS conflict logged at ERROR: %v", record)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceCreatesRequestIDWithoutInterceptors(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	backend := local.New(echoagent.Harness{}, local.WithLogger(logger))
+	t.Cleanup(func() { _ = backend.Close() })
+
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	v1.RegisterSessionsServer(srv, session.NewService(
+		store,
+		placement.New(backend, echoagent.Model, placement.WithLogger(logger)),
+		session.WithLogger(logger),
+	))
+	go srv.Serve(lis)
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.NewClient(
+		"passthrough:///bufnet",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	stream, err := v1.NewSessionsClient(conn).Exec(context.Background(), &v1.ExecRequest{Session: "direct-service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := stream.Recv(); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	required := map[string]bool{
+		"session/exec":                 false,
+		"placement/exec":               false,
+		"runtime.local/create_compute": false,
+		"controller/exec":              false,
+	}
+	requestIDs := map[string]struct{}{}
+	scanner := bufio.NewScanner(bytes.NewReader(output.Bytes()))
+	for scanner.Scan() {
+		var record map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			t.Fatal(err)
+		}
+		component, _ := record["component"].(string)
+		operation, _ := record["operation"].(string)
+		key := component + "/" + operation
+		if _, ok := required[key]; !ok {
+			continue
+		}
+		required[key] = true
+		requestID, _ := record["request_id"].(string)
+		if requestID == "" {
+			t.Fatalf("%s missing request_id: %v", key, record)
+		}
+		requestIDs[requestID] = struct{}{}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for event, found := range required {
+		if !found {
+			t.Errorf("missing event %s", event)
+		}
+	}
+	if len(requestIDs) != 1 {
+		t.Fatalf("direct Service flow used %d request IDs, want 1: %v", len(requestIDs), requestIDs)
+	}
 }
 
 // memHarness declares REQUIRES_MEMORY_SNAPSHOT — unplaceable on the filesystem-only local backend.

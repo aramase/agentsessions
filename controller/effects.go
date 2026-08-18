@@ -85,6 +85,7 @@ func (s *liveSink) execTool(call api.ToolCall) (api.ToolResult, error) {
 	if err != nil {
 		return api.ToolResult{}, err
 	}
+	s.c.liveToolCalls++
 	result := res
 	result.ID = call.ID // the host owns tool-result correlation: the result references its call's ID
 	if _, err := s.c.appendSeq(api.Event{Kind: api.EventToolResult, Result: &result}); err != nil {
