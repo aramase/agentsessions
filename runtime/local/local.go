@@ -48,6 +48,11 @@ var _ api.Runtime = (*Backend)(nil)
 
 var socketSeq atomic.Int64
 
+var (
+	errCreateRequiresSessionSpec = errors.New("local: create requires a session spec")
+	errCreateRequiresSessionUID  = errors.New("local: create requires a session uid")
+)
+
 // Option configures a local Backend.
 type Option func(*Backend)
 
@@ -140,10 +145,10 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	}()
 
 	if s == nil {
-		return api.Incarnation{}, fmt.Errorf("local: create requires a session spec")
+		return api.Incarnation{}, errCreateRequiresSessionSpec
 	}
 	if s.SessionUID == "" {
-		return api.Incarnation{}, fmt.Errorf("local: create requires a session uid")
+		return api.Incarnation{}, errCreateRequiresSessionUID
 	}
 	addr, err := b.start(ctx)
 	if err != nil {
@@ -239,6 +244,8 @@ func localErrorKind(err error) string {
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "deadline_exceeded"
+	case errors.Is(err, errCreateRequiresSessionSpec), errors.Is(err, errCreateRequiresSessionUID):
+		return "invalid_spec"
 	default:
 		return "runtime_operation_failed"
 	}

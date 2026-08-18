@@ -204,17 +204,23 @@ func TestCreateValidatesSessionSpec(t *testing.T) {
 		spec *api.SessionSpec
 		want string
 	}{
-		{name: "nil spec", want: "substrate: create requires a session spec"},
-		{name: "empty session uid", spec: &api.SessionSpec{}, want: "substrate: create requires a session uid"},
+		{name: "nil spec", want: "session spec"},
+		{name: "empty session uid", spec: &api.SessionSpec{}, want: "session uid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &mockControl{}
-			_, err := newBackend(m).Create(context.Background(), tc.spec)
-			if err == nil || err.Error() != tc.want {
-				t.Fatalf("Create() error = %v, want %q", err, tc.want)
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			_, err := newBackend(m, substrate.WithLogger(logger)).Create(context.Background(), tc.spec)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Create() error = %v, want it to contain %q", err, tc.want)
 			}
 			if len(m.calls) != 0 {
 				t.Fatalf("Create() made control-plane calls for invalid input: %v", m.calls)
+			}
+			if !strings.Contains(output.String(), `"error_kind":"invalid_spec"`) ||
+				!strings.Contains(output.String(), `"level":"ERROR"`) {
+				t.Fatalf("Create() did not log invalid spec at ERROR: %s", output.String())
 			}
 		})
 	}
