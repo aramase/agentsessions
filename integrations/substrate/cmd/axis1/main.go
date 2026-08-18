@@ -17,6 +17,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"reflect"
 	"strings"
@@ -36,6 +37,7 @@ import (
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/harnesswire"
 	ateadapter "github.com/aramase/agentsessions/integrations/substrate"
+	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/substrate"
 	"github.com/aramase/agentsessions/sqlitelog"
@@ -59,6 +61,7 @@ func main() {
 }
 
 func run(ctx context.Context) error {
+	ctx = observability.EnsureRequestID(ctx)
 	controlAddr := env("ATEAPI_ADDR", "api.ate-system.svc:443")
 	tokenFile := env("ATEAPI_TOKEN_FILE", "/var/run/secrets/tokens/ateapi-token")
 	serverName := env("ATEAPI_SERVER_NAME", "api.ate-system.svc")
@@ -83,8 +86,15 @@ func run(ctx context.Context) error {
 	}
 	log.Printf("Control reachable at %s; atespace %q ready", controlAddr, atespace)
 
+	logger := slog.Default()
 	echoDesc := api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}
-	backend := substrate.New(ateadapter.New(conn, ""), atespace, substrate.ObjectRef{Namespace: tmplNS, Name: tmplName}, echoDesc)
+	backend := substrate.New(
+		ateadapter.New(conn, ""),
+		atespace,
+		substrate.ObjectRef{Namespace: tmplNS, Name: tmplName},
+		echoDesc,
+		substrate.WithLogger(logger),
+	)
 
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
@@ -93,7 +103,7 @@ func run(ctx context.Context) error {
 	defer store.Close()
 	journal := store.Session(session)
 	// No injected dialer: the Placer's default dialer dials the actor's PodIP:HarnessPort directly.
-	p := placement.New(backend, echoagent.Model)
+	p := placement.New(backend, echoagent.Model, placement.WithLogger(logger))
 
 	// Place + drive one turn: Create the actor (boot:true), dial the harness at PodIP:HarnessPort, run.
 	inc, err := p.Exec(ctx, journal, session, []api.Message{*api.TextMessage("user", "hi")}, 0)
@@ -129,7 +139,12 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("replay dial %s: %w", inc.Address, err)
 	}
 	defer closeHar()
-	c2, err := controller.New(journal, echoagent.Model)
+	c2, err := controller.New(
+		journal,
+		echoagent.Model,
+		controller.WithLogger(logger),
+		controller.WithSessionUID(session),
+	)
 	if err != nil {
 		return err
 	}
@@ -196,7 +211,12 @@ func ensureAtespace(ctx context.Context, conn *grpc.ClientConn, name string) err
 // dialActor opens a harnesswire client to the actor's harness over h2c at PodIP:HarnessPort — the same
 // direct dial the Placer's default dialer performs, reused here for the replay re-dial.
 func dialActor(address string) (api.Harness, func() error, error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		address,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
+		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
+	)
 	if err != nil {
 		return nil, nil, err
 	}

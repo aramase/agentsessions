@@ -13,7 +13,9 @@ package local
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -25,6 +27,7 @@ import (
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/harnesswire"
+	"github.com/aramase/agentsessions/observability"
 )
 
 // Backend implements api.Runtime by serving a single harness over a unix socket (M0). Later the
@@ -37,19 +40,38 @@ type Backend struct {
 	srv  *grpc.Server
 	sock string
 	addr string
+
+	logger *slog.Logger
 }
 
 var _ api.Runtime = (*Backend)(nil)
 
 var socketSeq atomic.Int64
 
+// Option configures a local Backend.
+type Option func(*Backend)
+
+// WithLogger enables structured operational logs.
+func WithLogger(logger *slog.Logger) Option { return func(b *Backend) { b.logger = logger } }
+
 // New builds a backend that serves harness.
-func New(harness api.Harness) *Backend {
+func New(harness api.Harness, opts ...Option) *Backend {
 	host, _ := os.Hostname()
 	if host == "" {
 		host = "local"
 	}
-	return &Backend{harness: harness, worker: fmt.Sprintf("%s/%d", host, os.Getpid())}
+	b := &Backend{
+		harness: harness,
+		worker:  fmt.Sprintf("%s/%d", host, os.Getpid()),
+		logger:  slog.New(slog.DiscardHandler),
+	}
+	for _, opt := range opts {
+		opt(b)
+	}
+	if b.logger == nil {
+		b.logger = slog.New(slog.DiscardHandler)
+	}
+	return b
 }
 
 // Describe returns the placed harness's static contract. The placement layer reads it IN-PROCESS to
@@ -62,19 +84,28 @@ func (b *Backend) Describe(ctx context.Context) (api.Descriptor, error) {
 // backend). All incarnations share it: the harness is stateless and each turn opens its own
 // Harness.Connect stream, so a single server is the real transport the placement layer dials. Close
 // tears it down.
-func (b *Backend) start() (string, error) {
+func (b *Backend) start(ctx context.Context) (addr string, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	decision := "started"
+	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "resolve_harness_server", "transport", "unix")
+	defer func() { finish(err, "error_kind", localErrorKind(err), "decision", decision) }()
+
 	if b.srv != nil {
+		decision = "reused"
 		return b.addr, nil
 	}
+
 	sock := filepath.Join(os.TempDir(), fmt.Sprintf("agentlocal-%d-%d.sock", os.Getpid(), socketSeq.Add(1)))
 	_ = os.Remove(sock)
 	lis, err := net.Listen("unix", sock)
 	if err != nil {
 		return "", fmt.Errorf("local: listen: %w", err)
 	}
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(b.logger)),
+		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(b.logger)),
+	)
 	v1.RegisterHarnessServer(srv, harnesswire.NewServer(b.harness))
 	go srv.Serve(lis)
 	b.srv, b.sock, b.addr = srv, sock, "unix://"+sock
@@ -98,27 +129,43 @@ func (b *Backend) Close() error {
 
 // Create provisions an incarnation: it ensures the harness server is up and returns the unix-socket
 // address the placement layer dials via Harness.Connect.
-func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (api.Incarnation, error) {
+func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incarnation, err error) {
+	sessionUID := ""
+	if s != nil {
+		sessionUID = s.SessionUID
+	}
+	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "create_compute", "session_uid", sessionUID)
+	defer func() {
+		finish(err, "error_kind", localErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
+	}()
+
 	if s == nil || s.SessionUID == "" {
 		return api.Incarnation{}, fmt.Errorf("local: create requires a session uid")
 	}
-	addr, err := b.start()
+	addr, err := b.start(ctx)
 	if err != nil {
 		return api.Incarnation{}, err
 	}
-	return api.Incarnation{
+	inc = api.Incarnation{
 		ID:      s.SessionUID,
 		Worker:  b.worker,
 		Address: addr,
 		Runtime: "local",
-	}, nil
+	}
+	return inc, nil
 }
 
 // Snapshot is filesystem-only: the event log is the durable state, so there is nothing beyond it to
 // capture. Only EXTERNAL (cold/suspend) is meaningful, and it just names the session so Restore can
 // re-provision; Memory=false marks it as STATELESS_REPLAY. LOCAL (warm) is unsupported, mirroring
 // substrate's inverse (substrate supports memory, not warm-local).
-func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (api.SnapshotRef, error) {
+func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (ref api.SnapshotRef, err error) {
+	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "snapshot",
+		"incarnation_id", in.ID,
+		"snapshot_kind", kind,
+	)
+	defer func() { finish(err, "error_kind", localErrorKind(err), "memory_snapshot", ref.Memory) }()
+
 	if kind == api.SnapshotLocal {
 		return api.SnapshotRef{}, fmt.Errorf("local: warm (LOCAL) snapshot not supported; the journal is the durable state — use EXTERNAL")
 	}
@@ -128,7 +175,12 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 // Restore re-provisions a fresh in-process incarnation; the host reconstructs harness-visible state
 // by replaying the journal (STATELESS_REPLAY). The placement layer mints a new fence so the fresh
 // incarnation supersedes any zombie writer.
-func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarnation, error) {
+func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Incarnation, err error) {
+	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "restore_compute", "session_uid", ref.Local)
+	defer func() {
+		finish(err, "error_kind", localErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
+	}()
+
 	if ref.Local == "" {
 		return api.Incarnation{}, fmt.Errorf("local: snapshot ref missing session handle")
 	}
@@ -138,7 +190,16 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarna
 // Fork is a replay-fork: a fresh incarnation for the child, whose log prefix is copied by
 // controller.Fork. Same shape as substrate's replay-fork — a filesystem-only backend has no
 // clone-from-memory-snapshot path.
-func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (api.Incarnation, error) {
+func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (inc api.Incarnation, err error) {
+	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "fork_compute",
+		"parent_session_uid", ref.Local,
+		"child_session_uid", opts.ChildSessionUID,
+		"strategy", "replay",
+	)
+	defer func() {
+		finish(err, "error_kind", localErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
+	}()
+
 	if opts.ChildSessionUID == "" {
 		return api.Incarnation{}, fmt.Errorf("local: fork requires a child session uid")
 	}
@@ -147,11 +208,17 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 
 // Stop tears the incarnation down. In-process there is no sandbox or socket to close; the worker is
 // freed by the process, so this is a no-op that keeps the SPI contract.
-func (b *Backend) Stop(ctx context.Context, in api.Incarnation) error { return nil }
+func (b *Backend) Stop(ctx context.Context, in api.Incarnation) error {
+	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "stop_compute", "incarnation_id", in.ID)
+	finish(nil)
+	return nil
+}
 
 // Status reports the compute-lifecycle state. The in-process backend keeps no separate compute state
 // machine — the log and placement layer are the lifecycle authority — so a known incarnation is LIVE.
 func (b *Backend) Status(ctx context.Context, in api.Incarnation) (api.ComputeState, error) {
+	finish := observability.StartDebug(ctx, b.logger, "runtime.local", "get_compute_status", "incarnation_id", in.ID)
+	finish(nil, "compute_state", api.ComputeLive)
 	return api.ComputeLive, nil
 }
 
@@ -159,4 +226,17 @@ func (b *Backend) Status(ctx context.Context, in api.Incarnation) (api.ComputeSt
 // state. MemorySnapshot=false is the degradation counterpart that makes CanPlace meaningful.
 func (b *Backend) Capabilities() api.RuntimeCapabilities {
 	return api.RuntimeCapabilities{MemorySnapshot: false, CoWFork: false, Attest: false, GPUState: false}
+}
+
+func localErrorKind(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	default:
+		return "runtime_operation_failed"
+	}
 }

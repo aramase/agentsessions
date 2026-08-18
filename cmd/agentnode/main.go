@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"reflect"
@@ -18,6 +19,7 @@ import (
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
@@ -48,7 +50,8 @@ func main() {
 	journal := env("AGENT_JOURNAL", "/data/journal.db")
 	session := env("AGENT_SESSION", "demo")
 	input := env("AGENT_INPUT", "hello from agentsessions")
-	ctx := context.Background()
+	ctx := observability.EnsureRequestID(context.Background())
+	logger := slog.Default()
 
 	fmt.Printf("[agentnode %s] journal=%s session=%s\n", host, journal, session)
 
@@ -66,7 +69,7 @@ func main() {
 
 	if head == 0 {
 		// New session: run one live turn and persist it to the durable journal.
-		c, err := controller.New(log, echoagent.Model)
+		c, err := controller.New(log, echoagent.Model, controller.WithLogger(logger), controller.WithSessionUID(session))
 		if err != nil {
 			fatalf(host, "new controller: %v", err)
 		}
@@ -85,7 +88,13 @@ func main() {
 		}
 		recorded := recordedOutputs(recs)
 
-		c, err := controller.New(log, echoagent.Model) // new incarnation: fence advances
+		// A fresh incarnation advances the fence.
+		c, err := controller.New(
+			log,
+			echoagent.Model,
+			controller.WithLogger(logger),
+			controller.WithSessionUID(session),
+		)
 		if err != nil {
 			fatalf(host, "new controller: %v", err)
 		}

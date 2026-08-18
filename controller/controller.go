@@ -17,9 +17,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/eventlog"
+	"github.com/aramase/agentsessions/observability"
 )
 
 // ErrReplayInvokedModel is returned when a replay caused a live model call — an I1 violation.
@@ -65,6 +67,14 @@ func WithToolExecutor(tool ToolFunc) Option { return func(c *Controller) { c.too
 // stays the single fence authority. Fences are >= 1, so WithFence(0) is a no-op (mint-my-own).
 func WithFence(token int64) Option { return func(c *Controller) { c.fence = token } }
 
+// WithLogger enables structured operational logs. Event payloads and fence values are never logged.
+func WithLogger(logger *slog.Logger) Option { return func(c *Controller) { c.logger = logger } }
+
+// WithSessionUID adds session correlation to controller logs.
+func WithSessionUID(sessionUID string) Option {
+	return func(c *Controller) { c.sessionUID = sessionUID }
+}
+
 // Controller drives one session's log with a single incarnation (fence). It is meant to be driven
 // by a single goroutine: Exec and Replay are NOT safe to call concurrently on the same Controller
 // (liveModelCalls is unsynchronized). Concurrency BETWEEN controllers/processes is safe — the log's
@@ -75,6 +85,9 @@ type Controller struct {
 	tool           ToolFunc
 	fence          int64
 	liveModelCalls int
+	liveToolCalls  int
+	logger         *slog.Logger
+	sessionUID     string
 }
 
 // New starts an incarnation over log. Unless the caller supplies a fence via WithFence, it advances
@@ -82,9 +95,12 @@ type Controller struct {
 // WithFence is supplied (the placement layer minted the fence and stamped it on the incarnation), New
 // uses that token instead — the log remains the single authority either way.
 func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, error) {
-	c := &Controller{log: log, model: model}
+	c := &Controller{log: log, model: model, logger: slog.New(slog.DiscardHandler)}
 	for _, o := range opts {
 		o(c)
+	}
+	if c.logger == nil {
+		c.logger = slog.New(slog.DiscardHandler)
 	}
 	// Fences are >= 1, so a zero fence means no WithFence was supplied: mint one from the log.
 	if c.fence == 0 {
@@ -100,13 +116,34 @@ func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, erro
 // Exec runs one live execution/turn. The first INPUT append is guarded by the caller's
 // expectedLastSeq (the single-writer CAS at the session boundary); the harness then runs
 // host-mediated, and the turn ends with an END event.
-func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) error {
+func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) (err error) {
+	ctx = observability.EnsureRequestID(ctx)
+	var historyEvents int
+	var finalSeq int64
+	modelCallsBefore := c.liveModelCalls
+	toolCallsBefore := c.liveToolCalls
+	finish := observability.StartDebug(ctx, c.logger, "controller", "exec",
+		"session_uid", c.sessionUID,
+		"expected_last_seq", expectedLastSeq,
+		"input_count", len(inputs),
+	)
+	defer func() {
+		finish(err,
+			"error_kind", controllerErrorKind(err),
+			"history_event_count", historyEvents,
+			"final_seq", finalSeq,
+			"model_call_count", c.liveModelCalls-modelCallsBefore,
+			"tool_call_count", c.liveToolCalls-toolCallsBefore,
+		)
+	}()
+
 	// The harness receives the committed conversation so far as History (a stateless harness
 	// reconstructs its context from it); the echo harness ignores it, but a real one needs it.
 	prior, err := c.log.Read(1)
 	if err != nil {
 		return err
 	}
+	historyEvents = len(prior)
 	history := make([]api.Event, 0, len(prior))
 	for _, r := range prior {
 		history = append(history, r.Event)
@@ -121,24 +158,45 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		}
 		last = rec.Seq
 	}
+	runFinished := observability.StartDebug(ctx, c.logger, "controller", "run_harness",
+		"session_uid", c.sessionUID,
+		"history_event_count", historyEvents,
+		"input_count", len(inputs),
+	)
 	if err := har.Run(ctx, &api.Start{History: history, Inputs: inputs}, &liveSink{c: c}); err != nil {
+		runFinished(err, "error_kind", "harness_run_failed")
 		// Best-effort: record the failure. If this append itself fails we still surface the
 		// original harness error to the caller.
 		_, _ = c.appendSeq(api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
 		return err
 	}
-	_, err = c.appendSeq(api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	runFinished(nil)
+	rec, err := c.appendSeq(api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	finalSeq = rec.Seq
 	return err
 }
 
 // Replay reconstructs the session by re-executing the harness with every effect served from the
 // journal. It asserts the model is never invoked (I1) and that each recorded model-input hash
 // matches (I0), returning the reconstructed outputs for an equivalence check. It is read-only.
-func (c *Controller) Replay(ctx context.Context, har api.Harness) ([]string, error) {
+func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []string, err error) {
+	ctx = observability.EnsureRequestID(ctx)
+	var recordCount, effectCount int
+	finish := observability.StartDebug(ctx, c.logger, "controller", "replay", "session_uid", c.sessionUID)
+	defer func() {
+		finish(err,
+			"error_kind", controllerErrorKind(err),
+			"record_count", recordCount,
+			"effect_count", effectCount,
+			"output_count", len(outputs),
+		)
+	}()
+
 	recs, err := c.log.Read(1)
 	if err != nil {
 		return nil, err
 	}
+	recordCount = len(recs)
 	var inputs []api.Message
 	var stream, history []api.Event
 	for _, r := range recs {
@@ -152,6 +210,7 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) ([]string, err
 			stream = append(stream, r.Event)
 		}
 	}
+	effectCount = len(stream)
 	before := c.liveModelCalls
 	sink := &replaySink{stream: stream}
 	if err := har.Run(ctx, &api.Start{Inputs: inputs, History: history}, sink); err != nil {
@@ -166,7 +225,8 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) ([]string, err
 	if sink.i != len(sink.stream) {
 		return nil, fmt.Errorf("%w: consumed %d of %d recorded effects", ErrReplayDiverged, sink.i, len(sink.stream))
 	}
-	return sink.outputs, nil
+	outputs = sink.outputs
+	return outputs, nil
 }
 
 // Outputs returns the recorded assistant outputs in order.
@@ -186,6 +246,9 @@ func (c *Controller) Outputs() ([]string, error) {
 
 // ModelInvocations is the number of live model calls made so far (0 across a pure replay).
 func (c *Controller) ModelInvocations() int { return c.liveModelCalls }
+
+// ToolInvocations is the number of live tool calls made so far (0 across a pure replay).
+func (c *Controller) ToolInvocations() int { return c.liveToolCalls }
 
 // Head returns the current log head seq.
 func (c *Controller) Head() (int64, error) { return c.log.Head() }
@@ -236,6 +299,31 @@ func CanPlace(harness api.Capabilities, runtime api.RuntimeCapabilities) bool {
 		return false
 	}
 	return true
+}
+
+func controllerErrorKind(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, eventlog.ErrConflict):
+		return "conflict"
+	case errors.Is(err, eventlog.ErrFenced):
+		return "fenced"
+	case errors.Is(err, ErrReplayInvokedModel):
+		return "replay_invoked_model"
+	case errors.Is(err, ErrReplayDiverged):
+		return "replay_diverged"
+	case errors.Is(err, ErrMissingIdempotencyKey):
+		return "missing_idempotency_key"
+	case errors.Is(err, ErrUnmediatedToolCall):
+		return "unmediated_tool_call"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	default:
+		return "operation_failed"
+	}
 }
 
 // hashModelInput is the model-input fingerprint stored on EVENT_MODEL_CALL and re-checked on

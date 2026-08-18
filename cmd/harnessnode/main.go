@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/aramase/agentsessions/harness/counteragent"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/harnesswire"
+	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/runtime/substrate"
 )
 
@@ -47,7 +49,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("harnessnode: listen %s: %v", grpcAddr, err)
 	}
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(slog.Default())),
+		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(slog.Default())),
+	)
 	v1.RegisterHarnessServer(srv, harnesswire.NewServer(selectHarness()))
 
 	// readyz on a side port so the actor is reported live once the gRPC server is accepting.

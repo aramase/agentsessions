@@ -83,6 +83,7 @@ Full docs live in [`docs/`](docs/README.md):
 - [**Writing a harness**](docs/harness-authoring.md): plug your agent into the `api.Harness` SPI.
 - [**Architecture**](docs/architecture.md): how the neutral core is built.
 - [**Running on agent-substrate**](docs/substrate-conformance.md): both capability tiers, green in CI.
+- [**Observability**](docs/observability.md): structured request-flow logs and correlation.
 - [**FAQ**](docs/faq.md): what this is, what it is not, and how it behaves.
 
 ## Repo layout
@@ -93,6 +94,7 @@ Full docs live in [`docs/`](docs/README.md):
 | `controller/` | Single-writer, event-sourced core: drives one session, mediates the model, enforces the determinism invariants. |
 | `eventlog/`, `sqlitelog/` | The durable event log: CAS + fencing token + hash chain (in-memory reference + sqlite backend). |
 | `canon/` | Language-neutral canonical serialization (RFC 8785 JCS) for the hash chain. |
+| `observability/` | Structured operation logging and gRPC request-correlation helpers. |
 | `harnesswire/` | Bridges the in-process `api.Harness` SPI and the out-of-process `Harness.Connect` gRPC stream. |
 | `placement/` | The `Placer`: wires Sessions to the `Runtime` SPI, mints/binds fences, gates via `CanPlace`. |
 | `runtime/local`, `runtime/substrate` | `Runtime` backends: a filesystem-only local backend, and agent-substrate. |

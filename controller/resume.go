@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/observability"
 )
 
 // Resume re-drives an interrupted last execution (crash-recovery, I4). If the journal's last turn
@@ -15,11 +16,24 @@ import (
 // last turn is complete or the log is empty, it is a no-op (returns false).
 //
 // It assumes one INPUT per turn (the echo/demo shape); multi-input turns are a later refinement.
-func (c *Controller) Resume(ctx context.Context, har api.Harness) (bool, error) {
+func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool, err error) {
+	ctx = observability.EnsureRequestID(ctx)
+	var recordCount, recordedEffectCount int
+	finish := observability.StartDebug(ctx, c.logger, "controller", "resume", "session_uid", c.sessionUID)
+	defer func() {
+		finish(err,
+			"error_kind", controllerErrorKind(err),
+			"resumed", resumed,
+			"record_count", recordCount,
+			"recorded_effect_count", recordedEffectCount,
+		)
+	}()
+
 	recs, err := c.log.Read(1)
 	if err != nil {
 		return false, err
 	}
+	recordCount = len(recs)
 	if len(recs) == 0 {
 		return false, nil
 	}
@@ -58,6 +72,7 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (bool, error) 
 	}
 
 	sink := &resumeSink{live: liveSink{c: c}, stream: stream}
+	recordedEffectCount = len(stream)
 	if err := har.Run(ctx, &api.Start{Inputs: inputs, History: histEvents}, sink); err != nil {
 		_, _ = c.appendSeq(api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
 		return true, err

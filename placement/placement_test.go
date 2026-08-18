@@ -1,8 +1,13 @@
 package placement_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
@@ -17,11 +22,11 @@ import (
 
 // newLocalPlacer builds a Placer over a fresh runtime/local backend and closes the backend's harness
 // server when the test ends.
-func newLocalPlacer(t *testing.T, h api.Harness) *placement.Placer {
+func newLocalPlacer(t *testing.T, h api.Harness, opts ...placement.Option) *placement.Placer {
 	t.Helper()
 	b := local.New(h)
 	t.Cleanup(func() { _ = b.Close() })
-	return placement.New(b, echoagent.Model)
+	return placement.New(b, echoagent.Model, opts...)
 }
 
 // TestPlacerExecRoutesThroughRuntime proves a turn placed via the Placer runs through Runtime.Create
@@ -57,6 +62,136 @@ func TestPlacerExecRoutesThroughRuntime(t *testing.T) {
 	if err := log.Verify(); err != nil {
 		t.Fatalf("verify after placed exec: %v", err)
 	}
+}
+
+func TestPlacerStructuredLogging(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := newLocalPlacer(t, echoagent.Harness{}, placement.WithLogger(logger))
+
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := p.Exec(
+		context.Background(),
+		store.Session("logged-session"),
+		"logged-session",
+		[]api.Message{*api.TextMessage("user", "do-not-log-this")},
+		0,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	records := decodeLogRecords(t, output.Bytes())
+	execFinished := findLogRecord(t, records, "placement", "exec", "finish")
+	if execFinished["level"] != "DEBUG" || execFinished["outcome"] != "success" {
+		t.Fatalf("unexpected completion log: %v", execFinished)
+	}
+	if execFinished["session_uid"] != "logged-session" || execFinished["runtime"] != "local" {
+		t.Fatalf("missing operation identifiers: %v", execFinished)
+	}
+	if execFinished["duration_ms"] == nil {
+		t.Fatalf("missing operation duration: %v", execFinished)
+	}
+	resolveFinished := findLogRecord(t, records, "placement", "resolve_execution_path", "finish")
+	if resolveFinished["decision"] != "accepted" || resolveFinished["harness_id"] != "echo" {
+		t.Fatalf("missing placement decision: %v", resolveFinished)
+	}
+	if strings.Contains(output.String(), "do-not-log-this") {
+		t.Fatalf("log contains message contents: %s", output.String())
+	}
+	for _, record := range records {
+		if _, ok := record["fence_token"]; ok {
+			t.Fatalf("log contains a fence token: %v", record)
+		}
+	}
+
+	output.Reset()
+	refused := newLocalPlacer(t, memSnapshotHarness{}, placement.WithLogger(logger))
+	if _, err := refused.Exec(context.Background(), store.Session("refused"), "refused", nil, 0); !errors.Is(err, placement.ErrUnplaceable) {
+		t.Fatalf("expected ErrUnplaceable, got %v", err)
+	}
+	records = decodeLogRecords(t, output.Bytes())
+	execFinished = findLogRecord(t, records, "placement", "exec", "finish")
+	if execFinished["level"] != "INFO" || execFinished["outcome"] != "error" || execFinished["error_kind"] != "unplaceable" {
+		t.Fatalf("unexpected failure log: %v", execFinished)
+	}
+	resolveFinished = findLogRecord(t, records, "placement", "resolve_execution_path", "finish")
+	if resolveFinished["decision"] != "refused" || resolveFinished["error_kind"] != "unplaceable" {
+		t.Fatalf("missing refusal decision: %v", resolveFinished)
+	}
+}
+
+func TestPlacerPreservesIncarnationAndPairsCloseLogs(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	p := newLocalPlacer(t, echoagent.Harness{},
+		placement.WithLogger(logger),
+		placement.WithDialer(func(string) (api.Harness, func() error, error) {
+			return nil, nil, errors.New("dial failed")
+		}),
+	)
+
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	inc, err := p.Exec(context.Background(), store.Session("dial-failure"), "dial-failure", nil, 0)
+	if err == nil {
+		t.Fatal("expected dial failure")
+	}
+	if inc.ID != "dial-failure" || inc.Runtime != "local" {
+		t.Fatalf("post-create failure lost incarnation: %+v", inc)
+	}
+
+	output.Reset()
+	p = newLocalPlacer(t, echoagent.Harness{},
+		placement.WithLogger(logger),
+		placement.WithDialer(func(string) (api.Harness, func() error, error) {
+			return echoagent.Harness{}, func() error { return errors.New("close failed") }, nil
+		}),
+	)
+	if _, err := p.Exec(context.Background(), store.Session("close-failure"), "close-failure", nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	records := decodeLogRecords(t, output.Bytes())
+	findLogRecord(t, records, "placement", "close_harness", "start")
+	finished := findLogRecord(t, records, "placement", "close_harness", "finish")
+	if finished["error_kind"] != "harness_close_failed" || finished["duration_ms"] == nil {
+		t.Fatalf("close log does not follow operation schema: %v", finished)
+	}
+}
+
+func decodeLogRecords(t *testing.T, data []byte) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		var record map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			t.Fatalf("decode log: %v", err)
+		}
+		records = append(records, record)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan logs: %v", err)
+	}
+	return records
+}
+
+func findLogRecord(t *testing.T, records []map[string]any, component, operation, phase string) map[string]any {
+	t.Helper()
+	for _, record := range records {
+		if record["component"] == component && record["operation"] == operation && record["phase"] == phase {
+			return record
+		}
+	}
+	t.Fatalf("missing log component=%q operation=%q phase=%q: %v", component, operation, phase, records)
+	return nil
 }
 
 // TestPlacerFenceBinding proves the fence the Placer stamps on the incarnation is the SAME token the

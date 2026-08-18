@@ -1,9 +1,12 @@
 package substrate_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
@@ -39,9 +42,9 @@ func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (subst
 	return substrate.ActorInfo{Status: m.status, PodIP: m.info.PodIP, MeshDNS: m.info.MeshDNS}, nil
 }
 
-func newBackend(m *mockControl) *substrate.Backend {
+func newBackend(m *mockControl, opts ...substrate.Option) *substrate.Backend {
 	return substrate.New(m, "space", substrate.ObjectRef{Namespace: "tmpl", Name: "echo"},
-		api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}})
+		api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, opts...)
 }
 
 func TestCreateBootsActor(t *testing.T) {
@@ -71,13 +74,19 @@ func TestCreateRejectsMissingPodIP(t *testing.T) {
 
 func TestSuspendRestoreRoundtrip(t *testing.T) {
 	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.7"}}
-	b := newBackend(m)
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	b := newBackend(m, substrate.WithLogger(logger))
 	ref, err := b.Snapshot(context.Background(), api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !ref.Memory || ref.Local != "sess-x" || ref.ExternalURI != "gcs://snap/sess-x" {
 		t.Fatalf("unexpected snapshot ref %+v", ref)
+	}
+	if !strings.Contains(output.String(), `"operation":"suspend_actor"`) ||
+		!strings.Contains(output.String(), `"reason":"snapshot"`) {
+		t.Fatalf("snapshot did not log its SuspendActor call: %s", output.String())
 	}
 	if _, err := b.Restore(context.Background(), ref); err != nil {
 		t.Fatal(err)
