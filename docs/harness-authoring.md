@@ -132,9 +132,9 @@ model did not produce through the mediated call (for example progress text you g
   any runtime, including a plain pod.
 - If your harness keeps **in-process state the log cannot rebuild** (a REPL, a browser, a warm process),
   declare `REQUIRES_MEMORY_SNAPSHOT`. The host schedules you only on memory-capable compute and restores
-  your RAM on resume. In this mode `Start.History` is empty after a restore, and you must **never**
-  reconstruct state from it (I4). Doing so would reset or double-apply the very state the snapshot
-  preserved.
+  your RAM on resume and on fork — a forked child is a clone of the parent's snapshot, not a replay. In
+  this mode `Start.History` is empty after a restore, and you must **never** reconstruct state from it
+  (I4). Doing so would reset or double-apply the very state the snapshot preserved.
 
 Do not declare `REQUIRES_MEMORY_SNAPSHOT` to be safe. It restricts where you can run. Declare it only if
 your state genuinely cannot be replayed.

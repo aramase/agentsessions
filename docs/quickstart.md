@@ -93,7 +93,9 @@ Kubernetes version of this (exec on one pod, delete the pod, a fresh pod replays
 ## 4. Fork: branch a session at a point in its history
 
 `fork --at N` creates a child session that inherits the parent's log up to seq `N`, then evolves
-independently. The parent is untouched.
+independently. `echoagent` is a stateless-replay harness, so the child is rebuilt by replay and the
+parent is untouched. (A `REQUIRES_MEMORY_SNAPSHOT` harness checkpoints the parent instead — see the
+[FAQ](faq.md#what-are-fork-semantics).)
 
 ```bash
 /tmp/agentctl fork --journal /tmp/qs.db --session "$SID" --at 4
