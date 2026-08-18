@@ -71,12 +71,46 @@ The controller re-drives the interrupted execution at most once (invariant I3). 
 means "continue the last execution" rather than "start a new turn". Host-executed tools carry an
 idempotency key so a re-driven side-effecting call dedups on the tool side and the effect happens once.
 
+## What is fork actually for?
+
+Fork makes a session a branch point. Four patterns the implementation supports today:
+
+- **Parallel exploration from identical state.** `Fork(count: N)` takes one checkpoint and clones N
+  children from it, so a fleet of agents branches from exactly the same base instead of N separate
+  re-derivations that can drift. Run several strategies against one task, keep the best, discard the
+  rest.
+- **Reuse a warmed base session.** A session that has already installed dependencies, cloned a repo, or
+  built an index can act as the base for many later jobs, paying that setup once rather than per job.
+  Fork skips re-deriving the state; it does not make copying it free, and where that beats a cold boot
+  depends on setup cost versus snapshot size, which is not yet measured.
+- **Retry from before a bad turn.** For a `STATELESS_REPLAY` harness `--at N` may name any historical
+  seq, so a session that went wrong at turn 12 can branch at turn 11 and take a different path without
+  discarding the work before it.
+- **Auditable A/B.** Each branch is its own hash-chained log carrying a `FORK` marker that names its
+  parent and seq. Two branches differing only in a prompt or a model stay independently verifiable, so
+  a result traces back to the exact branch that produced it.
+
+The cost is real: no runtime forks copy-on-write today, so an N-way fan-out is N restores rather than N
+references to one image.
+
 ## What are fork semantics?
 
 `fork --at N` creates a child session that inherits the parent's log up to seq `N`, records a `FORK`
-lifecycle marker, and then evolves independently. The parent is untouched. On backends that support it,
-the compute forks copy-on-write; otherwise the child is reconstructed by replay. Because each session is
-a hash-chained log, a fork is a branch in a verifiable hash tree.
+lifecycle marker, and then evolves independently. Because each session is a hash-chained log, a fork is
+a branch in a verifiable hash tree.
+
+What happens to compute depends on the harness's declared resumability:
+
+- **`STATELESS_REPLAY`** — the child gets a fresh incarnation and the host replays the inherited prefix
+  into it. The parent is untouched, and `--at N` may name any historical seq.
+- **`REQUIRES_MEMORY_SNAPSHOT`** — the child's RAM has to come from somewhere, so the parent is first
+  checkpointed: it is suspended, its worker is freed, and a `SUSPEND` event is appended to its chain.
+  Each child is then cloned from that snapshot. The parent is recoverable with `resume`, but it is *not*
+  untouched. A memory snapshot captures RAM as of now, so forking at a historical seq is refused.
+
+No runtime forks copy-on-write today. On substrate each child is a full snapshot restore, so an N-way
+fan-out costs N restores rather than one shared image — see
+[substrate conformance](substrate-conformance.md#fork-cloning-an-actor-from-a-durable-snapshot).
 
 ## How do tool calls work, and can I gate sensitive ones?
 

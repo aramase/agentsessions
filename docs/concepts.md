@@ -115,7 +115,9 @@ harness (`api.Capabilities.Resumability`):
   including a plain pod with no snapshot support. `echoagent` is the reference example.
 - **`REQUIRES_MEMORY_SNAPSHOT`.** The harness holds in-process state that the log cannot reconstruct: a
   live REPL, a browser, a long-running computation. Resuming means restoring RAM, so the host only
-  schedules it on a runtime that can snapshot memory. `counteragent` is the reference example.
+  schedules it on a runtime that can snapshot memory. Forking means the same thing: the parent is
+  checkpointed and each child is cloned from that snapshot, so a fork costs a suspend on the parent and
+  is only available at HEAD. `counteragent` is the reference example.
 
 The distinction is honest by design. A stateless-replay harness costs nothing special and goes anywhere.
 A memory-snapshot harness gets a capability a plain pod structurally cannot provide, and pays for it by

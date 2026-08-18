@@ -84,6 +84,12 @@ The `Placer` wires Sessions to the `Runtime` SPI and owns the incarnation lifecy
   a `unix://` socket for `runtime/local`; a `host:port` (the actor's `PodIP`) for `runtime/substrate`.
 - **Lifecycle map** — session `Suspend → Runtime.Snapshot`, `Resume → Runtime.Restore`, session-end
   `→ Runtime.Stop`.
+- **Fork** — capability-driven. A `STATELESS_REPLAY` session replay-forks (the child cold-boots and
+  the copied journal reconstructs it, parent untouched). A `REQUIRES_MEMORY_SNAPSHOT` session holds
+  live state the journal cannot rebuild (I4), so the Placer checkpoints the parent via
+  `Runtime.Snapshot`, records the ref in a SUSPEND event, and clones every child from it through
+  `Runtime.Fork`. An N-way fan-out takes exactly one parent checkpoint, so all children branch from
+  identical state.
 
 ## Runtime backends (`runtime/`)
 

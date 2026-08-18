@@ -54,11 +54,12 @@ determinism guarantees are exercised by a replay-conformance suite (`conformance
   (`harnesswire/`); the host mediates the model over the wire, so the determinism guarantees hold across
   the process boundary and a harness never touches a provider SDK on the replay path.
 - **Runs on real agent-substrate — both capability tiers, green in CI.** The conformance suite runs
-  against a real `ate-system` in kind (not a mock). **Axis 1** (`STATELESS_REPLAY`, gVisor):
-  byte-identical replay. **Axis 2** (`REQUIRES_MEMORY_SNAPSHOT`, micro-VM): drive → suspend (memory
-  snapshot) → restore → the in-RAM state **continues**, with the chain verifying across the snapshot
-  boundary — what a plain pod structurally cannot do. `CanPlace` gates the tiers, and the neutral core
-  imports **zero** substrate code (a CI gate asserts it). See
+  against a real `ate-system` in kind (not a mock). `STATELESS_REPLAY` on gVisor: byte-identical
+  replay. `REQUIRES_MEMORY_SNAPSHOT` on a micro-VM: drive → suspend (memory snapshot) → restore → the
+  in-RAM state **continues**, with the chain verifying across the snapshot boundary — what a plain pod
+  structurally cannot do. Fork fans a stateful session out to k children from one checkpoint and each
+  continues independently. `CanPlace` gates the tiers, and the neutral core imports **zero** substrate
+  code (a CI gate asserts it). See
   [`docs/substrate-conformance.md`](docs/substrate-conformance.md).
 
 ## How it behaves
