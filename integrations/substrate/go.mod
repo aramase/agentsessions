@@ -3,7 +3,7 @@ module github.com/aramase/agentsessions/integrations/substrate
 go 1.26.3
 
 require (
-	github.com/agent-substrate/substrate v0.0.0-20260725015935-aa1d14a7b33b
+	github.com/agent-substrate/substrate v0.0.0-20260731195148-b1bd558aba3c
 	github.com/aramase/agentsessions v0.0.0
 	google.golang.org/grpc v1.82.1
 )

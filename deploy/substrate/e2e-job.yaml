@@ -1,0 +1,56 @@
+# The real-substrate conformance suite as an in-cluster Job. One manifest for every capability: the
+# image holds the compiled `integrations/substrate/e2e` test binary and E2E_RUN selects which tests
+# run, so adding a capability means adding a Go test, not another Job + another driver + another
+# block of polling shell.
+#
+# In-cluster is required, not preferred: the atenet mesh is HTTP/1.1-only to actors, so a harness is
+# reached by a direct gRPC dial to PodIP:HarnessPort, which only routes from inside. Control is
+# reached over the ate-api-server ClusterIP with a projected ServiceAccount token.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: substrate-e2e
+  namespace: ate-agentsessions
+spec:
+  backoffLimit: 0 # no retries: a failed conformance run must fail loudly, not be masked by a retry
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: substrate-e2e
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: e2e
+          image: E2E_IMAGE
+          args:
+            - "-test.v"
+            - "-test.timeout=$(E2E_TIMEOUT)"
+            - "-test.run=$(E2E_RUN)"
+          env:
+            - name: AGENTSESSIONS_E2E # the gate: without it every test skips
+              value: "1"
+            - name: E2E_RUN
+              value: "E2E_RUN_PLACEHOLDER"
+            - name: E2E_TIMEOUT
+              value: "20m"
+            - name: ATEAPI_ADDR
+              value: "api.ate-system.svc:443"
+            - name: ATEAPI_SERVER_NAME
+              value: "api.ate-system.svc"
+            - name: ATEAPI_TOKEN_FILE
+              value: "/var/run/secrets/tokens/ateapi-token"
+            - name: ACTORTEMPLATE_NS
+              value: "ate-agentsessions"
+          volumeMounts:
+            - name: ateapi-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+      volumes:
+        - name: ateapi-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 3600
+                  path: ateapi-token

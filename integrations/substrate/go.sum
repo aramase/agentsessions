@@ -1,5 +1,7 @@
-github.com/agent-substrate/substrate v0.0.0-20260725015935-aa1d14a7b33b h1:XJsiwQcqxzMQT4eBhdO+Bg4cU0HTRTM9EXFwkmWUc+Q=
-github.com/agent-substrate/substrate v0.0.0-20260725015935-aa1d14a7b33b/go.mod h1:FtVc9AA++A1aEyIHUQdjCesf6dP4sxIxJc+Xc+p6Mok=
+github.com/agent-substrate/substrate v0.0.0-20260731195148-b1bd558aba3c h1:omG6CXrfWN/jC/MV8AmOjqUM1NF1ZtJTXmiu++wRJyY=
+github.com/agent-substrate/substrate v0.0.0-20260731195148-b1bd558aba3c/go.mod h1:e6+O3LCD9G5G5Q7WDsEl9IkK47ChvkPhnxXMzVUSQ7M=
+github.com/agent-substrate/substrate v0.0.0-20260805232306-2feda2ae4496 h1:8ZFIupbUFJaaf0hwhhOp1g9xe508oYFWNIZK1E+Ji5A=
+github.com/agent-substrate/substrate v0.0.0-20260805232306-2feda2ae4496/go.mod h1:e6+O3LCD9G5G5Q7WDsEl9IkK47ChvkPhnxXMzVUSQ7M=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

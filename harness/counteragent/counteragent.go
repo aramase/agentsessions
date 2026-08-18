@@ -1,7 +1,8 @@
 // Package counteragent is a REQUIRES_MEMORY_SNAPSHOT api.Harness: it holds an in-RAM counter whose
-// state is, by design, NOT reconstructable from the event log. It exists to prove axis-2 — memory
-// continuity across suspend/restore that STATELESS_REPLAY cannot provide, and that a plain pod (a
-// filesystem-only runtime) must honestly refuse via CanPlace. It is the counterpart to echoagent.
+// state is, by design, NOT reconstructable from the event log. It exists to prove the
+// REQUIRES_MEMORY_SNAPSHOT tier — memory continuity across suspend/restore that STATELESS_REPLAY
+// cannot provide, and that a plain pod (a filesystem-only runtime) must honestly refuse via
+// CanPlace. It is the counterpart to echoagent.
 package counteragent
 
 import (
@@ -35,7 +36,7 @@ func (h *Harness) Describe(ctx context.Context) (api.Descriptor, error) {
 
 // Run performs one turn: increment the in-RAM counter and emit its value.
 //
-// I4 contract (the load-bearing rule for axis-2): the counter is NEVER re-initialized from
+// I4 contract (the load-bearing rule for this tier): the counter is NEVER re-initialized from
 // s.History. History is empty on a memory-restored sandbox (ResumeActor{boot:false}); reconstructing
 // the count from an empty History, or resetting it to zero because History is empty, would DESTROY
 // the continuity the snapshot preserved (reset to 0 / double-apply). The count is pure process RAM:

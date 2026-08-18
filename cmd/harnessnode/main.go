@@ -79,8 +79,8 @@ func main() {
 }
 
 // selectHarness picks the harness this node serves, by HARNESS_KIND (default "echo"). One image
-// serves both axes: "echo" is STATELESS_REPLAY (axis 1); "counter" is REQUIRES_MEMORY_SNAPSHOT
-// (axis 2, micro-VM) and holds in-RAM state that only a memory snapshot can preserve.
+// serves both conformance tiers: "echo" is STATELESS_REPLAY; "counter" is REQUIRES_MEMORY_SNAPSHOT
+// (micro-VM) and holds in-RAM state that only a memory snapshot can preserve.
 func selectHarness() api.Harness {
 	switch env("HARNESS_KIND", "echo") {
 	case "counter":
