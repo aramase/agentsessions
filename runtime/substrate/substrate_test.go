@@ -198,6 +198,28 @@ func TestCreateRejectsMissingPodIP(t *testing.T) {
 	}
 }
 
+func TestCreateValidatesSessionSpec(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		spec *api.SessionSpec
+		want string
+	}{
+		{name: "nil spec", want: "substrate: create requires a session spec"},
+		{name: "empty session uid", spec: &api.SessionSpec{}, want: "substrate: create requires a session uid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &mockControl{}
+			_, err := newBackend(m).Create(context.Background(), tc.spec)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Create() error = %v, want %q", err, tc.want)
+			}
+			if len(m.calls) != 0 {
+				t.Fatalf("Create() made control-plane calls for invalid input: %v", m.calls)
+			}
+		})
+	}
+}
+
 func TestSuspendRestoreRoundtrip(t *testing.T) {
 	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.7"}}
 	var output bytes.Buffer

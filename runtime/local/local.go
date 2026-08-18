@@ -139,7 +139,10 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		finish(err, "error_kind", localErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
 
-	if s == nil || s.SessionUID == "" {
+	if s == nil {
+		return api.Incarnation{}, fmt.Errorf("local: create requires a session spec")
+	}
+	if s.SessionUID == "" {
 		return api.Incarnation{}, fmt.Errorf("local: create requires a session uid")
 	}
 	addr, err := b.start(ctx)

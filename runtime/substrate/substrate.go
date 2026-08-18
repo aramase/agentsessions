@@ -165,24 +165,35 @@ func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespa
 // already holds live state would silently discard exactly the state fork and suspend exist to carry,
 // and the harness never rebuilds it from Start.History (I4).
 func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incarnation, err error) {
+	sessionUID := ""
+	if s != nil {
+		sessionUID = s.SessionUID
+	}
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "create_compute",
-		"session_uid", s.SessionUID,
+		"session_uid", sessionUID,
 		"atespace", b.atespace,
 	)
 	defer func() {
 		finish(err, "error_kind", substrateErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
 
-	ref := b.ref(s.SessionUID)
+	if s == nil {
+		return api.Incarnation{}, fmt.Errorf("substrate: create requires a session spec")
+	}
+	if s.SessionUID == "" {
+		return api.Incarnation{}, fmt.Errorf("substrate: create requires a session uid")
+	}
+
+	ref := b.ref(sessionUID)
 	switch info, err := b.ctl.GetActor(ctx, ref); {
 	case err == nil && info.Status == StatusRunning:
-		return b.incarnation(s.SessionUID, info)
+		return b.incarnation(sessionUID, info)
 	case err == nil && info.Status == StatusSuspended:
 		info, err := b.ctl.ResumeActor(ctx, ref, false) // restore RAM, do not boot over it
 		if err != nil {
 			return api.Incarnation{}, fmt.Errorf("substrate: resume suspended actor: %w", err)
 		}
-		return b.incarnation(s.SessionUID, info)
+		return b.incarnation(sessionUID, info)
 	case err == nil:
 		return api.Incarnation{}, fmt.Errorf("substrate: actor %q is in state %v, not placeable", ref.Name, info.Status)
 	case !errors.Is(err, ErrActorNotFound):
@@ -210,7 +221,7 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		return api.Incarnation{}, fmt.Errorf("substrate: resume actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
-	inc, err = b.incarnation(s.SessionUID, info)
+	inc, err = b.incarnation(sessionUID, info)
 	return inc, err
 }
 
