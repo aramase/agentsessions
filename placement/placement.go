@@ -39,9 +39,11 @@ type Backend interface {
 
 // Placer owns the incarnation lifecycle: Create the compute, mint+bind the fence, drive the controller.
 type Placer struct {
-	backend Backend
-	model   controller.ModelFunc
-	dial    Dialer
+	backend   Backend
+	model     controller.ModelFunc
+	creds     controller.CredentialFunc
+	principal api.IdentityRef
+	dial      Dialer
 }
 
 // Dialer opens a Harness.Connect client to the harness at a runtime-specific address and returns a
@@ -56,6 +58,21 @@ type Option func(*Placer)
 
 // WithDialer overrides how the Placer reaches a harness (default: unix-socket dial for runtime/local).
 func WithDialer(d Dialer) Option { return func(p *Placer) { p.dial = d } }
+
+// WithCredentialSource gives placed harnesses an authority path: the host vends short-lived
+// credentials for the session principal on request. Without it a placed harness can run, but any
+// credential request fails closed — which is the honest outcome for a host that has no source.
+func WithCredentialSource(creds controller.CredentialFunc) Option {
+	return func(p *Placer) { p.creds = creds }
+}
+
+// WithPrincipal sets the principal placed sessions act as. It reaches the sandbox on the
+// SessionSpec (who the compute is for) and the harness in Start.Identity (who it acts as), and it
+// is what the credential source vends FOR. A per-session resolver is the natural next step; this
+// keeps the seam explicit without inventing one.
+func WithPrincipal(p api.IdentityRef) Option {
+	return func(pl *Placer) { pl.principal = p }
+}
 
 // New builds a Placer over a compute backend and the live model.
 func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
@@ -81,7 +98,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return api.Incarnation{}, fmt.Errorf("%w: harness %q needs %s but the runtime provides MemorySnapshot=%v",
 			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, p.backend.Capabilities().MemorySnapshot)
 	}
-	inc, err := p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID})
+	inc, err := p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID, Identity: p.principal})
 	if err != nil {
 		return api.Incarnation{}, err
 	}
@@ -95,7 +112,11 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return api.Incarnation{}, err
 	}
 	inc.FenceToken = fence // Placer-owned: the incarnation carries the token Suspend/Resume will need
-	c, err := controller.New(log, p.model, controller.WithFence(fence))
+	c, err := controller.New(log, p.model,
+		controller.WithFence(fence),
+		controller.WithCredentialSource(p.creds),
+		controller.WithPrincipal(p.principal),
+	)
 	if err != nil {
 		return api.Incarnation{}, err
 	}

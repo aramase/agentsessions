@@ -88,18 +88,19 @@ func (Mediation) EnumDescriptor() ([]byte, []int) {
 type EventKind int32
 
 const (
-	EventKind_EVENT_KIND_UNSPECIFIED EventKind = 0
-	EventKind_EVENT_INPUT            EventKind = 1 // a user/producer message
-	EventKind_EVENT_MODEL_CALL       EventKind = 2 // model-call metadata (+ input_hash); output is an OUTPUT message
-	EventKind_EVENT_OUTPUT           EventKind = 3 // a finalized assistant message; streaming deltas are transport, not logged
-	EventKind_EVENT_TOOL_CALL        EventKind = 4
-	EventKind_EVENT_TOOL_RESULT      EventKind = 5
-	EventKind_EVENT_APPROVAL_REQUEST EventKind = 6
-	EventKind_EVENT_APPROVAL_RESULT  EventKind = 7
-	EventKind_EVENT_USAGE            EventKind = 8
-	EventKind_EVENT_LIFECYCLE        EventKind = 9
-	EventKind_EVENT_END              EventKind = 10
-	EventKind_EVENT_ERROR            EventKind = 11
+	EventKind_EVENT_KIND_UNSPECIFIED   EventKind = 0
+	EventKind_EVENT_INPUT              EventKind = 1 // a user/producer message
+	EventKind_EVENT_MODEL_CALL         EventKind = 2 // model-call metadata (+ input_hash); output is an OUTPUT message
+	EventKind_EVENT_OUTPUT             EventKind = 3 // a finalized assistant message; streaming deltas are transport, not logged
+	EventKind_EVENT_TOOL_CALL          EventKind = 4
+	EventKind_EVENT_TOOL_RESULT        EventKind = 5
+	EventKind_EVENT_APPROVAL_REQUEST   EventKind = 6
+	EventKind_EVENT_APPROVAL_RESULT    EventKind = 7
+	EventKind_EVENT_USAGE              EventKind = 8
+	EventKind_EVENT_LIFECYCLE          EventKind = 9
+	EventKind_EVENT_END                EventKind = 10
+	EventKind_EVENT_ERROR              EventKind = 11
+	EventKind_EVENT_CREDENTIAL_REQUEST EventKind = 12 // the harness asked the host for a credential; the token is NOT recorded
 )
 
 // Enum value maps for EventKind.
@@ -117,20 +118,22 @@ var (
 		9:  "EVENT_LIFECYCLE",
 		10: "EVENT_END",
 		11: "EVENT_ERROR",
+		12: "EVENT_CREDENTIAL_REQUEST",
 	}
 	EventKind_value = map[string]int32{
-		"EVENT_KIND_UNSPECIFIED": 0,
-		"EVENT_INPUT":            1,
-		"EVENT_MODEL_CALL":       2,
-		"EVENT_OUTPUT":           3,
-		"EVENT_TOOL_CALL":        4,
-		"EVENT_TOOL_RESULT":      5,
-		"EVENT_APPROVAL_REQUEST": 6,
-		"EVENT_APPROVAL_RESULT":  7,
-		"EVENT_USAGE":            8,
-		"EVENT_LIFECYCLE":        9,
-		"EVENT_END":              10,
-		"EVENT_ERROR":            11,
+		"EVENT_KIND_UNSPECIFIED":   0,
+		"EVENT_INPUT":              1,
+		"EVENT_MODEL_CALL":         2,
+		"EVENT_OUTPUT":             3,
+		"EVENT_TOOL_CALL":          4,
+		"EVENT_TOOL_RESULT":        5,
+		"EVENT_APPROVAL_REQUEST":   6,
+		"EVENT_APPROVAL_RESULT":    7,
+		"EVENT_USAGE":              8,
+		"EVENT_LIFECYCLE":          9,
+		"EVENT_END":                10,
+		"EVENT_ERROR":              11,
+		"EVENT_CREDENTIAL_REQUEST": 12,
 	}
 )
 
@@ -216,7 +219,7 @@ func (x Lifecycle_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Lifecycle_Kind.Descriptor instead.
 func (Lifecycle_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{17, 0}
+	return file_common_proto_rawDescGZIP(), []int{18, 0}
 }
 
 // ResourceMetadata is carried by every top-level resource.
@@ -1096,6 +1099,77 @@ func (x *Usage) GetReasoningTokens() int64 {
 	return 0
 }
 
+// CredentialRequest is a credential REQUEST emitted by the harness (EVENT_CREDENTIAL_REQUEST).
+// It is how a harness obtains authority it is not trusted to hold: the host vends a short-lived
+// credential for the session's principal and answers via ControllerFrame.CredentialResult
+// (correlated by id). Two forms, one channel:
+//   - provider: a downstream credential the PLATFORM holds on the principal's behalf (a user's
+//     GitHub token, a model key) — ingress. The harness never stores it.
+//   - audience: a scoped, delegated Transaction Token minted for a downstream service — egress.
+//     This is what IdentityContext.can_mint_tokens advertises.
+//
+// The request is recorded (who asked for what, when) so the log remains a complete audit of the
+// authority a turn exercised; the TOKEN is never recorded — see CredentialResult.
+type CredentialRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`             // correlation id for the served CredentialResult
+	Provider      string                 `protobuf:"bytes,2,opt,name=provider,proto3" json:"provider,omitempty"` // downstream provider to vend for ("github", "ai")
+	Audience      []string               `protobuf:"bytes,3,rep,name=audience,proto3" json:"audience,omitempty"` // audience(s) to mint a delegated token for
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CredentialRequest) Reset() {
+	*x = CredentialRequest{}
+	mi := &file_common_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CredentialRequest) ProtoMessage() {}
+
+func (x *CredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_common_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CredentialRequest.ProtoReflect.Descriptor instead.
+func (*CredentialRequest) Descriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *CredentialRequest) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *CredentialRequest) GetProvider() string {
+	if x != nil {
+		return x.Provider
+	}
+	return ""
+}
+
+func (x *CredentialRequest) GetAudience() []string {
+	if x != nil {
+		return x.Audience
+	}
+	return nil
+}
+
 // ToolCall aligns with an MCP tool call (name + structured args).
 type ToolCall struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -1110,7 +1184,7 @@ type ToolCall struct {
 
 func (x *ToolCall) Reset() {
 	*x = ToolCall{}
-	mi := &file_common_proto_msgTypes[11]
+	mi := &file_common_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1122,7 +1196,7 @@ func (x *ToolCall) String() string {
 func (*ToolCall) ProtoMessage() {}
 
 func (x *ToolCall) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[11]
+	mi := &file_common_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1135,7 +1209,7 @@ func (x *ToolCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCall.ProtoReflect.Descriptor instead.
 func (*ToolCall) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{11}
+	return file_common_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ToolCall) GetId() string {
@@ -1187,7 +1261,7 @@ type ToolResult struct {
 
 func (x *ToolResult) Reset() {
 	*x = ToolResult{}
-	mi := &file_common_proto_msgTypes[12]
+	mi := &file_common_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1199,7 +1273,7 @@ func (x *ToolResult) String() string {
 func (*ToolResult) ProtoMessage() {}
 
 func (x *ToolResult) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[12]
+	mi := &file_common_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1212,7 +1286,7 @@ func (x *ToolResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolResult.ProtoReflect.Descriptor instead.
 func (*ToolResult) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{12}
+	return file_common_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ToolResult) GetId() string {
@@ -1269,7 +1343,7 @@ type ApprovalRequest struct {
 
 func (x *ApprovalRequest) Reset() {
 	*x = ApprovalRequest{}
-	mi := &file_common_proto_msgTypes[13]
+	mi := &file_common_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1281,7 +1355,7 @@ func (x *ApprovalRequest) String() string {
 func (*ApprovalRequest) ProtoMessage() {}
 
 func (x *ApprovalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[13]
+	mi := &file_common_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1294,7 +1368,7 @@ func (x *ApprovalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalRequest.ProtoReflect.Descriptor instead.
 func (*ApprovalRequest) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{13}
+	return file_common_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ApprovalRequest) GetToolCallId() string {
@@ -1322,7 +1396,7 @@ type ApprovalResult struct {
 
 func (x *ApprovalResult) Reset() {
 	*x = ApprovalResult{}
-	mi := &file_common_proto_msgTypes[14]
+	mi := &file_common_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1334,7 +1408,7 @@ func (x *ApprovalResult) String() string {
 func (*ApprovalResult) ProtoMessage() {}
 
 func (x *ApprovalResult) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[14]
+	mi := &file_common_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1347,7 +1421,7 @@ func (x *ApprovalResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalResult.ProtoReflect.Descriptor instead.
 func (*ApprovalResult) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{14}
+	return file_common_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ApprovalResult) GetToolCallId() string {
@@ -1381,7 +1455,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_common_proto_msgTypes[15]
+	mi := &file_common_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1393,7 +1467,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[15]
+	mi := &file_common_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1406,7 +1480,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{15}
+	return file_common_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Error) GetCode() int32 {
@@ -1433,7 +1507,7 @@ type HarnessEnd struct {
 
 func (x *HarnessEnd) Reset() {
 	*x = HarnessEnd{}
-	mi := &file_common_proto_msgTypes[16]
+	mi := &file_common_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1445,7 +1519,7 @@ func (x *HarnessEnd) String() string {
 func (*HarnessEnd) ProtoMessage() {}
 
 func (x *HarnessEnd) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[16]
+	mi := &file_common_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1458,7 +1532,7 @@ func (x *HarnessEnd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HarnessEnd.ProtoReflect.Descriptor instead.
 func (*HarnessEnd) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{16}
+	return file_common_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *HarnessEnd) GetState() string {
@@ -1496,7 +1570,7 @@ type Lifecycle struct {
 
 func (x *Lifecycle) Reset() {
 	*x = Lifecycle{}
-	mi := &file_common_proto_msgTypes[17]
+	mi := &file_common_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1508,7 +1582,7 @@ func (x *Lifecycle) String() string {
 func (*Lifecycle) ProtoMessage() {}
 
 func (x *Lifecycle) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[17]
+	mi := &file_common_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1521,7 +1595,7 @@ func (x *Lifecycle) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Lifecycle.ProtoReflect.Descriptor instead.
 func (*Lifecycle) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{17}
+	return file_common_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Lifecycle) GetKind() Lifecycle_Kind {
@@ -1588,6 +1662,7 @@ type Event struct {
 	//	*Event_Lifecycle
 	//	*Event_End
 	//	*Event_Error
+	//	*Event_Credential
 	Body          isEvent_Body `protobuf_oneof:"body"`
 	Actor         *IdentityRef `protobuf:"bytes,18,opt,name=actor,proto3" json:"actor,omitempty"` // emitter principal -> provenance
 	unknownFields protoimpl.UnknownFields
@@ -1596,7 +1671,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_common_proto_msgTypes[18]
+	mi := &file_common_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1608,7 +1683,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[18]
+	mi := &file_common_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1621,7 +1696,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{18}
+	return file_common_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Event) GetExecutionId() string {
@@ -1749,6 +1824,15 @@ func (x *Event) GetError() *Error {
 	return nil
 }
 
+func (x *Event) GetCredential() *CredentialRequest {
+	if x != nil {
+		if x, ok := x.Body.(*Event_Credential); ok {
+			return x.Credential
+		}
+	}
+	return nil
+}
+
 func (x *Event) GetActor() *IdentityRef {
 	if x != nil {
 		return x.Actor
@@ -1800,6 +1884,10 @@ type Event_Error struct {
 	Error *Error `protobuf:"bytes,17,opt,name=error,proto3,oneof"`
 }
 
+type Event_Credential struct {
+	Credential *CredentialRequest `protobuf:"bytes,19,opt,name=credential,proto3,oneof"`
+}
+
 func (*Event_Message) isEvent_Body() {}
 
 func (*Event_Model) isEvent_Body() {}
@@ -1820,6 +1908,8 @@ func (*Event_End) isEvent_Body() {}
 
 func (*Event_Error) isEvent_Body() {}
 
+func (*Event_Credential) isEvent_Body() {}
+
 // LogRecord is the host's durable, ordered wrapper around an Event. The host assigns seq,
 // links the hash-chain (content_hash = H(prev_hash || seq || canonical(event)); at a fork
 // child.first.prev_hash = parent@R.content_hash), and records the incarnation fence token.
@@ -1838,7 +1928,7 @@ type LogRecord struct {
 
 func (x *LogRecord) Reset() {
 	*x = LogRecord{}
-	mi := &file_common_proto_msgTypes[19]
+	mi := &file_common_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1850,7 +1940,7 @@ func (x *LogRecord) String() string {
 func (*LogRecord) ProtoMessage() {}
 
 func (x *LogRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[19]
+	mi := &file_common_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1863,7 +1953,7 @@ func (x *LogRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogRecord.ProtoReflect.Descriptor instead.
 func (*LogRecord) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{19}
+	return file_common_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *LogRecord) GetSeq() int64 {
@@ -1975,7 +2065,11 @@ const file_common_proto_rawDesc = "" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12!\n" +
 	"\finput_tokens\x18\x02 \x01(\x03R\vinputTokens\x12#\n" +
 	"\routput_tokens\x18\x03 \x01(\x03R\foutputTokens\x12)\n" +
-	"\x10reasoning_tokens\x18\x04 \x01(\x03R\x0freasoningTokens\"\xbf\x01\n" +
+	"\x10reasoning_tokens\x18\x04 \x01(\x03R\x0freasoningTokens\"[\n" +
+	"\x11CredentialRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1a\n" +
+	"\baudience\x18\x03 \x03(\tR\baudience\"\xbf\x01\n" +
 	"\bToolCall\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12+\n" +
@@ -2020,7 +2114,7 @@ const file_common_proto_rawDesc = "" +
 	"\x10LIFECYCLE_RESUME\x10\x02\x12\x12\n" +
 	"\x0eLIFECYCLE_FORK\x10\x03\x12\x16\n" +
 	"\x12LIFECYCLE_BASELINE\x10\x04\x12\x14\n" +
-	"\x10LIFECYCLE_CANCEL\x10\x05\"\xb2\x06\n" +
+	"\x10LIFECYCLE_CANCEL\x10\x05\"\xf9\x06\n" +
 	"\x05Event\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12*\n" +
 	"\x02ts\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x02ts\x12%\n" +
@@ -2036,7 +2130,10 @@ const file_common_proto_rawDesc = "" +
 	"\x05usage\x18\x0e \x01(\v2\x17.agentsessions.v1.UsageH\x00R\x05usage\x12;\n" +
 	"\tlifecycle\x18\x0f \x01(\v2\x1b.agentsessions.v1.LifecycleH\x00R\tlifecycle\x120\n" +
 	"\x03end\x18\x10 \x01(\v2\x1c.agentsessions.v1.HarnessEndH\x00R\x03end\x12/\n" +
-	"\x05error\x18\x11 \x01(\v2\x17.agentsessions.v1.ErrorH\x00R\x05error\x123\n" +
+	"\x05error\x18\x11 \x01(\v2\x17.agentsessions.v1.ErrorH\x00R\x05error\x12E\n" +
+	"\n" +
+	"credential\x18\x13 \x01(\v2#.agentsessions.v1.CredentialRequestH\x00R\n" +
+	"credential\x123\n" +
 	"\x05actor\x18\x12 \x01(\v2\x1d.agentsessions.v1.IdentityRefR\x05actorB\x06\n" +
 	"\x04bodyJ\x04\b\x01\x10\x02J\x04\b\x05\x10\x06J\x04\b\x06\x10\a\"\xa2\x01\n" +
 	"\tLogRecord\x12\x10\n" +
@@ -2049,7 +2146,7 @@ const file_common_proto_rawDesc = "" +
 	"\x15MEDIATION_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dMEDIATION_IN_HARNESS_REPORTED\x10\x01\x12!\n" +
 	"\x1dMEDIATION_CONTROLLER_MEDIATED\x10\x02\x12\x1f\n" +
-	"\x1bMEDIATION_REQUIRES_APPROVAL\x10\x03*\x89\x02\n" +
+	"\x1bMEDIATION_REQUIRES_APPROVAL\x10\x03*\xa7\x02\n" +
 	"\tEventKind\x12\x1a\n" +
 	"\x16EVENT_KIND_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vEVENT_INPUT\x10\x01\x12\x14\n" +
@@ -2063,7 +2160,8 @@ const file_common_proto_rawDesc = "" +
 	"\x0fEVENT_LIFECYCLE\x10\t\x12\r\n" +
 	"\tEVENT_END\x10\n" +
 	"\x12\x0f\n" +
-	"\vEVENT_ERROR\x10\vB<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
+	"\vEVENT_ERROR\x10\v\x12\x1c\n" +
+	"\x18EVENT_CREDENTIAL_REQUEST\x10\fB<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
 
 var (
 	file_common_proto_rawDescOnce sync.Once
@@ -2078,7 +2176,7 @@ func file_common_proto_rawDescGZIP() []byte {
 }
 
 var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_common_proto_goTypes = []any{
 	(Mediation)(0),                // 0: agentsessions.v1.Mediation
 	(EventKind)(0),                // 1: agentsessions.v1.EventKind
@@ -2094,57 +2192,59 @@ var file_common_proto_goTypes = []any{
 	(*Origin)(nil),                // 11: agentsessions.v1.Origin
 	(*ModelCall)(nil),             // 12: agentsessions.v1.ModelCall
 	(*Usage)(nil),                 // 13: agentsessions.v1.Usage
-	(*ToolCall)(nil),              // 14: agentsessions.v1.ToolCall
-	(*ToolResult)(nil),            // 15: agentsessions.v1.ToolResult
-	(*ApprovalRequest)(nil),       // 16: agentsessions.v1.ApprovalRequest
-	(*ApprovalResult)(nil),        // 17: agentsessions.v1.ApprovalResult
-	(*Error)(nil),                 // 18: agentsessions.v1.Error
-	(*HarnessEnd)(nil),            // 19: agentsessions.v1.HarnessEnd
-	(*Lifecycle)(nil),             // 20: agentsessions.v1.Lifecycle
-	(*Event)(nil),                 // 21: agentsessions.v1.Event
-	(*LogRecord)(nil),             // 22: agentsessions.v1.LogRecord
-	nil,                           // 23: agentsessions.v1.Origin.AttributesEntry
-	nil,                           // 24: agentsessions.v1.ModelCall.ParamsEntry
-	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),       // 26: google.protobuf.Struct
+	(*CredentialRequest)(nil),     // 14: agentsessions.v1.CredentialRequest
+	(*ToolCall)(nil),              // 15: agentsessions.v1.ToolCall
+	(*ToolResult)(nil),            // 16: agentsessions.v1.ToolResult
+	(*ApprovalRequest)(nil),       // 17: agentsessions.v1.ApprovalRequest
+	(*ApprovalResult)(nil),        // 18: agentsessions.v1.ApprovalResult
+	(*Error)(nil),                 // 19: agentsessions.v1.Error
+	(*HarnessEnd)(nil),            // 20: agentsessions.v1.HarnessEnd
+	(*Lifecycle)(nil),             // 21: agentsessions.v1.Lifecycle
+	(*Event)(nil),                 // 22: agentsessions.v1.Event
+	(*LogRecord)(nil),             // 23: agentsessions.v1.LogRecord
+	nil,                           // 24: agentsessions.v1.Origin.AttributesEntry
+	nil,                           // 25: agentsessions.v1.ModelCall.ParamsEntry
+	(*timestamppb.Timestamp)(nil), // 26: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),       // 27: google.protobuf.Struct
 }
 var file_common_proto_depIdxs = []int32{
-	25, // 0: agentsessions.v1.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
-	25, // 1: agentsessions.v1.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
+	26, // 0: agentsessions.v1.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
+	26, // 1: agentsessions.v1.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
 	5,  // 2: agentsessions.v1.Part.text:type_name -> agentsessions.v1.TextPart
 	6,  // 3: agentsessions.v1.Part.file:type_name -> agentsessions.v1.FilePart
 	7,  // 4: agentsessions.v1.Part.data:type_name -> agentsessions.v1.DataPart
 	8,  // 5: agentsessions.v1.Part.reasoning:type_name -> agentsessions.v1.ReasoningPart
-	26, // 6: agentsessions.v1.DataPart.data:type_name -> google.protobuf.Struct
+	27, // 6: agentsessions.v1.DataPart.data:type_name -> google.protobuf.Struct
 	4,  // 7: agentsessions.v1.ReasoningPart.summary:type_name -> agentsessions.v1.Part
 	4,  // 8: agentsessions.v1.Message.parts:type_name -> agentsessions.v1.Part
-	23, // 9: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
-	24, // 10: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
+	24, // 9: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
+	25, // 10: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
 	9,  // 11: agentsessions.v1.ModelCall.messages:type_name -> agentsessions.v1.Message
-	26, // 12: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
+	27, // 12: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
 	0,  // 13: agentsessions.v1.ToolCall.mediation:type_name -> agentsessions.v1.Mediation
-	26, // 14: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
-	18, // 15: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
+	27, // 14: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
+	19, // 15: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
 	2,  // 16: agentsessions.v1.Lifecycle.kind:type_name -> agentsessions.v1.Lifecycle.Kind
-	25, // 17: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	26, // 17: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
 	1,  // 18: agentsessions.v1.Event.kind:type_name -> agentsessions.v1.EventKind
 	9,  // 19: agentsessions.v1.Event.message:type_name -> agentsessions.v1.Message
 	12, // 20: agentsessions.v1.Event.model:type_name -> agentsessions.v1.ModelCall
-	14, // 21: agentsessions.v1.Event.tool:type_name -> agentsessions.v1.ToolCall
-	15, // 22: agentsessions.v1.Event.result:type_name -> agentsessions.v1.ToolResult
-	16, // 23: agentsessions.v1.Event.approval:type_name -> agentsessions.v1.ApprovalRequest
-	17, // 24: agentsessions.v1.Event.approval_result:type_name -> agentsessions.v1.ApprovalResult
+	15, // 21: agentsessions.v1.Event.tool:type_name -> agentsessions.v1.ToolCall
+	16, // 22: agentsessions.v1.Event.result:type_name -> agentsessions.v1.ToolResult
+	17, // 23: agentsessions.v1.Event.approval:type_name -> agentsessions.v1.ApprovalRequest
+	18, // 24: agentsessions.v1.Event.approval_result:type_name -> agentsessions.v1.ApprovalResult
 	13, // 25: agentsessions.v1.Event.usage:type_name -> agentsessions.v1.Usage
-	20, // 26: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
-	19, // 27: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
-	18, // 28: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
-	10, // 29: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
-	21, // 30: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
-	31, // [31:31] is the sub-list for method output_type
-	31, // [31:31] is the sub-list for method input_type
-	31, // [31:31] is the sub-list for extension type_name
-	31, // [31:31] is the sub-list for extension extendee
-	0,  // [0:31] is the sub-list for field type_name
+	21, // 26: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
+	20, // 27: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
+	19, // 28: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
+	14, // 29: agentsessions.v1.Event.credential:type_name -> agentsessions.v1.CredentialRequest
+	10, // 30: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
+	22, // 31: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
+	32, // [32:32] is the sub-list for method output_type
+	32, // [32:32] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_common_proto_init() }
@@ -2166,7 +2266,7 @@ func file_common_proto_init() {
 		(*ReasoningPart_OpaqueBytes)(nil),
 		(*ReasoningPart_OpaqueUri)(nil),
 	}
-	file_common_proto_msgTypes[18].OneofWrappers = []any{
+	file_common_proto_msgTypes[19].OneofWrappers = []any{
 		(*Event_Message)(nil),
 		(*Event_Model)(nil),
 		(*Event_Tool)(nil),
@@ -2177,6 +2277,7 @@ func file_common_proto_init() {
 		(*Event_Lifecycle)(nil),
 		(*Event_End)(nil),
 		(*Event_Error)(nil),
+		(*Event_Credential)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2184,7 +2285,7 @@ func file_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_proto_rawDesc), len(file_common_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

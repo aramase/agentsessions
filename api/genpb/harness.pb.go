@@ -323,6 +323,8 @@ func (*DescribeRequest) Descriptor() ([]byte, []int) {
 
 // IdentityContext carries the principal and signals whether the harness may mint
 // scoped, delegated tokens (Transaction Tokens) via the host for tool calls.
+// Both forms are exercised through the same channel: emit an EVENT_CREDENTIAL_REQUEST
+// and read the host's CredentialResult.
 type IdentityContext struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Principal     *IdentityRef           `protobuf:"bytes,1,opt,name=principal,proto3" json:"principal,omitempty"`
@@ -511,6 +513,7 @@ type ControllerFrame struct {
 	//	*ControllerFrame_Approval
 	//	*ControllerFrame_Tool
 	//	*ControllerFrame_Model
+	//	*ControllerFrame_Credential
 	Frame         isControllerFrame_Frame `protobuf_oneof:"frame"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -612,6 +615,15 @@ func (x *ControllerFrame) GetModel() *ModelResult {
 	return nil
 }
 
+func (x *ControllerFrame) GetCredential() *CredentialResult {
+	if x != nil {
+		if x, ok := x.Frame.(*ControllerFrame_Credential); ok {
+			return x.Credential
+		}
+	}
+	return nil
+}
+
 type isControllerFrame_Frame interface {
 	isControllerFrame_Frame()
 }
@@ -636,6 +648,10 @@ type ControllerFrame_Model struct {
 	Model *ModelResult `protobuf:"bytes,7,opt,name=model,proto3,oneof"` // served completion for a mediated/replayed model call
 }
 
+type ControllerFrame_Credential struct {
+	Credential *CredentialResult `protobuf:"bytes,8,opt,name=credential,proto3,oneof"` // vended credential for an EVENT_CREDENTIAL_REQUEST
+}
+
 func (*ControllerFrame_Start) isControllerFrame_Frame() {}
 
 func (*ControllerFrame_Cancel) isControllerFrame_Frame() {}
@@ -645,6 +661,86 @@ func (*ControllerFrame_Approval) isControllerFrame_Frame() {}
 func (*ControllerFrame_Tool) isControllerFrame_Frame() {}
 
 func (*ControllerFrame_Model) isControllerFrame_Frame() {}
+
+func (*ControllerFrame_Credential) isControllerFrame_Frame() {}
+
+// CredentialResult carries a short-lived credential to the harness in-band, in answer to an
+// EVENT_CREDENTIAL_REQUEST. The token is WIRE-ONLY: the host records the request (provider /
+// audience / principal) but never the token, so a durable, hash-chained, forkable log never
+// becomes a secret store. This mirrors ModelCall.messages, which likewise rides the wire while
+// only its hash is journaled.
+//
+// Because nothing is recorded, a credential is NOT served from the journal on replay: it is
+// re-vended live. That is deliberate — a token is a capability with a lifetime, not content, and
+// replaying an expired secret would be worse than fetching a fresh one. Determinism is unaffected:
+// the token never enters the hash chain.
+type CredentialResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                 // correlates to the emitted CredentialRequest.id
+	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`                           // NEVER journaled
+	ExpiresIn     int64                  `protobuf:"varint,3,opt,name=expires_in,json=expiresIn,proto3" json:"expires_in,omitempty"` // seconds; 0 if the issuer did not say
+	Error         *Error                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`                           // set when the host refused or could not vend
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CredentialResult) Reset() {
+	*x = CredentialResult{}
+	mi := &file_harness_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CredentialResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CredentialResult) ProtoMessage() {}
+
+func (x *CredentialResult) ProtoReflect() protoreflect.Message {
+	mi := &file_harness_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CredentialResult.ProtoReflect.Descriptor instead.
+func (*CredentialResult) Descriptor() ([]byte, []int) {
+	return file_harness_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CredentialResult) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *CredentialResult) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *CredentialResult) GetExpiresIn() int64 {
+	if x != nil {
+		return x.ExpiresIn
+	}
+	return 0
+}
+
+func (x *CredentialResult) GetError() *Error {
+	if x != nil {
+		return x.Error
+	}
+	return nil
+}
 
 // ModelResult is a model completion served to the harness (live invocation or replay).
 // The Message carries text + opaque reasoning parts, recorded verbatim for continuity.
@@ -659,7 +755,7 @@ type ModelResult struct {
 
 func (x *ModelResult) Reset() {
 	*x = ModelResult{}
-	mi := &file_harness_proto_msgTypes[8]
+	mi := &file_harness_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -671,7 +767,7 @@ func (x *ModelResult) String() string {
 func (*ModelResult) ProtoMessage() {}
 
 func (x *ModelResult) ProtoReflect() protoreflect.Message {
-	mi := &file_harness_proto_msgTypes[8]
+	mi := &file_harness_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -684,7 +780,7 @@ func (x *ModelResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelResult.ProtoReflect.Descriptor instead.
 func (*ModelResult) Descriptor() ([]byte, []int) {
-	return file_harness_proto_rawDescGZIP(), []int{8}
+	return file_harness_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ModelResult) GetMessage() *Message {
@@ -739,7 +835,7 @@ const file_harness_proto_rawDesc = "" +
 	"\bidentity\x18\x04 \x01(\v2!.agentsessions.v1.IdentityContextR\bidentity\x12&\n" +
 	"\x0fresume_from_seq\x18\x05 \x01(\x03R\rresumeFromSeq\" \n" +
 	"\x06Cancel\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason\"\xe7\x02\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\"\xad\x03\n" +
 	"\x0fControllerFrame\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12/\n" +
@@ -747,8 +843,17 @@ const file_harness_proto_rawDesc = "" +
 	"\x06cancel\x18\x04 \x01(\v2\x18.agentsessions.v1.CancelH\x00R\x06cancel\x12>\n" +
 	"\bapproval\x18\x05 \x01(\v2 .agentsessions.v1.ApprovalResultH\x00R\bapproval\x122\n" +
 	"\x04tool\x18\x06 \x01(\v2\x1c.agentsessions.v1.ToolResultH\x00R\x04tool\x125\n" +
-	"\x05model\x18\a \x01(\v2\x1d.agentsessions.v1.ModelResultH\x00R\x05modelB\a\n" +
-	"\x05frame\"\x95\x01\n" +
+	"\x05model\x18\a \x01(\v2\x1d.agentsessions.v1.ModelResultH\x00R\x05model\x12D\n" +
+	"\n" +
+	"credential\x18\b \x01(\v2\".agentsessions.v1.CredentialResultH\x00R\n" +
+	"credentialB\a\n" +
+	"\x05frame\"\x86\x01\n" +
+	"\x10CredentialResult\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05token\x18\x02 \x01(\tR\x05token\x12\x1d\n" +
+	"\n" +
+	"expires_in\x18\x03 \x01(\x03R\texpiresIn\x12-\n" +
+	"\x05error\x18\x04 \x01(\v2\x17.agentsessions.v1.ErrorR\x05error\"\x95\x01\n" +
 	"\vModelResult\x123\n" +
 	"\amessage\x18\x01 \x01(\v2\x19.agentsessions.v1.MessageR\amessage\x12-\n" +
 	"\x05usage\x18\x02 \x01(\v2\x17.agentsessions.v1.UsageR\x05usage\x12\"\n" +
@@ -774,7 +879,7 @@ func file_harness_proto_rawDescGZIP() []byte {
 }
 
 var file_harness_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_harness_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_harness_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_harness_proto_goTypes = []any{
 	(Resumability)(0),         // 0: agentsessions.v1.Resumability
 	(*Capabilities)(nil),      // 1: agentsessions.v1.Capabilities
@@ -785,40 +890,44 @@ var file_harness_proto_goTypes = []any{
 	(*Start)(nil),             // 6: agentsessions.v1.Start
 	(*Cancel)(nil),            // 7: agentsessions.v1.Cancel
 	(*ControllerFrame)(nil),   // 8: agentsessions.v1.ControllerFrame
-	(*ModelResult)(nil),       // 9: agentsessions.v1.ModelResult
-	(Mediation)(0),            // 10: agentsessions.v1.Mediation
-	(*IdentityRef)(nil),       // 11: agentsessions.v1.IdentityRef
-	(*Event)(nil),             // 12: agentsessions.v1.Event
-	(*Message)(nil),           // 13: agentsessions.v1.Message
-	(*ApprovalResult)(nil),    // 14: agentsessions.v1.ApprovalResult
-	(*ToolResult)(nil),        // 15: agentsessions.v1.ToolResult
-	(*Usage)(nil),             // 16: agentsessions.v1.Usage
+	(*CredentialResult)(nil),  // 9: agentsessions.v1.CredentialResult
+	(*ModelResult)(nil),       // 10: agentsessions.v1.ModelResult
+	(Mediation)(0),            // 11: agentsessions.v1.Mediation
+	(*IdentityRef)(nil),       // 12: agentsessions.v1.IdentityRef
+	(*Event)(nil),             // 13: agentsessions.v1.Event
+	(*Message)(nil),           // 14: agentsessions.v1.Message
+	(*ApprovalResult)(nil),    // 15: agentsessions.v1.ApprovalResult
+	(*ToolResult)(nil),        // 16: agentsessions.v1.ToolResult
+	(*Error)(nil),             // 17: agentsessions.v1.Error
+	(*Usage)(nil),             // 18: agentsessions.v1.Usage
 }
 var file_harness_proto_depIdxs = []int32{
 	0,  // 0: agentsessions.v1.Capabilities.resumability:type_name -> agentsessions.v1.Resumability
-	10, // 1: agentsessions.v1.ToolSpec.mediation:type_name -> agentsessions.v1.Mediation
+	11, // 1: agentsessions.v1.ToolSpec.mediation:type_name -> agentsessions.v1.Mediation
 	2,  // 2: agentsessions.v1.HarnessDescriptor.tools:type_name -> agentsessions.v1.ToolSpec
 	1,  // 3: agentsessions.v1.HarnessDescriptor.capabilities:type_name -> agentsessions.v1.Capabilities
-	11, // 4: agentsessions.v1.IdentityContext.principal:type_name -> agentsessions.v1.IdentityRef
-	12, // 5: agentsessions.v1.Start.history:type_name -> agentsessions.v1.Event
-	13, // 6: agentsessions.v1.Start.inputs:type_name -> agentsessions.v1.Message
+	12, // 4: agentsessions.v1.IdentityContext.principal:type_name -> agentsessions.v1.IdentityRef
+	13, // 5: agentsessions.v1.Start.history:type_name -> agentsessions.v1.Event
+	14, // 6: agentsessions.v1.Start.inputs:type_name -> agentsessions.v1.Message
 	5,  // 7: agentsessions.v1.Start.identity:type_name -> agentsessions.v1.IdentityContext
 	6,  // 8: agentsessions.v1.ControllerFrame.start:type_name -> agentsessions.v1.Start
 	7,  // 9: agentsessions.v1.ControllerFrame.cancel:type_name -> agentsessions.v1.Cancel
-	14, // 10: agentsessions.v1.ControllerFrame.approval:type_name -> agentsessions.v1.ApprovalResult
-	15, // 11: agentsessions.v1.ControllerFrame.tool:type_name -> agentsessions.v1.ToolResult
-	9,  // 12: agentsessions.v1.ControllerFrame.model:type_name -> agentsessions.v1.ModelResult
-	13, // 13: agentsessions.v1.ModelResult.message:type_name -> agentsessions.v1.Message
-	16, // 14: agentsessions.v1.ModelResult.usage:type_name -> agentsessions.v1.Usage
-	4,  // 15: agentsessions.v1.Harness.Describe:input_type -> agentsessions.v1.DescribeRequest
-	8,  // 16: agentsessions.v1.Harness.Connect:input_type -> agentsessions.v1.ControllerFrame
-	3,  // 17: agentsessions.v1.Harness.Describe:output_type -> agentsessions.v1.HarnessDescriptor
-	12, // 18: agentsessions.v1.Harness.Connect:output_type -> agentsessions.v1.Event
-	17, // [17:19] is the sub-list for method output_type
-	15, // [15:17] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	15, // 10: agentsessions.v1.ControllerFrame.approval:type_name -> agentsessions.v1.ApprovalResult
+	16, // 11: agentsessions.v1.ControllerFrame.tool:type_name -> agentsessions.v1.ToolResult
+	10, // 12: agentsessions.v1.ControllerFrame.model:type_name -> agentsessions.v1.ModelResult
+	9,  // 13: agentsessions.v1.ControllerFrame.credential:type_name -> agentsessions.v1.CredentialResult
+	17, // 14: agentsessions.v1.CredentialResult.error:type_name -> agentsessions.v1.Error
+	14, // 15: agentsessions.v1.ModelResult.message:type_name -> agentsessions.v1.Message
+	18, // 16: agentsessions.v1.ModelResult.usage:type_name -> agentsessions.v1.Usage
+	4,  // 17: agentsessions.v1.Harness.Describe:input_type -> agentsessions.v1.DescribeRequest
+	8,  // 18: agentsessions.v1.Harness.Connect:input_type -> agentsessions.v1.ControllerFrame
+	3,  // 19: agentsessions.v1.Harness.Describe:output_type -> agentsessions.v1.HarnessDescriptor
+	13, // 20: agentsessions.v1.Harness.Connect:output_type -> agentsessions.v1.Event
+	19, // [19:21] is the sub-list for method output_type
+	17, // [17:19] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_harness_proto_init() }
@@ -833,6 +942,7 @@ func file_harness_proto_init() {
 		(*ControllerFrame_Approval)(nil),
 		(*ControllerFrame_Tool)(nil),
 		(*ControllerFrame_Model)(nil),
+		(*ControllerFrame_Credential)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -840,7 +950,7 @@ func file_harness_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_harness_proto_rawDesc), len(file_harness_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

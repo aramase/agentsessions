@@ -46,6 +46,9 @@ const (
 	EventLifecycle       EventKind = "LIFECYCLE"
 	EventEnd             EventKind = "END"
 	EventError           EventKind = "ERROR"
+	// EventCredentialRequest records that the harness asked the host for a credential.
+	// The request is journaled (who asked for what); the token never is.
+	EventCredentialRequest EventKind = "CREDENTIAL_REQUEST"
 )
 
 // Message is a role-tagged sequence of content parts (A2A Message = role + Part[]).
@@ -131,6 +134,7 @@ type Event struct {
 	Lifecycle      *Lifecycle
 	End            *HarnessEnd
 	Err            *Error
+	Credential     *CredentialRequest
 
 	Actor IdentityRef // emitter principal -> provenance on every action
 }
@@ -168,6 +172,27 @@ type Usage struct {
 	InputTokens     int64
 	OutputTokens    int64
 	ReasoningTokens int64
+}
+
+// CredentialRequest is how a harness obtains authority it is not trusted to hold: it asks the
+// HOST, which vends for the session's principal. One channel, two forms — Provider names a
+// downstream credential the platform holds on the principal's behalf (ingress: a user's GitHub
+// token, a model key), Audience asks for a scoped, delegated token minted for a downstream
+// service (egress: a Transaction Token, what IdentityContext.CanMintTokens advertises).
+//
+// The request is recorded so the log stays a complete audit of the authority a turn exercised.
+// The resulting token is not — see Credential.
+type CredentialRequest struct {
+	Provider string   // downstream provider to vend for ("github", "ai")
+	Audience []string // audience(s) to mint a delegated token for
+}
+
+// Credential is a short-lived bearer credential served to the harness in-band. It is wire-only:
+// the host never writes it to the log, so a durable, hash-chained, forkable journal never becomes
+// a secret store. Hold it for the turn; never log or persist it.
+type Credential struct {
+	Token     string
+	ExpiresIn int64 // seconds; 0 if the issuer did not say
 }
 
 // Mediation controls how a tool call is executed.

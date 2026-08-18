@@ -174,6 +174,40 @@ func (s *streamSink) Usage(u api.Usage) error {
 	}}})
 }
 
+// Credential asks the HOST for a short-lived credential and blocks for the vended result — the
+// same emit / wait-for-reply shape as Model and ToolCall. This is what makes authority work across
+// the process boundary: a harness in a sandbox holds no standing secret and reaches no credential
+// source, it asks the host per use, and the host records the request without ever putting the
+// token on the log.
+func (s *streamSink) Credential(req api.CredentialRequest) (api.Credential, error) {
+	id := newID()
+	if err := s.stream.Send(&v1.Event{
+		Kind: v1.EventKind_EVENT_CREDENTIAL_REQUEST,
+		Body: &v1.Event_Credential{Credential: &v1.CredentialRequest{
+			Id: id, Provider: req.Provider, Audience: req.Audience,
+		}},
+	}); err != nil {
+		return api.Credential{}, err
+	}
+	frame, ok := <-s.results
+	if !ok {
+		return api.Credential{}, io.EOF
+	}
+	cr := frame.GetCredential()
+	if cr == nil {
+		return api.Credential{}, errors.New("harnesswire: expected a CredentialResult frame")
+	}
+	// Correlate the reply to the request we emitted (symmetric to model_call_id): a mismatch means
+	// the stream delivered the wrong credential — fail loud rather than use it.
+	if cr.GetId() != id {
+		return api.Credential{}, fmt.Errorf("harnesswire: credential correlation mismatch: got %q, want %q", cr.GetId(), id)
+	}
+	if e := cr.GetError(); e != nil && e.GetDescription() != "" {
+		return api.Credential{}, fmt.Errorf("harnesswire: host refused the credential: %s", e.GetDescription())
+	}
+	return api.Credential{Token: cr.GetToken(), ExpiresIn: cr.GetExpiresIn()}, nil
+}
+
 // ---- Client: v1.HarnessClient -> api.Harness ----
 
 // ClientHarness makes a remote harness (reached via HarnessClient) look like a local api.Harness,
@@ -260,6 +294,23 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			if u := ev.GetUsage(); u != nil {
 				_ = sink.Usage(api.Usage{Model: u.GetModel(), InputTokens: u.GetInputTokens(), OutputTokens: u.GetOutputTokens(), ReasoningTokens: u.GetReasoningTokens()})
 			}
+		case v1.EventKind_EVENT_CREDENTIAL_REQUEST:
+			cr := ev.GetCredential()
+			if cr == nil {
+				return errors.New("harnesswire: EVENT_CREDENTIAL_REQUEST missing its payload")
+			}
+			// A refusal is a normal answer, not a transport failure: the host reports it in the
+			// result frame so the harness can degrade, and the stream stays alive.
+			res := &v1.CredentialResult{Id: cr.GetId()}
+			cred, err := sink.Credential(api.CredentialRequest{Provider: cr.GetProvider(), Audience: cr.GetAudience()})
+			if err != nil {
+				res.Error = &v1.Error{Description: err.Error()}
+			} else {
+				res.Token, res.ExpiresIn = cred.Token, cred.ExpiresIn
+			}
+			if err := stream.Send(&v1.ControllerFrame{Frame: &v1.ControllerFrame_Credential{Credential: res}}); err != nil {
+				return err
+			}
 		case v1.EventKind_EVENT_END:
 			return endError(ev.GetEnd())
 		}
@@ -310,7 +361,18 @@ func startToProto(s *api.Start) *v1.Start {
 	if s == nil {
 		return &v1.Start{}
 	}
-	out := &v1.Start{Config: s.Config, ResumeFromSeq: s.ResumeFromSeq, Inputs: messagesToProto(s.Inputs)}
+	out := &v1.Start{
+		Config:        s.Config,
+		ResumeFromSeq: s.ResumeFromSeq,
+		Inputs:        messagesToProto(s.Inputs),
+		// The identity context MUST cross the boundary: it is how a remote harness learns which
+		// principal it acts as and whether the host will vend for it. Without it the sandbox is
+		// authority-blind and the credential channel is unusable.
+		Identity: &v1.IdentityContext{
+			Principal:     identityToProto(s.Identity.Principal),
+			CanMintTokens: s.Identity.CanMintTokens,
+		},
+	}
 	if len(s.History) > 0 {
 		out.History = make([]*v1.Event, len(s.History))
 		for i := range s.History {
@@ -322,6 +384,12 @@ func startToProto(s *api.Start) *v1.Start {
 
 func startFromProto(p *v1.Start) *api.Start {
 	out := &api.Start{Config: p.GetConfig(), ResumeFromSeq: p.GetResumeFromSeq(), Inputs: messagesFromProto(p.GetInputs())}
+	if id := p.GetIdentity(); id != nil {
+		out.Identity = api.IdentityContext{
+			Principal:     identityFromProto(id.GetPrincipal()),
+			CanMintTokens: id.GetCanMintTokens(),
+		}
+	}
 	if len(p.GetHistory()) > 0 {
 		out.History = make([]api.Event, 0, len(p.GetHistory()))
 		for _, e := range p.GetHistory() {
@@ -329,6 +397,17 @@ func startFromProto(p *v1.Start) *api.Start {
 		}
 	}
 	return out
+}
+
+func identityToProto(i api.IdentityRef) *v1.IdentityRef {
+	return &v1.IdentityRef{Principal: i.Principal, Issuer: i.Issuer, Subject: i.Subject}
+}
+
+func identityFromProto(p *v1.IdentityRef) api.IdentityRef {
+	if p == nil {
+		return api.IdentityRef{}
+	}
+	return api.IdentityRef{Principal: p.GetPrincipal(), Issuer: p.GetIssuer(), Subject: p.GetSubject()}
 }
 
 func descriptorToProto(d api.Descriptor) *v1.HarnessDescriptor {

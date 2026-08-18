@@ -105,10 +105,33 @@ func (s *liveSink) Usage(u api.Usage) error {
 	return err
 }
 
+// Credential vends authority for the session's principal. It records the REQUEST — who asked for
+// what, in turn order, under the same hash chain as every other effect — and then returns the
+// token WITHOUT recording it. That split is the whole point: the log stays a complete audit of the
+// authority a turn exercised, and never becomes a durable, forkable, replayable store of secrets.
+//
+// The request is recorded BEFORE the vend (record-before-effect, §3): a credential handed out is
+// an external effect, so a crash must not be able to hide that it happened.
+func (s *liveSink) Credential(req api.CredentialRequest) (api.Credential, error) {
+	if s.c.creds == nil {
+		return api.Credential{}, ErrNoCredentialSource
+	}
+	r := req
+	if _, err := s.c.appendSeq(api.Event{
+		Kind:       api.EventCredentialRequest,
+		Credential: &r,
+		Actor:      s.c.principal,
+	}); err != nil {
+		return api.Credential{}, err
+	}
+	return s.c.creds(s.c.principal, r)
+}
+
 // replaySink serves recorded results from the journal in order and never invokes a live op. It
 // enforces the I0 model-input-hash check. The recorded effect stream is the ordered MODEL_CALL /
 // OUTPUT / TOOL_CALL / TOOL_RESULT events; a deterministic harness requests them in the same order.
 type replaySink struct {
+	c       *Controller
 	stream  []api.Event
 	i       int
 	outputs []string
@@ -187,3 +210,16 @@ func (s *replaySink) Report(api.ToolResult) error {
 
 // Usage is auxiliary accounting and not part of the served effect stream, so replay ignores it.
 func (s *replaySink) Usage(api.Usage) error { return nil }
+
+// Credential is the one op replay does NOT serve from the journal: no token was ever recorded, so
+// there is nothing to serve, and serving a stale one would hand the harness an expired secret. It
+// re-vends live instead. This does not weaken replay determinism — a credential is a capability,
+// not content: it never enters the effect stream, never enters the hash chain, and (unlike a model
+// call) an I1-style "replay invoked it" assertion would be the wrong invariant here. Replay is
+// read-only, so the request is not re-journaled either.
+func (s *replaySink) Credential(req api.CredentialRequest) (api.Credential, error) {
+	if s.c == nil || s.c.creds == nil {
+		return api.Credential{}, ErrNoCredentialSource
+	}
+	return s.c.creds(s.c.principal, req)
+}

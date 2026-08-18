@@ -47,6 +47,8 @@ message DescribeRequest {}
 
 // IdentityContext carries the principal and signals whether the harness may mint
 // scoped, delegated tokens (Transaction Tokens) via the host for tool calls.
+// Both forms are exercised through the same channel: emit an EVENT_CREDENTIAL_REQUEST
+// and read the host's CredentialResult.
 message IdentityContext {
   IdentityRef principal = 1;
   bool can_mint_tokens = 2;
@@ -78,7 +80,25 @@ message ControllerFrame {
     ApprovalResult approval = 5; // response to an EVENT_APPROVAL_REQUEST
     ToolResult tool = 6;         // result for a CONTROLLER_MEDIATED tool call
     ModelResult model = 7;       // served completion for a mediated/replayed model call
+    CredentialResult credential = 8; // vended credential for an EVENT_CREDENTIAL_REQUEST
   }
+}
+
+// CredentialResult carries a short-lived credential to the harness in-band, in answer to an
+// EVENT_CREDENTIAL_REQUEST. The token is WIRE-ONLY: the host records the request (provider /
+// audience / principal) but never the token, so a durable, hash-chained, forkable log never
+// becomes a secret store. This mirrors ModelCall.messages, which likewise rides the wire while
+// only its hash is journaled.
+//
+// Because nothing is recorded, a credential is NOT served from the journal on replay: it is
+// re-vended live. That is deliberate — a token is a capability with a lifetime, not content, and
+// replaying an expired secret would be worse than fetching a fresh one. Determinism is unaffected:
+// the token never enters the hash chain.
+message CredentialResult {
+  string id = 1;         // correlates to the emitted CredentialRequest.id
+  string token = 2;      // NEVER journaled
+  int64 expires_in = 3;  // seconds; 0 if the issuer did not say
+  Error error = 4;       // set when the host refused or could not vend
 }
 
 // ModelResult is a model completion served to the harness (live invocation or replay).

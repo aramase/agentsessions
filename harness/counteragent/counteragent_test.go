@@ -18,6 +18,9 @@ func (s *captureSink) Output(delta string) error                     { s.outputs
 func (s *captureSink) ToolCall(api.ToolCall) (api.ToolResult, error) { return api.ToolResult{}, nil }
 func (s *captureSink) Report(api.ToolResult) error                   { return nil }
 func (s *captureSink) Usage(api.Usage) error                         { return nil }
+func (s *captureSink) Credential(api.CredentialRequest) (api.Credential, error) {
+	return api.Credential{}, nil
+}
 
 func TestCounterIncrementsInRAM(t *testing.T) {
 	h := &Harness{}

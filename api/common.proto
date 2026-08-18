@@ -135,6 +135,22 @@ message Usage {
   int64 reasoning_tokens = 4;
 }
 
+// CredentialRequest is a credential REQUEST emitted by the harness (EVENT_CREDENTIAL_REQUEST).
+// It is how a harness obtains authority it is not trusted to hold: the host vends a short-lived
+// credential for the session's principal and answers via ControllerFrame.CredentialResult
+// (correlated by id). Two forms, one channel:
+//   - provider: a downstream credential the PLATFORM holds on the principal's behalf (a user's
+//     GitHub token, a model key) — ingress. The harness never stores it.
+//   - audience: a scoped, delegated Transaction Token minted for a downstream service — egress.
+//     This is what IdentityContext.can_mint_tokens advertises.
+// The request is recorded (who asked for what, when) so the log remains a complete audit of the
+// authority a turn exercised; the TOKEN is never recorded — see CredentialResult.
+message CredentialRequest {
+  string id = 1;                // correlation id for the served CredentialResult
+  string provider = 2;          // downstream provider to vend for ("github", "ai")
+  repeated string audience = 3; // audience(s) to mint a delegated token for
+}
+
 // ToolCall aligns with an MCP tool call (name + structured args).
 message ToolCall {
   string id = 1;
@@ -214,6 +230,7 @@ enum EventKind {
   EVENT_LIFECYCLE = 9;
   EVENT_END = 10;
   EVENT_ERROR = 11;
+  EVENT_CREDENTIAL_REQUEST = 12; // the harness asked the host for a credential; the token is NOT recorded
 }
 
 // Event is the harness-emitted content unit. Ordering (seq) and integrity (prev_hash /
@@ -239,6 +256,7 @@ message Event {
     Lifecycle lifecycle = 15;
     HarnessEnd end = 16;
     Error error = 17;
+    CredentialRequest credential = 19;
   }
 
   IdentityRef actor = 18; // emitter principal -> provenance
