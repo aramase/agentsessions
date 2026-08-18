@@ -188,7 +188,7 @@ func cmdExec(args []string) error {
 	if err != nil {
 		return err
 	}
-	stream, err := client.Exec(ctx, &v1.ExecRequest{
+	stream, err := client.Advance(ctx, &v1.AdvanceRequest{
 		Session:         sess,
 		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", input))},
 		ExpectedLastSeq: cur.GetLastSeq(),

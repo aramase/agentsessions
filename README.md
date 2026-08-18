@@ -44,8 +44,8 @@ session log and the harness stream. See [`docs/architecture.md`](docs/architectu
 This is not a paper contract. The load-bearing claims are **demonstrated end-to-end**, and the
 determinism guarantees are exercised by a replay-conformance suite (`conformance/`):
 
-- **Runs on a plain pod, survives pod death, resumes by replay — no memory snapshot.** Exec a turn on
-  one incarnation, kill it, and a *different* one reconstructs the session **byte-identically** from the
+- **Runs on a plain pod, survives pod death, resumes by replay — no memory snapshot.** Advance a session
+  one turn on one incarnation, kill it, and a *different* one reconstructs the session **byte-identically** from the
   durable journal (`sqlitelog/`), invoking the model **zero** times.
 - **Tamper-evident, language-neutral provenance.** Every event is hash-chained with a canonical form
   (RFC 8785 JCS over proto3-JSON, `canon/`), so the chain is not Go-specific — a non-Go verifier
@@ -72,7 +72,7 @@ determinism guarantees are exercised by a replay-conformance suite (`conformance
 - **Tool calls** default to `IN_HARNESS_REPORTED` (fast path, reported for audit); sensitive tools opt
   into host-mediated execution (`CONTROLLER_MEDIATED`), with crash-mid-tool at-most-once re-drive. A
   `REQUIRES_APPROVAL` tier is declared; the approval gate is a tracked follow-up.
-- **Recovery:** an `Exec` with no inputs re-drives the last interrupted execution from history.
+- **Recovery:** an `Advance` with no inputs re-drives the last interrupted execution from history.
 
 ## Documentation
 

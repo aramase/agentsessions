@@ -39,7 +39,7 @@ type ComputeRef struct {
 
 // Sessions is the client-facing control-plane API (wire: api/session.proto).
 //
-// Single-writer invariant: a session cannot start a new Exec until the prior execution
+// Single-writer invariant: a session cannot start a new Advance until the prior execution
 // reaches a terminal state. The event-log Seq is authoritative and defines fork points.
 type Sessions interface {
 	Create(ctx context.Context, s *Session) (*Session, error)
@@ -47,12 +47,12 @@ type Sessions interface {
 	List(ctx context.Context, project string) ([]*Session, error)
 	Delete(ctx context.Context, uid string) (*Session, error)
 
-	// Exec runs one execution (turn); events are delivered to sink until terminal.
+	// Advance runs one execution (turn); events are delivered to sink until terminal.
 	// If the session exists, it is continued from its last state. Passing no inputs
 	// (empty slice) resumes/re-drives the last non-terminal execution with no new
 	// input (crash/interruption recovery); passing inputs starts a new turn and is
 	// rejected until any in-flight execution reaches a terminal state (single-writer).
-	Exec(ctx context.Context, uid string, inputs []Message, sink func(Event) error) error
+	Advance(ctx context.Context, uid string, inputs []Message, sink func(Event) error) error
 	// Replay re-delivers committed events from fromSeq (read-only; audit / provenance).
 	Replay(ctx context.Context, uid string, fromSeq int64, sink func(Event) error) error
 

@@ -63,12 +63,12 @@ func (memHarness) Describe(context.Context) (api.Descriptor, error) {
 }
 func (memHarness) Run(context.Context, *api.Start, api.EventSink) error { return nil }
 
-// TestExecUnplaceableIsFailedPrecondition proves the placement gate surfaces at the API: a
+// TestAdvanceUnplaceableIsFailedPrecondition proves the placement gate surfaces at the API: a
 // REQUIRES_MEMORY_SNAPSHOT harness on the filesystem-only local backend is refused with
 // codes.FailedPrecondition, distinct from the CAS/fence codes.Aborted.
-func TestExecUnplaceableIsFailedPrecondition(t *testing.T) {
+func TestAdvanceUnplaceableIsFailedPrecondition(t *testing.T) {
 	c := newClientWith(t, local.New(memHarness{}))
-	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+	stream, err := c.Advance(context.Background(), &v1.AdvanceRequest{
 		Session: "s",
 		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
 	})
@@ -82,7 +82,7 @@ func TestExecUnplaceableIsFailedPrecondition(t *testing.T) {
 
 func execOutputs(t *testing.T, c v1.SessionsClient, sess, input string, expected int64) []string {
 	t.Helper()
-	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+	stream, err := c.Advance(context.Background(), &v1.AdvanceRequest{
 		Session:         sess,
 		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", input))},
 		ExpectedLastSeq: expected,
@@ -179,7 +179,7 @@ func TestSessionsServiceEndToEnd(t *testing.T) {
 	}
 
 	// a stale expected_last_seq is rejected (single-writer CAS surfaces as Aborted).
-	stream, err := c.Exec(ctx, &v1.ExecRequest{
+	stream, err := c.Advance(ctx, &v1.AdvanceRequest{
 		Session:         sess,
 		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", "stale"))},
 		ExpectedLastSeq: 0,

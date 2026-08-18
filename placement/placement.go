@@ -66,10 +66,10 @@ func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 	return p
 }
 
-// Exec places one turn: Create the incarnation, mint the fence from the log and stamp it on the
+// Advance places one turn: Create the incarnation, mint the fence from the log and stamp it on the
 // incarnation, bind a controller to that same token, and drive the (placed) harness. The log stays the
 // single fence authority; the returned incarnation carries the fence for Suspend/Resume (step 5).
-func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string, inputs []api.Message, expectedLastSeq int64) (api.Incarnation, error) {
+func (p *Placer) Advance(ctx context.Context, log eventlog.Store, sessionUID string, inputs []api.Message, expectedLastSeq int64) (api.Incarnation, error) {
 	// Placement gate (honest degradation): read the harness descriptor in-process and refuse a
 	// harness the backend cannot host BEFORE provisioning any compute or writing to the log — e.g. a
 	// REQUIRES_MEMORY_SNAPSHOT harness on a filesystem-only backend.
@@ -99,7 +99,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if err != nil {
 		return api.Incarnation{}, err
 	}
-	if err := c.Exec(ctx, har, inputs, expectedLastSeq); err != nil {
+	if err := c.Advance(ctx, har, inputs, expectedLastSeq); err != nil {
 		return inc, err
 	}
 	return inc, nil

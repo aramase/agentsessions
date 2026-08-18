@@ -132,6 +132,6 @@ Local reproduction needs a Linux host with `/dev/kvm` (micro-VM); the recipe mir
   `Placer.Suspend` currently also `Stop`s (deletes) the actor, which a memory suspend must not. Dropping
   the `Stop` (Snapshot already frees the worker via `SuspendActor`) makes session-level suspend/resume work
   through the `Placer` for the general memory harness.
-- **Controller-side I4.** `controller.Exec` sends the full journal as `Start.History` even on the
+- **Controller-side I4.** `controller.Advance` sends the full journal as `Start.History` even on the
   post-restore turn; for the general case the controller should send empty `History` on memory-restore.
   The counter's harness-side I4 carries axis-2 today.

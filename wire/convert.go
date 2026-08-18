@@ -3,7 +3,7 @@
 // representations pinned by an explicit, compile-checked conversion layer is what keeps
 // them from drifting: if a field is added to one side and not the other, the conversion
 // (and its round-trip test) fails to compile or fails the test. The api.Event is the
-// load-bearing type — it crosses both the Harness.Connect stream and Sessions.Exec/Replay,
+// load-bearing type — it crosses both the Harness.Connect stream and Sessions.Advance/Replay,
 // and it is what the event log hash-chains — so its round-trip must be lossless.
 //
 // Content constraint: structured content maps (ToolCall.Args, ToolResult.Output, DataPart)

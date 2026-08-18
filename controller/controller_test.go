@@ -61,11 +61,11 @@ func memStore(t *testing.T) eventlog.Store {
 
 func msg(text string) api.Message { return *api.TextMessage("user", text) }
 
-// TestExecReplayIdentityAcrossRestart is the load-bearing proof at the controller level: a turn is
+// TestAdvanceReplayIdentityAcrossRestart is the load-bearing proof at the controller level: a turn is
 // executed and persisted by one controller ("pod A"), the process is torn down, and a fresh
 // controller ("pod B") reopens the durable journal and replays it byte-identically with ZERO model
 // invocations (I1). This is suspend-A / resume-B with real persistence + real mediation.
-func TestExecReplayIdentityAcrossRestart(t *testing.T) {
+func TestAdvanceReplayIdentityAcrossRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.db")
 
 	s1, err := sqlitelog.Open(path)
@@ -76,7 +76,7 @@ func TestExecReplayIdentityAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c1.Exec(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+	if err := c1.Advance(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	liveOut, err := c1.Outputs()
@@ -121,7 +121,7 @@ func TestInMemoryBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+	if err := c.Advance(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	live, _ := c.Outputs()
@@ -150,7 +150,7 @@ func TestReplayI0Mismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+	if err := c.Advance(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	c2, err := controller.New(log, echoModel)
@@ -178,7 +178,7 @@ func TestWithFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cA.Exec(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+	if err := cA.Advance(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
 		t.Fatalf("controller bound to the current fence should append: %v", err)
 	}
 	head, err := log.Head()
@@ -196,7 +196,7 @@ func TestWithFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cStale.Exec(context.Background(), &echoHarness{}, []api.Message{msg("again")}, head); !errors.Is(err, eventlog.ErrFenced) {
+	if err := cStale.Advance(context.Background(), &echoHarness{}, []api.Message{msg("again")}, head); !errors.Is(err, eventlog.ErrFenced) {
 		t.Fatalf("a controller bound to a superseded fence must be fenced out, got %v", err)
 	}
 }
@@ -208,10 +208,10 @@ func TestSingleWriterCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+	if err := c.Advance(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), &echoHarness{}, []api.Message{msg("again")}, 0); !errors.Is(err, eventlog.ErrConflict) {
+	if err := c.Advance(context.Background(), &echoHarness{}, []api.Message{msg("again")}, 0); !errors.Is(err, eventlog.ErrConflict) {
 		t.Fatalf("want ErrConflict on stale expected_last_seq, got %v", err)
 	}
 }
@@ -229,7 +229,7 @@ func TestForkSharesPrefixDivergesAfter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+	if err := c.Advance(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	head, err := parent.Head()
@@ -309,7 +309,7 @@ func TestReplayUnderConsumptionDetected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), &divergentHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+	if err := c.Advance(context.Background(), &divergentHarness{}, []api.Message{msg("hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	c2, err := controller.New(log, echoModel)
@@ -341,7 +341,7 @@ func TestReplayOutputDivergenceDetected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), &outputHarness{text: "hello"}, nil, 0); err != nil {
+	if err := c.Advance(context.Background(), &outputHarness{text: "hello"}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 

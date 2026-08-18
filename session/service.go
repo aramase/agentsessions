@@ -52,7 +52,7 @@ func (s *Service) session(uid string, lastSeq int64, parent string, forkSeq int6
 	}
 }
 
-// CreateSession mints a fresh session UID. The session materializes lazily on first Exec.
+// CreateSession mints a fresh session UID. The session materializes lazily on first Advance.
 func (s *Service) CreateSession(ctx context.Context, req *v1.CreateSessionRequest) (*v1.Session, error) {
 	return s.session(newUID(), 0, "", 0), nil
 }
@@ -66,9 +66,9 @@ func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (*v
 	return s.session(req.GetUid(), head, "", 0), nil
 }
 
-// Exec runs one turn against the session's durable log (CAS-guarded by expected_last_seq) and
+// Advance runs one turn against the session's durable log (CAS-guarded by expected_last_seq) and
 // streams the committed LogRecords produced by the turn.
-func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) error {
+func (s *Service) Advance(req *v1.AdvanceRequest, stream v1.Sessions_AdvanceServer) error {
 	if req.GetSession() == "" {
 		return status.Error(codes.InvalidArgument, "session is required")
 	}
@@ -85,7 +85,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) error
 	}
 	// Route the turn through the placement seam: Create the incarnation, mint+bind the fence, and
 	// drive the placed harness through the Runtime SPI instead of a co-located controller.
-	if _, err := s.placer.Exec(stream.Context(), log, req.GetSession(), inputs, req.GetExpectedLastSeq()); err != nil {
+	if _, err := s.placer.Advance(stream.Context(), log, req.GetSession(), inputs, req.GetExpectedLastSeq()); err != nil {
 		return execError(err)
 	}
 	recs, err := log.Read(headBefore + 1)
@@ -93,7 +93,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) error
 		return status.Errorf(codes.Internal, "read: %v", err)
 	}
 	for _, r := range recs {
-		if err := stream.Send(&v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: eventlog.RecordToProto(r)}}); err != nil {
+		if err := stream.Send(&v1.AdvanceUpdate{Update: &v1.AdvanceUpdate_Record{Record: eventlog.RecordToProto(r)}}); err != nil {
 			return err
 		}
 	}

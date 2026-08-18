@@ -12,3 +12,17 @@ lint:
 breaking:
   use:
     - FILE
+  ignore_only:
+    # The Exec -> Advance rename deletes an RPC and two messages, which FILE correctly
+    # flags. The break is deliberate and accepted: nothing outside this repo speaks the
+    # Sessions service yet, and carrying a deprecated Exec RPC plus duplicate
+    # ExecRequest/ExecUpdate messages (protobuf has no message aliasing) would add
+    # permanent cruft to protect consumers that do not exist. Field numbers are
+    # unchanged, so the encoding is unaffected; what changes is the RPC path.
+    #
+    # REMOVE both entries once this lands on main — the baseline moves with it, and
+    # leaving them would silence genuine future deletions in session.proto.
+    RPC_NO_DELETE:
+      - api/session.proto
+    MESSAGE_NO_DELETE:
+      - api/session.proto

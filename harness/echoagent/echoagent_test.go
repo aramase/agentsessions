@@ -11,10 +11,10 @@ import (
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
-// TestEchoExecReplay closes the loop for the exported echo harness: a live turn echoes the input,
+// TestEchoAdvanceReplay closes the loop for the exported echo harness: a live turn echoes the input,
 // and a fresh controller replays the journal byte-identically with zero model invocations — the
 // same property the pod demo shows across an actual pod restart.
-func TestEchoExecReplay(t *testing.T) {
+func TestEchoAdvanceReplay(t *testing.T) {
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -26,7 +26,7 @@ func TestEchoExecReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "ping")}, 0); err != nil {
+	if err := c.Advance(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "ping")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	live, _ := c.Outputs()
