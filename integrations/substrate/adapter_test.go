@@ -15,14 +15,17 @@ import (
 // rest are promoted from the embedded (nil) interface and never called.
 type fakeControl struct {
 	atepb.ControlClient
-	calls    []string
-	lastBoot bool
-	actor    *atepb.Actor
+	calls        []string
+	lastBoot     bool
+	lastSource   *atepb.ActorSnapshotRef
+	lastTagScope atepb.ActorSnapshotTagScope
+	actor        *atepb.Actor
 }
 
 func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
 	a := in.GetActor()
 	f.calls = append(f.calls, "create:"+a.GetMetadata().GetAtespace()+"/"+a.GetMetadata().GetName()+":tmpl="+a.GetActorTemplateNamespace()+"/"+a.GetActorTemplateName())
+	f.lastSource = in.GetSourceSnapshot()
 	return a, nil
 }
 func (f *fakeControl) ResumeActor(_ context.Context, in *atepb.ResumeActorRequest, _ ...grpc.CallOption) (*atepb.ResumeActorResponse, error) {
@@ -41,6 +44,11 @@ func (f *fakeControl) DeleteActor(_ context.Context, in *atepb.DeleteActorReques
 func (f *fakeControl) GetActor(_ context.Context, in *atepb.GetActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
 	f.calls = append(f.calls, "get:"+in.GetActor().GetName())
 	return f.actor, nil
+}
+func (f *fakeControl) TagActorSnapshot(_ context.Context, in *atepb.TagActorSnapshotRequest, _ ...grpc.CallOption) (*atepb.ActorSnapshotTag, error) {
+	f.calls = append(f.calls, "tag:"+in.GetSnapshot().GetSnapshot().GetName()+"->"+in.GetTag().GetMetadata().GetAtespace()+"/"+in.GetTag().GetMetadata().GetName())
+	f.lastTagScope = in.GetTag().GetScope()
+	return in.GetTag(), nil
 }
 
 func runningActor() *atepb.Actor {
@@ -81,20 +89,73 @@ func TestResumeBootAndMeshDNS(t *testing.T) {
 	}
 }
 
-func TestSuspendExtractsSnapshotURI(t *testing.T) {
+// A suspend yields the durable ActorSnapshot's NAME. Substrate keeps the physical storage location
+// private, so latest_snapshot (an atespace-scoped ObjectRef) is the only handle a client can clone from.
+func TestSuspendExtractsSnapshotName(t *testing.T) {
 	f := &fakeControl{actor: &atepb.Actor{
-		Metadata: &atepb.ResourceMetadata{Atespace: "space", Name: "sess-x"},
-		Status:   atepb.Actor_STATUS_SUSPENDED,
-		LatestSnapshotInfo: &atepb.SnapshotInfo{
-			Data: &atepb.SnapshotInfo_External{External: &atepb.ExternalSnapshotInfo{SnapshotUriPrefix: "s3://snap/sess-x"}},
-		},
+		Metadata:       &atepb.ResourceMetadata{Atespace: "space", Name: "sess-x"},
+		Status:         atepb.Actor_STATUS_SUSPENDED,
+		LatestSnapshot: &atepb.ObjectRef{Atespace: "space", Name: "snap-sess-x-1"},
 	}}
-	uri, err := FromClient(f, "").SuspendActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "sess-x"})
+	got, err := FromClient(f, "").SuspendActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "sess-x"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if uri != "s3://snap/sess-x" {
-		t.Fatalf("snapshot uri=%q", uri)
+	if got != "snap-sess-x-1" {
+		t.Fatalf("snapshot=%q want %q", got, "snap-sess-x-1")
+	}
+}
+
+// There is deliberately no fallback to in_progress_snapshot: substrate sets that to a STORAGE URI,
+// not a resource name, and only leaves it set when the suspend registered no snapshot. Returning ""
+// makes the backend refuse a fork loudly instead of committing an unusable handle to the chain.
+func TestSuspendWithoutSnapshotReturnsEmpty(t *testing.T) {
+	f := &fakeControl{actor: &atepb.Actor{
+		Metadata:           &atepb.ResourceMetadata{Atespace: "space", Name: "sess-x"},
+		Status:             atepb.Actor_STATUS_SUSPENDING,
+		InProgressSnapshot: "gs://ate-snapshots/space/snapshots/2026-08-05T01-02-03Z-abc",
+	}}
+	got, err := FromClient(f, "").SuspendActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "sess-x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("snapshot=%q want %q (a storage URI is not a cloneable snapshot name)", got, "")
+	}
+}
+
+// The clone path substrate requires: tag the snapshot, then create the child FROM THE TAG. Substrate
+// rejects a canonical snapshot reference here with FailedPrecondition, so asserting the oneof arm is
+// the point of this test, not an implementation detail.
+func TestCloneTagsSnapshotThenCreatesFromTag(t *testing.T) {
+	f := &fakeControl{}
+	ad := FromClient(f, "")
+	snapshot := substrate.SnapshotID{Atespace: "space", Name: "snap-parent-1"}
+	tag := substrate.SnapshotID{Atespace: "space", Name: "fork-child"}
+
+	if err := ad.TagSnapshot(context.Background(), snapshot, tag); err != nil {
+		t.Fatal(err)
+	}
+	if err := ad.CreateActorFromSnapshot(context.Background(),
+		substrate.ActorRef{Atespace: "space", Name: "child"},
+		substrate.ObjectRef{Namespace: "tmpl", Name: "counter"}, tag); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"tag:snap-parent-1->space/fork-child", "create:space/child:tmpl=tmpl/counter"}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Fatalf("calls=%v want %v", f.calls, want)
+	}
+	gotTag, ok := f.lastSource.GetReference().(*atepb.ActorSnapshotRef_Tag)
+	if !ok {
+		t.Fatalf("source snapshot must be referenced BY TAG, got %T", f.lastSource.GetReference())
+	}
+	if gotTag.Tag.GetAtespace() != "space" || gotTag.Tag.GetName() != "fork-child" {
+		t.Fatalf("unexpected source tag %+v", gotTag.Tag)
+	}
+	// A fork's child is created in its parent's atespace, so the default (unpublished) scope suffices.
+	if f.lastTagScope != atepb.ActorSnapshotTagScope_ACTOR_SNAPSHOT_TAG_SCOPE_ATESPACE {
+		t.Fatalf("tag scope=%v want ATESPACE (no cross-atespace publication)", f.lastTagScope)
 	}
 }
 

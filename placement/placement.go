@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -305,28 +306,10 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	return err
 }
 
-// Fork provisions the child's compute (replay-fork for filesystem-only backends) and copies the
-// parent's log prefix up to atSeq so the child shares the parent's hash chain.
-func (p *Placer) Fork(ctx context.Context, parent, child eventlog.Store, parentUID, childUID string, atSeq int64) (err error) {
-	ctx = observability.EnsureRequestID(ctx)
-	finish := observability.StartDebug(ctx, p.logger, "placement", "fork",
-		"parent_session_uid", parentUID,
-		"child_session_uid", childUID,
-		"at_seq", atSeq,
-	)
-	defer func() { finish(err, "error_kind", placementErrorKind(err)) }()
-
-	if _, err := p.backend.Fork(ctx, api.SnapshotRef{Local: parentUID}, api.ForkOpts{ChildSessionUID: childUID}); err != nil {
-		return err
-	}
-	copyFinished := observability.StartDebug(ctx, p.logger, "placement", "copy_fork_log",
-		"parent_session_uid", parentUID,
-		"child_session_uid", childUID,
-		"at_seq", atSeq,
-	)
-	err = controller.Fork(parent, child, atSeq)
-	copyFinished(err, "error_kind", placementErrorKind(err))
-	return err
+// ForkChild is one child of a fan-out fork: the child's session UID and its (empty) log.
+type ForkChild struct {
+	UID string
+	Log eventlog.Store
 }
 
 func (p *Placer) closeHarness(ctx context.Context, sessionUID, incarnationID string, closeHarness func() error) {
@@ -371,7 +354,158 @@ func closeErrorKind(err error) string {
 	return "harness_close_failed"
 }
 
-// appendLifecycle mints a fresh fence (superseding any prior writer) and records a lifecycle event.
+// Fork branches a session into one or more children: it provisions each child's compute through the
+// Runtime SPI and copies the parent's log prefix up to atSeq so every child shares the parent's hash
+// chain.
+//
+// The compute half depends on the harness's resumability. A STATELESS_REPLAY harness replay-forks —
+// each child cold-boots and the copied journal reconstructs it, leaving the parent untouched. A
+// REQUIRES_MEMORY_SNAPSHOT harness holds live state the journal cannot reconstruct (I4), so the
+// parent is checkpointed first and every child is cloned from that snapshot.
+//
+// The whole fan-out shares ONE parent checkpoint: N children cost one snapshot and N clones, and all
+// of them branch from the identical state.
+func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID string, children []ForkChild, atSeq int64) (err error) {
+	ctx = observability.EnsureRequestID(ctx)
+	finish := observability.StartDebug(ctx, p.logger, "placement", "fork",
+		"parent_session_uid", parentUID,
+		"children", len(children),
+		"at_seq", atSeq,
+	)
+	defer func() { finish(err, "error_kind", placementErrorKind(err)) }()
+
+	ref, err := p.forkSource(ctx, parent, parentUID, atSeq)
+	if err != nil {
+		return err
+	}
+	// A failed fan-out must not strand compute. The child UIDs are minted per request and returned
+	// only on success, so anything provisioned before the failure would otherwise be unreachable —
+	// unstoppable workers nobody can name.
+	created := make([]string, 0, len(children))
+	for _, child := range children {
+		if _, err := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID}); err != nil {
+			p.rollbackFork(ctx, created)
+			return err
+		}
+		created = append(created, child.UID)
+		copyFinished := observability.StartDebug(ctx, p.logger, "placement", "copy_fork_log",
+			"parent_session_uid", parentUID,
+			"child_session_uid", child.UID,
+			"at_seq", atSeq,
+		)
+		err := controller.Fork(parent, child.Log, atSeq)
+		copyFinished(err, "error_kind", placementErrorKind(err))
+		if err != nil {
+			p.rollbackFork(ctx, created)
+			return err
+		}
+	}
+	return nil
+}
+
+// rollbackFork best-effort destroys the incarnations an aborted fan-out already provisioned. Each
+// child gets its OWN budget: a Stop streams a full RAM+disk image to durable storage, so one shared
+// deadline across a wide fan-out would expire partway and strand the tail — the same failure the
+// detached context exists to prevent, just moved further down the list.
+//
+// The budget is detached from the caller's context because the likeliest cause of a mid-fan-out
+// failure is the caller's deadline expiring, which is precisely when a rollback inheriting that
+// context would reclaim nothing. Errors are ignored: the fork is failing regardless, and a stuck
+// child must not mask the original cause.
+//
+// The cost of per-child budgets is that a wedged control plane parks this goroutine for up to
+// MaxForkChildren × rollbackTimeout. That is bounded and cheap (no lock, no DB handle), and it is
+// the right side of the trade: an overall cap tight enough to matter would abandon the tail of the
+// unwind, stranding exactly the workers this exists to reclaim.
+func (p *Placer) rollbackFork(ctx context.Context, childUIDs []string) {
+	for _, uid := range childUIDs {
+		p.stopOrphan(ctx, uid)
+	}
+}
+
+func (p *Placer) stopOrphan(ctx context.Context, uid string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+	defer cancel()
+	_ = p.backend.Stop(ctx, api.Incarnation{ID: uid})
+}
+
+// rollbackTimeout bounds the best-effort teardown of ONE child of a failed fan-out.
+const rollbackTimeout = 30 * time.Second
+
+// forkSource produces the SnapshotRef the child is forked from.
+//
+// For a stateless harness that is just the parent's handle (nothing to clone). For a memory harness
+// it is a FRESH snapshot of the parent, recorded as a SUSPEND lifecycle event so the ref stays
+// recoverable from the tamper-evident chain — the same shape Suspend records. It deliberately calls
+// backend.Snapshot rather than Placer.Suspend, because Suspend also Stops (deletes) the actor, which
+// a fork's parent must survive.
+//
+// Checkpointing the parent is not undoable, so this is where a stateful fork commits: once it
+// returns, the parent is cold with a SUSPEND event on its chain whether or not the children go on to
+// provision. That is a recoverable state (Resume brings the parent back), not a leak, but it does
+// mean a retry must fork at the new head rather than the original seq.
+func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUID string, atSeq int64) (api.SnapshotRef, error) {
+	desc, err := p.backend.Describe(ctx)
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	if desc.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
+		return api.SnapshotRef{Local: parentUID}, nil
+	}
+	// Check the head BEFORE minting a fence. Minting is an autocommitted bump that supersedes any
+	// in-flight writer, so doing it first would let a fork that is then REFUSED as unplaceable still
+	// kill a turn racing on the parent — a request that changes nothing would leave the session worse
+	// off than before it was asked.
+	head, err := parent.Head()
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	// A memory snapshot captures the parent's RAM as it is NOW, so it can only realize a fork taken
+	// at the log head. Branching a stateful session at a historical seq would pair an old prefix with
+	// present-day RAM; refuse — with no side effects at all — instead of producing that mismatch.
+	if atSeq != head {
+		return api.SnapshotRef{}, fmt.Errorf("%w: harness %q requires %s, which can only fork at the log head (%d), not seq %d",
+			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, head, atSeq)
+	}
+	// Past this point the fork is committing, so superseding the current writer is the intended
+	// semantic (the same one Suspend has). Fencing before the snapshot means an in-flight turn cannot
+	// advance the head underneath a checkpoint that is not undoable.
+	fence, err := parent.NewFence()
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	// A turn could still have committed in the window before that fence landed. Re-check now, while
+	// aborting is free: after the snapshot the parent is cold whether or not the fork proceeds.
+	if head, err = parent.Head(); err != nil {
+		return api.SnapshotRef{}, err
+	}
+	if atSeq != head {
+		return api.SnapshotRef{}, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
+	}
+	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID}, api.SnapshotExternal)
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	// Record the checkpoint before validating it: the parent is already cold, and the SUSPEND event
+	// is what keeps that fact on the chain. CAS on atSeq — the seq the head check validated — rather
+	// than a re-read head, so a writer that minted an even newer fence in the meantime aborts the
+	// fork instead of silently widening the children's prefix past the RAM they were cloned from.
+	if err := appendLifecycleAt(parent, atSeq, fence, api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}); err != nil {
+		return api.SnapshotRef{}, err
+	}
+	// Only now refuse an unusable checkpoint. A memory-capable runtime that yields no external handle
+	// cannot clone, and cold-booting the children instead is the silent divergence this whole path
+	// exists to prevent.
+	if ref.ExternalURI == "" {
+		return api.SnapshotRef{}, fmt.Errorf("%w: runtime %q produced no external snapshot handle to clone from", ErrUnplaceable, desc.ID)
+	}
+	return ref, nil
+}
+
+// appendLifecycle mints a fresh fence (superseding any prior writer) and records a lifecycle event at
+// the head observed after that fence. Used where the event has no sequence precondition (Suspend,
+// Resume): fencing first is what makes the head stable, so the append cannot lose a CAS to a turn
+// that was already in flight.
 func appendLifecycle(log eventlog.Store, lc api.Lifecycle) error {
 	fence, err := log.NewFence()
 	if err != nil {
@@ -381,13 +515,28 @@ func appendLifecycle(log eventlog.Store, lc api.Lifecycle) error {
 	if err != nil {
 		return err
 	}
-	_, err = log.Append(head, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &lc})
+	return appendLifecycleAt(log, head, fence, lc)
+}
+
+// appendLifecycleAt records a lifecycle event under the caller's fence, but only if the log head is
+// still expectedLastSeq (single-writer CAS). It is the form to use when the caller already made a
+// decision based on a specific head and must not have that decision invalidated underneath it. The
+// fence is supplied rather than minted here so the caller can fence first and then observe a stable
+// head.
+func appendLifecycleAt(log eventlog.Store, expectedLastSeq, fence int64, lc api.Lifecycle) error {
+	_, err := log.Append(expectedLastSeq, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &lc})
 	return err
 }
 
-// lastSuspendRef returns the SnapshotRef from the most recent SUSPEND event, or — when there is none
-// (a crash mid-turn, not a clean suspend) — a trivial ref naming the session so a filesystem-only
-// backend re-provisions and replays the journal.
+// lastSuspendRef returns the SnapshotRef from the most recent SUSPEND event THIS session wrote, or —
+// when there is none (a crash mid-turn, not a clean suspend) — a trivial ref naming the session so a
+// filesystem-only backend re-provisions and replays the journal.
+//
+// The ownership check is load-bearing: a forked child inherits its parent's log prefix verbatim, so a
+// parent checkpoint can sit in the child's history. Restore keys off SnapshotRef.Local (the actor
+// handle), so accepting an inherited ref would restore the PARENT's incarnation under the child's
+// session — two sessions bound to one actor. Every backend records its own session UID in Local, so
+// a ref that names another session is history, not this session's checkpoint.
 func lastSuspendRef(log eventlog.Store, sessionUID string) (api.SnapshotRef, error) {
 	recs, err := log.Read(1)
 	if err != nil {
@@ -396,6 +545,9 @@ func lastSuspendRef(log eventlog.Store, sessionUID string) (api.SnapshotRef, err
 	for i := len(recs) - 1; i >= 0; i-- {
 		ev := recs[i].Event
 		if ev.Kind == api.EventLifecycle && ev.Lifecycle != nil && ev.Lifecycle.Kind == api.LifecycleSuspend && ev.Lifecycle.Snapshot != nil {
+			if ev.Lifecycle.Snapshot.Local != sessionUID {
+				continue // inherited from a forked-from parent, not this session's checkpoint
+			}
 			return *ev.Lifecycle.Snapshot, nil
 		}
 	}

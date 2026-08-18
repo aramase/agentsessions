@@ -24,7 +24,10 @@ type Runtime interface {
 	// replaying the event log.
 	Restore(ctx context.Context, ref SnapshotRef) (Incarnation, error)
 
-	// Fork creates a child incarnation from a snapshot, copy-on-write when supported.
+	// Fork creates a child incarnation. A backend with MemorySnapshot clones ref's captured state so
+	// the child continues from the parent's RAM; a filesystem-only backend returns a fresh incarnation
+	// and relies on the host replaying the child's copied log prefix. Implementations must not leak a
+	// partially-provisioned child: on any failure after the child exists, tear it down before returning.
 	Fork(ctx context.Context, ref SnapshotRef, opts ForkOpts) (Incarnation, error)
 
 	// Stop destroys the incarnation and frees the worker.
@@ -79,7 +82,9 @@ type SessionSpec struct {
 // ForkOpts parameterizes a fork.
 type ForkOpts struct {
 	ChildSessionUID string
-	CopyOnWrite     bool
+	// No copy-on-write knob: every backend reports CoWFork=false today (substrate clones via a full
+	// snapshot restore), and if that changes it is likely a property of how restores work rather than
+	// a per-call request. Read RuntimeCapabilities.CoWFork for what a backend can actually do.
 }
 
 // RuntimeCapabilities is what a backend can do. The host matches these against a
