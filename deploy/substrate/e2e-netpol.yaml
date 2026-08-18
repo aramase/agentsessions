@@ -1,0 +1,37 @@
+# Test-only ingress allowance for the conformance Job.
+#
+# substrate's atecontroller reconciles a NetworkPolicy per WorkerPool whose only ingress peer is
+# ate-system/app=atenet-router ("Ingress policy: only accept connections from the atenet-router"),
+# so an in-cluster dial straight to a worker pod is dropped — a black-holed SYN, surfacing as
+# `i/o timeout` rather than `connection refused`.
+#
+# The conformance suite must dial the actor directly because the harness speaks gRPC and the router
+# does not carry it: the atunnel ingress reverse-proxies HTTP/1.1 and Envoy's actor cluster pins
+# Http1ProtocolOptions. That is agent-substrate#254 ("No gRPC support in atenet"), open upstream, with
+# h2c ingress proposed in #484. Until that lands there is no supported transport for a gRPC actor, so
+# the suite reaches the harness the way google/ax does and this policy re-opens the path for it.
+#
+# NetworkPolicy peers are additive: this policy unions with substrate's rather than replacing it, so
+# workers keep accepting router traffic and gain exactly one extra peer — the conformance Job in this
+# namespace. It is applied only in the ephemeral CI cluster and ships in no product path.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-conformance-job-to-workers
+  namespace: ate-agentsessions
+spec:
+  # Every worker pod, whichever WorkerPool owns it: substrate labels them all with the pool name
+  # (workerpool_apply.go), so Exists covers both the gVisor and micro-VM pools without naming either.
+  podSelector:
+    matchExpressions:
+      - key: ate.dev/worker-pool
+        operator: Exists
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # No namespaceSelector: a bare podSelector means this policy's own namespace, which is where
+        # both the WorkerPools and the conformance Job live.
+        - podSelector:
+            matchLabels:
+              app: substrate-e2e

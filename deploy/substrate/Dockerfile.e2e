@@ -1,0 +1,8 @@
+# Ships the compiled `integrations/substrate/e2e` test binary as an in-cluster Job image.
+#
+# ko builds main packages, and this is a test binary (`go test -c`), so the image is assembled here
+# instead. The binary is static (CGO_ENABLED=0; the journal uses the pure-Go modernc.org/sqlite), so
+# `static` is enough — there is no libc to link against.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY e2e.test /e2e.test
+ENTRYPOINT ["/e2e.test"]

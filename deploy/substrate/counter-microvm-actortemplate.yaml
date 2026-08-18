@@ -1,17 +1,24 @@
-# Axis-2 micro-VM manifests: the in-RAM counter harness packaged as a micro-VM (kata + cloud-hypervisor)
-# ActorTemplate + WorkerPool. Axis 2 is the REQUIRES_MEMORY_SNAPSHOT path — the differentiator a plain
+# Stateful-tier micro-VM manifests: the in-RAM counter harness packaged as a micro-VM (kata + cloud-hypervisor)
+# ActorTemplate + WorkerPool. This is the REQUIRES_MEMORY_SNAPSHOT path — the differentiator a plain
 # pod (a filesystem-only runtime) cannot do: the counter's state lives ONLY in guest RAM, so it survives
 # suspend/resume solely via a memory snapshot (onPause: Full -> SuspendActor -> ResumeActor{boot:false}).
 #
 # Grounded in agent-substrate demos/counter/counter-microvm.yaml.tmpl. Differences from that demo:
 #   - Our harness is cmd/harnessnode with HARNESS_KIND=counter (the harnesswire gRPC counter), reached
 #     by a direct PodIP:80 dial (Path A), not the demo's HTTP-over-mesh counter.
-#   - No durableDir volume: the count is PURE in-RAM (the axis-2 point), so onCommit is Full, not Data.
+#   - No durableDir volume: the count is PURE in-RAM (the whole point of this tier), so onCommit is Full, not Data.
+#   - The `workload` label is deliberately NOT the demo's `counter-microvm`. Worker eligibility is
+#     sandboxClass + label selector, matched over EVERY worker in the cluster with no namespace filter
+#     (cmd/ateapi/internal/controlapi/workflow_resume.go isWorkerEligibleForActor + workercache.Workers),
+#     and a Worker inherits its pool's labels verbatim (controlapi/syncer.go). run-microvm-demo-kind.sh
+#     installs a `workload: counter-microvm` pool in ate-demo-counter-microvm, so sharing that label let
+#     the scheduler place our actor on the DEMO pool, where our e2e NetworkPolicy does not apply and the
+#     dial timed out. Keep this label unique to this repo.
 #
 # The micro-VM sandbox binaries (cloud-hypervisor, virtiofsd, kata kernel/rootfs/config) come from the
 # cluster-scoped `counter-microvm` SandboxConfig, whose assets are staged to the object store by
 # substrate's run-microvm-demo[-kind].sh.
-# TODO(axis-2): a dedicated agentsessions-microvm SandboxConfig referencing the same staged kata-assets,
+# TODO(microvm): a dedicated agentsessions-microvm SandboxConfig referencing the same staged kata-assets,
 # so this does not depend on the demo's SandboxConfig being installed.
 
 apiVersion: ate.dev/v1alpha1
@@ -20,9 +27,15 @@ metadata:
   name: counter-microvm
   namespace: ate-agentsessions
   labels:
-    workload: counter-microvm
+    workload: agentsessions-counter-microvm
 spec:
-  replicas: 2
+  # A running actor claims a worker exclusively (AssignWorkerStep sets worker.Assignment, and
+  # findFreeWorker only considers unassigned workers), so concurrent actors need concurrent workers.
+  # The fork fan-out is the peak: 1 parent still running at the fork seq + `children` children live at
+  # once. integrations/substrate/e2e/fork_test.go forks 3, so 4 is the floor; 6 leaves room for a
+  # previous test's actor whose worker has not been released yet. Raising the fan-out means raising
+  # this, or the fork fails with FailedPrecondition "no free workers available".
+  replicas: 6
   sandboxClass: microvm
   sandboxConfigName: counter-microvm
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-microvm
@@ -54,7 +67,7 @@ spec:
           port: 8081
   workerSelector:
     matchLabels:
-      workload: counter-microvm
+      workload: agentsessions-counter-microvm
   # onPause: Full captures guest RAM on suspend — the load-bearing bit: ResumeActor{boot:false} restores
   # the in-RAM count, which no journal replay could reconstruct. onCommit: Full builds the golden without
   # a durableDir (the count is pure RAM, so there is no Data-scope volume to snapshot).

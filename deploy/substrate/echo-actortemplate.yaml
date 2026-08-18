@@ -1,13 +1,17 @@
-# Axis-1 substrate manifests: the echo harness packaged as a gVisor ActorTemplate + WorkerPool.
+# Stateless-tier substrate manifests: the echo harness packaged as a gVisor ActorTemplate + WorkerPool.
 #
-# Grounded in agent-substrate demos/counter/counter.yaml.tmpl (the gVisor variant). Axis 1 is the
+# Grounded in agent-substrate demos/counter/counter.yaml.tmpl (the gVisor variant). STATELESS_REPLAY is the
 # STATELESS_REPLAY path: the harness holds no in-RAM state, so the actor is cold-booted
 # (ResumeActor{boot:true}) and the external agentsessions controller replays the durable journal —
 # no memory snapshot. This is the direct substrate analog of runtime/local, and the cheapest
-# always-green conformance path. Axis 2 (REQUIRES_MEMORY_SNAPSHOT on a micro-VM) is a later variant.
+# always-green conformance path. REQUIRES_MEMORY_SNAPSHOT on a micro-VM is the other tier.
 #
 # gVisor is the default sandbox class (no explicit sandboxClass, matching the gVisor counter). The
 # harness image is built from this repo via `ko`; the worker image is substrate's ateom-gvisor.
+#
+# The `workload` label is repo-scoped on purpose: worker eligibility ignores namespaces and matches
+# labels across every pool in the cluster, so a label shared with a substrate demo pool would let the
+# scheduler place our actor there. See counter-microvm-actortemplate.yaml for the full trace.
 
 apiVersion: v1
 kind: Namespace
@@ -22,7 +26,7 @@ metadata:
   name: echo-harness
   namespace: ate-agentsessions
   labels:
-    workload: echo-harness
+    workload: agentsessions-echo-harness
 spec:
   replicas: 2
   ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
@@ -50,11 +54,11 @@ spec:
         port: 8081
   workerSelector:
     matchLabels:
-      workload: echo-harness
+      workload: agentsessions-echo-harness
   # A stateless-replay harness keeps no durable in-actor state (the event log is the state), so there
   # is no durable-dir volume. The ActorTemplate still builds a golden snapshot to reach Ready, so
   # onCommit must be Full (a full `runsc checkpoint`): DATA scope snapshots durable-dir volumes and
-  # fails closed when there are none. axis-1 actors boot fresh (boot:true) and replay the journal, so
+  # fails closed when there are none. stateless actors boot fresh (boot:true) and replay the journal, so
   # the golden's memory image is never restored -- but it must build for the template to go Ready.
   snapshotsConfig:
     onPause: Full
