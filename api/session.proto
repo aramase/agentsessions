@@ -136,8 +136,10 @@ message ResumeRequest {
 
 message ForkRequest {
   string session = 1;
-  int64 at_seq = 2;         // 0 = HEAD
-  int32 count = 3;          // fan-out N children
+  // 0 = HEAD. A REQUIRES_MEMORY_SNAPSHOT harness forks by cloning a memory snapshot, which captures
+  // RAM as of now, so it accepts only HEAD; a historical seq is FAILED_PRECONDITION.
+  int64 at_seq = 2;
+  int32 count = 3;          // fan-out N children; must be 1..128, else INVALID_ARGUMENT
   IdentityRef identity = 4; // optional child principal
   map<string, string> labels = 5;
 }
@@ -191,6 +193,8 @@ service Sessions {
   rpc Suspend(SuspendRequest) returns (Session); // cold, free worker
   rpc Resume(ResumeRequest) returns (Session);
 
-  // The differentiator: branch a session at a sequence into one or more children.
+  // The differentiator: branch a session at a sequence into one or more children. Forking a
+  // REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event
+  // lands on its chain) because the children are cloned from that snapshot; resume brings it back.
   rpc Fork(ForkRequest) returns (ForkResponse);
 }

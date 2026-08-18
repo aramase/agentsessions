@@ -171,8 +171,15 @@ func (s *Service) Replay(req *v1.ReplayRequest, stream v1.Sessions_ReplayServer)
 	return nil
 }
 
+// MaxForkChildren bounds one fan-out. count arrives off the wire and sizes both an allocation and a
+// provisioning loop, and each child costs a full snapshot restore on a memory-capable backend, so an
+// unbounded value is a resource-exhaustion vector rather than a useful request. It is a guardrail, not
+// a statement about how wide forking can scale.
+const MaxForkChildren = 128
+
 // Fork branches the session at at_seq into count children (each a new session sharing the parent
-// prefix chain), the differentiator ax lacks.
+// prefix chain), the differentiator ax lacks. The whole fan-out branches from one parent checkpoint,
+// so every child starts from identical state.
 func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.ForkResponse, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var childrenCreated int
@@ -198,18 +205,42 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if count <= 0 {
 		count = 1
 	}
-	var children []*v1.Session
+	if count > MaxForkChildren {
+		return nil, status.Errorf(codes.InvalidArgument, "count %d exceeds the maximum of %d children per fork", count, MaxForkChildren)
+	}
+	children := make([]placement.ForkChild, 0, count)
 	for i := 0; i < count; i++ {
 		uid := newUID()
-		child := s.store.Session(uid)
-		if err := s.placer.Fork(ctx, parent, child, req.GetSession(), uid, atSeq); err != nil {
-			return nil, status.Errorf(codes.Internal, "fork: %v", err)
-		}
-		h, _ := child.Head()
-		children = append(children, s.session(uid, h, req.GetSession(), atSeq))
-		childrenCreated++
+		children = append(children, placement.ForkChild{UID: uid, Log: s.store.Session(uid)})
 	}
-	return &v1.ForkResponse{Children: children}, nil
+	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
+	// so children_created stays 0 rather than reporting compute that no longer exists.
+	if err := s.placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
+		return nil, forkError(err)
+	}
+	childrenCreated = len(children)
+	out := make([]*v1.Session, 0, len(children))
+	for _, child := range children {
+		h, _ := child.Log.Head()
+		out = append(out, s.session(child.UID, h, req.GetSession(), atSeq))
+	}
+	return &v1.ForkResponse{Children: out}, nil
+}
+
+// forkError surfaces a refused fork as FailedPrecondition rather than Internal. A fork is refused
+// when the harness's capabilities cannot realize it — e.g. a REQUIRES_MEMORY_SNAPSHOT session forked
+// at a historical seq, which no memory snapshot can reproduce — which is a caller-visible
+// precondition, not a host fault. A concurrent writer that invalidated the fork point is Aborted, so
+// the caller knows a retry is meaningful.
+func forkError(err error) error {
+	switch {
+	case errors.Is(err, placement.ErrUnplaceable):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
+		return status.Error(codes.Aborted, err.Error())
+	default:
+		return status.Errorf(codes.Internal, "fork: %v", err)
+	}
 }
 
 // Suspend snapshots the incarnation and marks the session cold. The Placer records the SnapshotRef

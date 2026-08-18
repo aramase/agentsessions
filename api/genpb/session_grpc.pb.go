@@ -57,7 +57,9 @@ type SessionsClient interface {
 	Pause(ctx context.Context, in *PauseRequest, opts ...grpc.CallOption) (*Session, error)
 	Suspend(ctx context.Context, in *SuspendRequest, opts ...grpc.CallOption) (*Session, error)
 	Resume(ctx context.Context, in *ResumeRequest, opts ...grpc.CallOption) (*Session, error)
-	// The differentiator: branch a session at a sequence into one or more children.
+	// The differentiator: branch a session at a sequence into one or more children. Forking a
+	// REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event
+	// lands on its chain) because the children are cloned from that snapshot; resume brings it back.
 	Fork(ctx context.Context, in *ForkRequest, opts ...grpc.CallOption) (*ForkResponse, error)
 }
 
@@ -226,7 +228,9 @@ type SessionsServer interface {
 	Pause(context.Context, *PauseRequest) (*Session, error)
 	Suspend(context.Context, *SuspendRequest) (*Session, error)
 	Resume(context.Context, *ResumeRequest) (*Session, error)
-	// The differentiator: branch a session at a sequence into one or more children.
+	// The differentiator: branch a session at a sequence into one or more children. Forking a
+	// REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event
+	// lands on its chain) because the children are cloned from that snapshot; resume brings it back.
 	Fork(context.Context, *ForkRequest) (*ForkResponse, error)
 	mustEmbedUnimplementedSessionsServer()
 }

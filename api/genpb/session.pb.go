@@ -1136,12 +1136,14 @@ func (x *ResumeRequest) GetBoot() bool {
 }
 
 type ForkRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Session       string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
-	AtSeq         int64                  `protobuf:"varint,2,opt,name=at_seq,json=atSeq,proto3" json:"at_seq,omitempty"` // 0 = HEAD
-	Count         int32                  `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`              // fan-out N children
-	Identity      *IdentityRef           `protobuf:"bytes,4,opt,name=identity,proto3" json:"identity,omitempty"`         // optional child principal
-	Labels        map[string]string      `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Session string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
+	// 0 = HEAD. A REQUIRES_MEMORY_SNAPSHOT harness forks by cloning a memory snapshot, which captures
+	// RAM as of now, so it accepts only HEAD; a historical seq is FAILED_PRECONDITION.
+	AtSeq         int64             `protobuf:"varint,2,opt,name=at_seq,json=atSeq,proto3" json:"at_seq,omitempty"`
+	Count         int32             `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`      // fan-out N children; must be 1..128, else INVALID_ARGUMENT
+	Identity      *IdentityRef      `protobuf:"bytes,4,opt,name=identity,proto3" json:"identity,omitempty"` // optional child principal
+	Labels        map[string]string `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

@@ -433,3 +433,25 @@ func TestSessionsServiceEndToEnd(t *testing.T) {
 		t.Fatalf("stale exec: want Aborted, got %v", err)
 	}
 }
+
+// count is caller-supplied and sizes both an allocation and a provisioning loop, so it must be
+// bounded at the edge. Rejecting it is InvalidArgument (the request is malformed), and the rejection
+// must land before anything is allocated or provisioned.
+func TestForkRejectsUnboundedChildCount(t *testing.T) {
+	c := newClient(t)
+	ctx := context.Background()
+	s, err := c.CreateSession(ctx, &v1.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := s.GetMetadata().GetUid()
+
+	_, err = c.Fork(ctx, &v1.ForkRequest{Session: sess, Count: session.MaxForkChildren + 1})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("fork count=%d err=%v want InvalidArgument", session.MaxForkChildren+1, err)
+	}
+	// The boundary itself stays valid: the guard must not be off by one.
+	if _, err := c.Fork(ctx, &v1.ForkRequest{Session: sess, Count: session.MaxForkChildren}); err != nil {
+		t.Fatalf("fork at the documented maximum must be accepted: %v", err)
+	}
+}
