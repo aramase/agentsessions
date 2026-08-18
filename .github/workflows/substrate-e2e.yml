@@ -52,21 +52,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: false # the explicit cache below also covers the pinned substrate clone builds
-
-      - name: Cache Go build and module caches
-        # The pinned SUBSTRATE_REF makes the ate-system, ateom, harnessnode, and axis-driver ko builds
-        # deterministic, so a warm Go build cache cuts several minutes off the from-source builds. Keyed
-        # on the pinned ref plus both modules' go.sum, with prefix restore-keys for a partial warm start.
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: substrate-e2e-go-${{ runner.os }}-${{ env.SUBSTRATE_REF }}-${{ hashFiles('go.sum', 'integrations/substrate/go.sum') }}
-          restore-keys: |
-            substrate-e2e-go-${{ runner.os }}-${{ env.SUBSTRATE_REF }}-
-            substrate-e2e-go-${{ runner.os }}-
 
       - name: Setup ko
         uses: ko-build/setup-ko@v0.7
