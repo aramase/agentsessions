@@ -1,7 +1,9 @@
 package local_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -19,9 +21,9 @@ func (stubHarness) Describe(context.Context) (api.Descriptor, error) {
 func (stubHarness) Run(context.Context, *api.Start, api.EventSink) error { return nil }
 
 // newBackend builds a backend and closes its harness server when the test ends.
-func newBackend(t *testing.T) *local.Backend {
+func newBackend(t *testing.T, opts ...local.Option) *local.Backend {
 	t.Helper()
-	b := local.New(stubHarness{})
+	b := local.New(stubHarness{}, opts...)
 	t.Cleanup(func() { _ = b.Close() })
 	return b
 }
@@ -46,13 +48,19 @@ func TestCreateValidatesSessionSpec(t *testing.T) {
 		spec *api.SessionSpec
 		want string
 	}{
-		{name: "nil spec", want: "local: create requires a session spec"},
-		{name: "empty session uid", spec: &api.SessionSpec{}, want: "local: create requires a session uid"},
+		{name: "nil spec", want: "session spec"},
+		{name: "empty session uid", spec: &api.SessionSpec{}, want: "session uid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := newBackend(t).Create(context.Background(), tc.spec)
-			if err == nil || err.Error() != tc.want {
-				t.Fatalf("Create() error = %v, want %q", err, tc.want)
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			_, err := newBackend(t, local.WithLogger(logger)).Create(context.Background(), tc.spec)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Create() error = %v, want it to contain %q", err, tc.want)
+			}
+			if !strings.Contains(output.String(), `"error_kind":"invalid_spec"`) ||
+				!strings.Contains(output.String(), `"level":"ERROR"`) {
+				t.Fatalf("Create() did not log invalid spec at ERROR: %s", output.String())
 			}
 		})
 	}
