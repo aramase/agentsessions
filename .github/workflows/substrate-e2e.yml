@@ -14,6 +14,14 @@ on:
   push:
     branches: [main]
   pull_request:
+    # The live cluster e2e is heavy; skip it for changes that cannot affect substrate conformance
+    # (docs, the demo UI, and demo media). Any code, deploy, or workflow change still runs it, and
+    # push to main plus the nightly schedule always run the full suite.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "cmd/agentui/**"
+      - "demos/**"
   schedule:
     - cron: "0 7 * * *" # nightly, so a green main is re-proven against a fresh cluster
   workflow_dispatch: {}
@@ -47,13 +55,6 @@ jobs:
 
       - name: Setup ko
         uses: ko-build/setup-ko@v0.7
-
-      - name: Nested substrate module builds + tests (core stays substrate-free)
-        # Fail fast before the expensive cluster bring-up. Both checks also run in ci.yml (jobs
-        # `integrations` and `core links no backend vendor`), which finishes in a fraction of the time.
-        run: |
-          cd integrations/substrate && go test ./... && cd -
-          test "$(go list -deps ./... | grep -c agent-substrate)" = "0"
 
       - name: Clone agent-substrate (pinned)
         run: |
@@ -99,11 +100,15 @@ jobs:
           # token auth is the simpler first cut (spike §3e); cert is a later matrix dimension.
           hack/install-ate-kind.sh --deploy-ate-system --ateapi-client-auth=token
 
+      - name: Build the harness image (shared by axis 1 and axis 2)
+        # Both axes run the same harnessnode image (HARNESS_KIND selects echo vs counter), so build and
+        # push it to the local registry once and reuse the ref, instead of ko-building it per axis.
+        run: echo "HARNESS_IMG=$(ko build ./cmd/harnessnode)" >> "$GITHUB_ENV"
+
       - name: Build + apply the echo harness ActorTemplate + WorkerPool
-        # Two ko:// image refs span two modules: our harnessnode (this repo) and substrate's
-        # ateom-gvisor (the clone). Resolve each in its own module, substitute into the manifest, apply.
+        # The harness image is built once (above); resolve substrate's ateom-gvisor in its own module,
+        # substitute both refs into the manifest, apply.
         run: |
-          HARNESS_IMG="$(ko build ./cmd/harnessnode)"
           ATEOM_IMG="$(cd _substrate && ko build ./cmd/ateom-gvisor)"
           sed -e "s#ko://github.com/aramase/agentsessions/cmd/harnessnode#${HARNESS_IMG}#" \
               -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
@@ -142,8 +147,8 @@ jobs:
         run: hack/run-microvm-demo-kind.sh --ateapi-client-auth=token
 
       - name: Build + apply the counter harness micro-VM ActorTemplate + WorkerPool
+        # Reuses the harness image built once above (HARNESS_IMG); builds substrate's ateom-microvm.
         run: |
-          HARNESS_IMG="$(ko build ./cmd/harnessnode)"
           ATEOM_MV_IMG="$(cd _substrate && ko build ./cmd/ateom-microvm)"
           sed -e "s#ko://github.com/aramase/agentsessions/cmd/harnessnode#${HARNESS_IMG}#" \
               -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
