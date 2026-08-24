@@ -7,8 +7,8 @@ Start here. Each document is small and problem-scoped; this page is the index.
 1. **[concepts.md](concepts.md)**: the mental model. The nouns (session, event, log, incarnation,
    fence, resumability, capabilities) and why each exists. Read this first.
 2. **[quickstart.md](quickstart.md)**: hands on in a few minutes. Exec a turn, replay it with zero
-   model calls, fork it, suspend and resume it, verify the provenance chain. No Kubernetes or model key
-   required.
+   model calls, fork it, suspend and resume it, list sessions, verify the provenance chain. No
+   Kubernetes or model key required.
 3. **[harness-authoring.md](harness-authoring.md)**: write your own agent against the `api.Harness`
    SPI. The contract, the rules that keep replay exact, and two reference harnesses walked through.
 4. **[architecture.md](architecture.md)**: how the core is built. The three contracts, the durable

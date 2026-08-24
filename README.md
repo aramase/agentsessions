@@ -28,8 +28,8 @@ target — plus a reference implementation that proves the contract holds.
 
 ## The three contracts
 
-- **Sessions** (`api/session.proto`) — client-facing lifecycle: create / exec / suspend / resume / fork
-  / replay.
+- **Sessions** (`api/session.proto`) — client-facing lifecycle: create / list / exec / suspend / resume
+  / fork / replay.
 - **Harness** (`api/harness.proto`) — Bring-Your-Own-Harness: the host drives one execution; the harness
   streams typed events over the `Harness.Connect` gRPC stream. Implement it directly, or adapt an agent
   framework with a thin shim.

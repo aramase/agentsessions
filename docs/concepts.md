@@ -50,6 +50,34 @@ stateDiagram-v2
 `PAUSED` is warm (still resident on a worker, instant resume). `SUSPENDED` is cold (snapshot written to
 storage, the worker is freed). `TERMINATED` still keeps the log, so a finished session stays replayable.
 
+### Metadata and listing
+
+The log holds what happened. It does not hold what the session *is* — the project that owns it, its
+display name, the configured harness and model — because none of that is an event. That lives in a
+metadata row alongside the log, written by `CreateSession` before any event exists.
+
+This is why a session that was just created, with no turns and no compute, still shows up in
+`ListSessions`. A listing derived from the event table alone would drop exactly the sessions a user
+just started and is waiting on.
+
+`ListSessions` reads that row, so a listing is complete after a process restart and does not depend
+on anything held in memory. It filters on an exact `project`, never a wildcard, so a caller cannot
+enumerate a tenant it did not ask for. Results are newest first and paged with a cursor that carries
+the last `(create time, uid)` seen, so a session created while a caller walks pages neither skips
+nor duplicates a row.
+
+Two fields are derived rather than stored:
+
+- `last_seq` is `MAX(seq)` over the log, so the cursor a listing reports is always the log's own.
+- `compute_state` is a projection maintained in the same transaction that appends an event, since an
+  event body is an opaque blob no query can filter on. It records **what the log implies about
+  compute**, not a live probe of the backend. Any ordinary event moves a session to `LIVE`, because
+  something had to be running to produce it; `SUSPEND` and `FORK` land it `COLD`, and `RESUME`
+  returns it to `LIVE`. A session that has been created but never run stays `NONE`, which is what
+  makes it visible in a listing before it has any compute. `LIVE` goes stale if the process behind
+  it later died. A backend that can enumerate its own incarnations is the thing that would make this
+  exact; reconciling against the runtime is not implemented.
+
 ## Event and the typed log
 
 The session log is a sequence of `Event`s. An event is not an opaque blob: it is typed, so provenance,

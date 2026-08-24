@@ -155,7 +155,40 @@ session sess-... resume  compute=COMPUTE_LIVE last_seq=6
 The first turn is seq 1 to 4, so `SUSPEND` lands at seq 5 and `RESUME` at seq 6. Both are `LIFECYCLE`
 events in the log, so the compute history is auditable alongside the conversation.
 
-## 6. Verify the provenance chain with a non-Go verifier
+## 6. List sessions
+
+`create` registers a session without running anything, and `list` enumerates a project. Every
+`agentctl` invocation opens the journal fresh, so the listing below is already proving the
+restart case: nothing is held in memory between commands.
+
+```bash
+/tmp/agentctl create --journal /tmp/qs.db --project acme --name triage --model echo-1
+/tmp/agentctl list   --journal /tmp/qs.db --project acme
+```
+
+```
+sess-0d879482...	last_seq=0	compute=NONE	harness=echo	name=triage
+```
+
+`last_seq=0` is the point: the session has no events and no compute yet, and it still appears. That
+is the case a listing built from the event log alone would miss.
+
+Sessions are returned newest first and filtered on an exact `--project`. `list` walks every page for
+you; `--page-size` only changes how many are fetched per request.
+
+```bash
+/tmp/agentctl list --journal /tmp/sr.db --project default
+```
+
+```
+sess-...	last_seq=6	compute=LIVE	harness=echo	name=
+```
+
+`compute` reflects what the log implies about compute, which is why the resumed session above reads
+`LIVE`. It is not a live probe of the backend; see
+[`concepts.md`](concepts.md#metadata-and-listing) for what that does and does not guarantee.
+
+## 7. Verify the provenance chain with a non-Go verifier
 
 The hash chain is defined on the wire proto (RFC 8785 JCS over proto3-JSON), not on Go, so any
 implementation can verify it. `hack/verify_chain.sh` records a real journal, then runs a small Python
