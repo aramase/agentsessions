@@ -707,9 +707,18 @@ func (x *GetSessionRequest) GetUid() string {
 	return ""
 }
 
+// ListSessions enumerates sessions from the durable store, so it returns sessions that have no
+// events and no live incarnation yet. Paging is keyset over (create_time DESC, uid ASC), which is
+// stable when a session is created mid-pagination; an offset would skip or repeat rows.
 type ListSessionsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Project       string                 `protobuf:"bytes,1,opt,name=project,proto3" json:"project,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Project string                 `protobuf:"bytes,1,opt,name=project,proto3" json:"project,omitempty"` // tenant / namespace; exact-match filter, not a prefix or wildcard
+	// Maximum sessions to return. 0 = the server default; a value above the server maximum is
+	// clamped rather than rejected.
+	PageSize int32 `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	// Opaque cursor taken verbatim from a prior ListSessionsResponse.next_page_token. Empty = first
+	// page. A token the server cannot parse is INVALID_ARGUMENT, never a silent restart from page 1.
+	PageToken     string `protobuf:"bytes,3,opt,name=page_token,json=pageToken,proto3" json:"page_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -751,9 +760,24 @@ func (x *ListSessionsRequest) GetProject() string {
 	return ""
 }
 
+func (x *ListSessionsRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *ListSessionsRequest) GetPageToken() string {
+	if x != nil {
+		return x.PageToken
+	}
+	return ""
+}
+
 type ListSessionsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Sessions      []*Session             `protobuf:"bytes,1,rep,name=sessions,proto3" json:"sessions,omitempty"`
+	NextPageToken string                 `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"` // empty on the last page
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -793,6 +817,13 @@ func (x *ListSessionsResponse) GetSessions() []*Session {
 		return x.Sessions
 	}
 	return nil
+}
+
+func (x *ListSessionsResponse) GetNextPageToken() string {
+	if x != nil {
+		return x.NextPageToken
+	}
+	return ""
 }
 
 type DeleteSessionRequest struct {
@@ -1579,11 +1610,15 @@ const file_session_proto_rawDesc = "" +
 	"\x14CreateSessionRequest\x123\n" +
 	"\asession\x18\x01 \x01(\v2\x19.agentsessions.v1.SessionR\asession\"%\n" +
 	"\x11GetSessionRequest\x12\x10\n" +
-	"\x03uid\x18\x01 \x01(\tR\x03uid\"/\n" +
+	"\x03uid\x18\x01 \x01(\tR\x03uid\"k\n" +
 	"\x13ListSessionsRequest\x12\x18\n" +
-	"\aproject\x18\x01 \x01(\tR\aproject\"M\n" +
+	"\aproject\x18\x01 \x01(\tR\aproject\x12\x1b\n" +
+	"\tpage_size\x18\x02 \x01(\x05R\bpageSize\x12\x1d\n" +
+	"\n" +
+	"page_token\x18\x03 \x01(\tR\tpageToken\"u\n" +
 	"\x14ListSessionsResponse\x125\n" +
-	"\bsessions\x18\x01 \x03(\v2\x19.agentsessions.v1.SessionR\bsessions\"(\n" +
+	"\bsessions\x18\x01 \x03(\v2\x19.agentsessions.v1.SessionR\bsessions\x12&\n" +
+	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"(\n" +
 	"\x14DeleteSessionRequest\x12\x10\n" +
 	"\x03uid\x18\x01 \x01(\tR\x03uid\"\x85\x02\n" +
 	"\vExecRequest\x12\x18\n" +

@@ -102,8 +102,23 @@ message Session {
 
 message CreateSessionRequest { Session session = 1; }
 message GetSessionRequest { string uid = 1; }
-message ListSessionsRequest { string project = 1; }
-message ListSessionsResponse { repeated Session sessions = 1; }
+
+// ListSessions enumerates sessions from the durable store, so it returns sessions that have no
+// events and no live incarnation yet. Paging is keyset over (create_time DESC, uid ASC), which is
+// stable when a session is created mid-pagination; an offset would skip or repeat rows.
+message ListSessionsRequest {
+  string project = 1; // tenant / namespace; exact-match filter, not a prefix or wildcard
+  // Maximum sessions to return. 0 = the server default; a value above the server maximum is
+  // clamped rather than rejected.
+  int32 page_size = 2;
+  // Opaque cursor taken verbatim from a prior ListSessionsResponse.next_page_token. Empty = first
+  // page. A token the server cannot parse is INVALID_ARGUMENT, never a silent restart from page 1.
+  string page_token = 3;
+}
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+  string next_page_token = 2; // empty on the last page
+}
 message DeleteSessionRequest { string uid = 1; }
 
 message ExecRequest {
