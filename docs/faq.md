@@ -120,6 +120,20 @@ policy, and audit centrally. `REQUIRES_APPROVAL` pauses for a human or policy de
 is declared in the contract; the approval gate itself is a tracked follow-up. Tool calls align with the
 MCP shape (name plus structured arguments), so MCP tools map onto them directly.
 
+## How do I list sessions, and can I trust the compute state I get back?
+
+`ListSessions` reads a metadata row written at create time, not the event log, which is why a session
+with no turns and no compute still appears and why a listing is complete after a process restart. It
+filters on an exact `project` and pages with a cursor over `(create time, uid)`, so a session created
+while you are walking pages neither skips nor duplicates a row.
+
+`last_seq` is read straight from the log and is exact. `compute_state` is not a live probe: it records
+what the log implies about compute. Any ordinary event moves a session to `LIVE`, since something had
+to be running to produce it; `SUSPEND` and `FORK` land it `COLD`. So `LIVE` goes stale if the process
+behind it later died, and a session that was created but never run stays `NONE`. Treat it as recorded
+intent. Making it exact needs the backend to enumerate its own incarnations, which the `Runtime` SPI
+does not yet expose.
+
 ## Is it production-ready?
 
 It is a working reference implementation (Go 1.26), not yet a productized service. The Sessions API, the

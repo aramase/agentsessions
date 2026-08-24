@@ -22,8 +22,10 @@ flowchart TB
 One wire form (`api/*.proto`) + a Go SPI (`api/*.go`). The `Event` type is shared by the session log and
 the harness stream, so what is journaled is what the harness emitted.
 
-- **Sessions** (`api/session.proto`, served by `session/`) — the client-facing lifecycle: create, exec,
-  suspend, resume, fork, replay. This is the seam a producer (GitHub, Foundry, a CLI) drives.
+- **Sessions** (`api/session.proto`, served by `session/`) — the client-facing lifecycle: create, list,
+  exec, suspend, resume, fork, replay. This is the seam a producer (GitHub, Foundry, a CLI) drives.
+  `CreateSession` persists the session's metadata, so a session is listable and survives a restart
+  before it has any events or any compute.
 - **Harness** (`api/harness.proto`) — Bring-Your-Own-Harness. `Harness.Run(Start, EventSink)` drives one
   execution (turn): the harness reads `Start` (inputs, replay `History`, identity) and emits typed events
   via the sink (`MODEL_CALL`, `OUTPUT`, `TOOL_CALL`, `TOOL_RESULT`, `USAGE`). The sink hides the
@@ -38,6 +40,12 @@ the harness stream, so what is journaled is what the harness emitted.
   - a **fencing token** per incarnation — a resumed incarnation mints a fresh fence; a zombie writer from
     a dead incarnation is rejected.
   - a **hash chain** — each record chains the prior hash, so tampering is detectable.
+- **Session metadata** (`sqlitelog/sessions.go`) — the log records what happened; it cannot record what
+  a session *is* (its project, name, configured harness and model), because none of that is an event.
+  That sits in a row beside the log, written at create time so a session with no events is still
+  listable. `compute_state` is a projection
+  advanced in the **same transaction** that appends an event, since an event body is an opaque
+  blob no query can filter on; being in-transaction is what stops it drifting from the log.
 - **Canonical hash** (`canon/`) — the `content_hash` is **RFC 8785 JCS over proto3-JSON**, computed over
   the proto, not Go's `json.Marshal`. The chain is therefore language-neutral: `hack/verify_chain.py`
   (a ~30-line non-Go verifier) reproduces the Go hash for the golden vector, so any implementation or
