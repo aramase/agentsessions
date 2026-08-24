@@ -3,6 +3,8 @@
 // sqlite journal on disk) and connects to it as a real gRPC client — not an in-process wrapper — so
 // the same code path serves remote. Pass --server <addr> to drive a remote controller instead.
 //
+//	agentctl create  --name "triage" --project acme
+//	agentctl list    --project acme           # enumerate sessions, newest first
 //	agentctl exec    --input "hi"            # create + run a turn (prints the session UID)
 //	agentctl exec    --session <uid> --input "..."
 //	agentctl replay  --session <uid>          # re-deliver the committed log
@@ -19,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -41,6 +44,7 @@ func main() {
 	}
 	cmds := map[string]func([]string) error{
 		"create":  cmdCreate,
+		"list":    cmdList,
 		"get":     cmdGet,
 		"exec":    cmdExec,
 		"replay":  cmdReplay,
@@ -60,18 +64,20 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: agentctl <create|get|exec|replay|fork|suspend|resume> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|exec|replay|fork|suspend|resume> [flags]")
 }
 
 type config struct {
 	server  string
 	journal string
+	project string
 }
 
 func commonFlags(fs *flag.FlagSet) *config {
 	c := &config{}
 	fs.StringVar(&c.server, "server", "", "remote Sessions gRPC address; empty = embedded local server")
 	fs.StringVar(&c.journal, "journal", "agentsessions.db", "sqlite journal path (embedded mode)")
+	fs.StringVar(&c.project, "project", sqlitelog.DefaultProject, "project (tenant) to create and list sessions in")
 	return c
 }
 
@@ -91,7 +97,7 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 		return v1.NewSessionsClient(conn), func() { conn.Close() }, nil
 	}
 
-	store, err := sqlitelog.Open(cfg.journal)
+	store, err := sqlitelog.Open(cfg.journal, sqlitelog.WithDefaultProject(cfg.project))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -101,7 +107,7 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 		backend,
 		echoagent.Model,
 		placement.WithLogger(logger),
-	), session.WithLogger(logger))
+	), session.WithLogger(logger), session.WithDefaultProject(cfg.project))
 	sock := fmt.Sprintf("%s/agentctl-%d.sock", os.TempDir(), os.Getpid())
 	_ = os.Remove(sock)
 	lis, err := net.Listen("unix", sock)
@@ -146,18 +152,69 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 func cmdCreate(args []string) error {
 	fs := flag.NewFlagSet("create", flag.ExitOnError)
 	cfg := commonFlags(fs)
+	var name, harness, model string
+	fs.StringVar(&name, "name", "", "human-readable session name")
+	fs.StringVar(&harness, "harness", "", "harness to run the session on (default: the host's)")
+	fs.StringVar(&model, "model", "", "model id")
 	_ = fs.Parse(args)
 	client, cleanup, err := dial(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	sess, err := client.CreateSession(context.Background(), &v1.CreateSessionRequest{})
+	sess, err := client.CreateSession(context.Background(), &v1.CreateSessionRequest{
+		Session: &v1.Session{
+			Metadata: &v1.ResourceMetadata{Project: cfg.project, Name: name},
+			Harness:  harness,
+			Model:    model,
+		},
+	})
 	if err != nil {
 		return err
 	}
 	fmt.Println(sess.GetMetadata().GetUid())
 	return nil
+}
+
+// cmdList walks every page rather than printing the first one. A CLI that stopped at the default
+// page size would quietly under-report, which is worse than being slow.
+func cmdList(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	cfg := commonFlags(fs)
+	var pageSize int
+	fs.IntVar(&pageSize, "page-size", 0, "sessions per request; 0 uses the server default")
+	_ = fs.Parse(args)
+	client, cleanup, err := dial(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	ctx := context.Background()
+	token := ""
+	for {
+		resp, err := client.ListSessions(ctx, &v1.ListSessionsRequest{
+			Project:   cfg.project,
+			PageSize:  int32(pageSize),
+			PageToken: token,
+		})
+		if err != nil {
+			return err
+		}
+		for _, s := range resp.GetSessions() {
+			fmt.Printf("%s\tlast_seq=%d\tcompute=%s\tharness=%s\tname=%s\n",
+				s.GetMetadata().GetUid(),
+				s.GetLastSeq(),
+				strings.TrimPrefix(s.GetComputeState().String(), "COMPUTE_"),
+				s.GetHarness(),
+				s.GetMetadata().GetName(),
+			)
+		}
+		token = resp.GetNextPageToken()
+		if token == "" {
+			return nil
+		}
+	}
 }
 
 func cmdGet(args []string) error {
@@ -175,7 +232,14 @@ func cmdGet(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("session %s last_seq=%d\n", sess.GetMetadata().GetUid(), sess.GetLastSeq())
+	fmt.Printf("session %s project=%s name=%s harness=%s last_seq=%d compute=%s\n",
+		sess.GetMetadata().GetUid(),
+		sess.GetMetadata().GetProject(),
+		sess.GetMetadata().GetName(),
+		sess.GetHarness(),
+		sess.GetLastSeq(),
+		strings.TrimPrefix(sess.GetComputeState().String(), "COMPUTE_"),
+	)
 	return nil
 }
 
