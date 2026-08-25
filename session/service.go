@@ -340,6 +340,12 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if count > MaxForkChildren {
 		return nil, status.Errorf(codes.InvalidArgument, "count %d exceeds the maximum of %d children per fork", count, MaxForkChildren)
 	}
+	// Validated before anything is provisioned: a name/count mismatch is a caller mistake, and
+	// failing after the fan-out would leave children the caller cannot name.
+	childNames := req.GetChildNames()
+	if len(childNames) != 0 && len(childNames) != count {
+		return nil, status.Errorf(codes.InvalidArgument, "child_names has %d entries, want 0 or exactly count (%d)", len(childNames), count)
+	}
 	children := make([]placement.ForkChild, 0, count)
 	for i := 0; i < count; i++ {
 		uid := newUID()
@@ -356,17 +362,22 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	// into a listing full of phantom sessions the caller was never given UIDs for and cannot
 	// delete. Children inherit the parent's project, harness, and model: a fork is the same
 	// workload branched, so it must stay in the tenant that owns the parent rather than landing in
-	// the service default that copying the log would otherwise give it.
+	// the service default that copying the log would otherwise give it. The name is deliberately
+	// not inherited; see child_names in the proto.
 	parentInfo, err := s.store.SessionInfo(req.GetSession())
 	if err != nil {
 		return nil, sessionStoreError(err, req.GetSession())
 	}
 	out := make([]*v1.Session, 0, len(children))
-	for _, child := range children {
+	for i, child := range children {
+		var name string
+		if len(childNames) != 0 {
+			name = childNames[i]
+		}
 		if err := s.store.PutSession(sqlitelog.SessionMeta{
 			UID:       child.UID,
 			Project:   parentInfo.Project,
-			Name:      parentInfo.Name,
+			Name:      name,
 			Harness:   parentInfo.Harness,
 			Model:     parentInfo.Model,
 			ParentUID: req.GetSession(),
