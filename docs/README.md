@@ -19,6 +19,12 @@ Start here. Each document is small and problem-scoped; this page is the index.
    data-safety contract.
 7. **[faq.md](faq.md)**: common questions about what this is, what it is not, and how it behaves.
 
+## Reference
+
+- **[api-reference.md](api-reference.md)**: every message, field, enum, and RPC in
+  `agentsessions.v1`, generated from the `.proto` comments. Generated file: edit the protos, then run
+  `./hack/gen-api-reference.sh`. CI fails if the two drift apart.
+
 ## By goal
 
 | I want to... | Read |
@@ -29,5 +35,6 @@ Start here. Each document is small and problem-scoped; this page is the index.
 | Understand the internals | [architecture.md](architecture.md) |
 | Run it on agent-substrate | [substrate-conformance.md](substrate-conformance.md) |
 | Operate and debug it | [observability.md](observability.md) |
+| Look up a message, field, or RPC | [api-reference.md](api-reference.md) |
 
 For the project overview and status, see the [root README](../README.md).
