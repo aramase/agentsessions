@@ -326,21 +326,27 @@ func cmdFork(args []string) error {
 	var sess string
 	var at int64
 	var count int
+	var names string
 	fs.StringVar(&sess, "session", "", "parent session UID")
 	fs.Int64Var(&at, "at", 0, "fork at this seq (0 = head)")
 	fs.IntVar(&count, "count", 1, "number of children")
+	fs.StringVar(&names, "names", "", "comma-separated display names for the children, in order; must match -count")
 	_ = fs.Parse(args)
 	client, cleanup, err := dial(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	resp, err := client.Fork(context.Background(), &v1.ForkRequest{Session: sess, AtSeq: at, Count: int32(count)})
+	var childNames []string
+	if names != "" {
+		childNames = strings.Split(names, ",")
+	}
+	resp, err := client.Fork(context.Background(), &v1.ForkRequest{Session: sess, AtSeq: at, Count: int32(count), ChildNames: childNames})
 	if err != nil {
 		return err
 	}
 	for _, ch := range resp.GetChildren() {
-		fmt.Printf("child %s parent=%s fork_seq=%d\n", ch.GetMetadata().GetUid(), ch.GetParentUid(), ch.GetForkSeq())
+		fmt.Printf("child %s parent=%s fork_seq=%d name=%s\n", ch.GetMetadata().GetUid(), ch.GetParentUid(), ch.GetForkSeq(), ch.GetMetadata().GetName())
 	}
 	return nil
 }
