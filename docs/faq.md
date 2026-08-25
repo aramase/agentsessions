@@ -108,6 +108,11 @@ What happens to compute depends on the harness's declared resumability:
   Each child is then cloned from that snapshot. The parent is recoverable with `resume`, but it is *not*
   untouched. A memory snapshot captures RAM as of now, so forking at a historical seq is refused.
 
+A child inherits the parent's project, harness and model, and records `parent_uid` and `fork_seq` so
+its lineage survives beyond the fork response. It does not inherit the parent's name: pass
+`--names` (`ForkRequest.child_names`) to label children, or leave them unnamed and render them by
+uid. See [concepts](concepts.md#metadata-and-listing) for why the server does not invent one.
+
 No runtime forks copy-on-write today. On substrate each child is a full snapshot restore, so an N-way
 fan-out costs N restores rather than one shared image — see
 [substrate conformance](substrate-conformance.md#fork-cloning-an-actor-from-a-durable-snapshot).

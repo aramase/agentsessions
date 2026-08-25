@@ -78,6 +78,16 @@ Two fields are derived rather than stored:
   it later died. A backend that can enumerate its own incarnations is the thing that would make this
   exact; reconciling against the runtime is not implemented.
 
+A fork inherits the parent's `project`, `harness` and `model`, because those define the workload and
+a branch of a run is still that run. It does **not** inherit the parent's name. A name is a label the
+caller chose for humans, and copying it makes a listing report N+1 rows that all claim to be the same
+session. Synthesizing one instead (`"<parent> fork 2"`) would push a presentation convention into the
+wire contract, and the counter is wrong as soon as the same parent is forked by two separate calls.
+So a child is unnamed unless the caller names it with `ForkRequest.child_names`, which takes either no
+entries or exactly `count` of them. Lineage is not lost by this: `parent_uid` and `fork_seq` are
+stored on the child, so a caller that wants to show "branched from X" has the structured data to
+build it from and does not need the server to flatten it into a string.
+
 ## Event and the typed log
 
 The session log is a sequence of `Event`s. An event is not an opaque blob: it is typed, so provenance,
