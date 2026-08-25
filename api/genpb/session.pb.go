@@ -1171,10 +1171,21 @@ type ForkRequest struct {
 	Session string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
 	// 0 = HEAD. A REQUIRES_MEMORY_SNAPSHOT harness forks by cloning a memory snapshot, which captures
 	// RAM as of now, so it accepts only HEAD; a historical seq is FAILED_PRECONDITION.
-	AtSeq         int64             `protobuf:"varint,2,opt,name=at_seq,json=atSeq,proto3" json:"at_seq,omitempty"`
-	Count         int32             `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`      // fan-out N children; must be 1..128, else INVALID_ARGUMENT
-	Identity      *IdentityRef      `protobuf:"bytes,4,opt,name=identity,proto3" json:"identity,omitempty"` // optional child principal
-	Labels        map[string]string `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	AtSeq    int64             `protobuf:"varint,2,opt,name=at_seq,json=atSeq,proto3" json:"at_seq,omitempty"`
+	Count    int32             `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`      // fan-out N children; must be 1..128, else INVALID_ARGUMENT
+	Identity *IdentityRef      `protobuf:"bytes,4,opt,name=identity,proto3" json:"identity,omitempty"` // optional child principal
+	Labels   map[string]string `protobuf:"bytes,5,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Display names for the children, in the order they are returned. Length must be 0 or exactly
+	// count, else INVALID_ARGUMENT.
+	//
+	// Left unset, a child's name is empty rather than a copy of the parent's. A fork inherits the
+	// parent's workload (project, harness, model) because that is what defines the run, but a name is
+	// a caller-supplied label the server has no basis to invent. Copying it makes a listing report N+1
+	// rows that claim to be the same session, and synthesizing one ("<parent> fork 2") would put a
+	// presentation convention in the wire contract and be wrong the moment the same parent is forked
+	// by two separate calls. Lineage is already on the child as parent_uid and fork_seq, so a caller
+	// that wants a derived label can render one without the server denormalizing it into a string.
+	ChildNames    []string `protobuf:"bytes,6,rep,name=child_names,json=childNames,proto3" json:"child_names,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1240,6 +1251,13 @@ func (x *ForkRequest) GetIdentity() *IdentityRef {
 func (x *ForkRequest) GetLabels() map[string]string {
 	if x != nil {
 		return x.Labels
+	}
+	return nil
+}
+
+func (x *ForkRequest) GetChildNames() []string {
+	if x != nil {
+		return x.ChildNames
 	}
 	return nil
 }
@@ -1639,13 +1657,15 @@ const file_session_proto_rawDesc = "" +
 	"\asession\x18\x01 \x01(\tR\asession\"=\n" +
 	"\rResumeRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12\x12\n" +
-	"\x04boot\x18\x02 \x01(\bR\x04boot\"\x8d\x02\n" +
+	"\x04boot\x18\x02 \x01(\bR\x04boot\"\xae\x02\n" +
 	"\vForkRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12\x15\n" +
 	"\x06at_seq\x18\x02 \x01(\x03R\x05atSeq\x12\x14\n" +
 	"\x05count\x18\x03 \x01(\x05R\x05count\x129\n" +
 	"\bidentity\x18\x04 \x01(\v2\x1d.agentsessions.v1.IdentityRefR\bidentity\x12A\n" +
-	"\x06labels\x18\x05 \x03(\v2).agentsessions.v1.ForkRequest.LabelsEntryR\x06labels\x1a9\n" +
+	"\x06labels\x18\x05 \x03(\v2).agentsessions.v1.ForkRequest.LabelsEntryR\x06labels\x12\x1f\n" +
+	"\vchild_names\x18\x06 \x03(\tR\n" +
+	"childNames\x1a9\n" +
 	"\vLabelsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"E\n" +
