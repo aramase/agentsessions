@@ -102,7 +102,15 @@ parent is untouched. (A `REQUIRES_MEMORY_SNAPSHOT` harness checkpoints the paren
 ```
 
 ```
-child sess-c63948fb24b628057b7b0920 parent=sess-6ff29e8d93d3a4c65f6f38bc fork_seq=4
+child sess-c63948fb24b628057b7b0920 parent=sess-6ff29e8d93d3a4c65f6f38bc fork_seq=4 name=
+```
+
+A child is unnamed unless you name it. It inherits the parent's project, harness and model, but not
+its label, so a listing does not fill up with rows that all read the same thing. Use `--names` to
+label a fan-out, one comma-separated name per child:
+
+```bash
+/tmp/agentctl fork --journal /tmp/qs.db --session "$SID" --at 4 --count 2 --names "optimistic,pessimistic"
 ```
 
 Replay the child: it carries the parent's first four events, plus a `LIFECYCLE` record marking the fork.
