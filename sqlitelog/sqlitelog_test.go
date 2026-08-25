@@ -271,8 +271,10 @@ func TestOpenWaitsOutAConcurrentInitializer(t *testing.T) {
 	defer holder.Close()
 	holder.SetMaxOpenConns(1)
 	if _, err := holder.Exec(`CREATE TABLE sessions (
-	  session TEXT PRIMARY KEY,
-	  fence   INTEGER NOT NULL DEFAULT 0
+	  session    TEXT PRIMARY KEY,
+	  fence      INTEGER NOT NULL DEFAULT 0,
+	  project    TEXT    NOT NULL DEFAULT '',
+	  created_at INTEGER NOT NULL DEFAULT 0
 	)`); err != nil {
 		t.Fatalf("holder schema: %v", err)
 	}

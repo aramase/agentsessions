@@ -43,8 +43,17 @@ func isConstraint(err error) bool {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS sessions (
-  session TEXT PRIMARY KEY,
-  fence   INTEGER NOT NULL DEFAULT 0
+  session       TEXT PRIMARY KEY,
+  fence         INTEGER NOT NULL DEFAULT 0,
+  project       TEXT    NOT NULL DEFAULT '',
+  name          TEXT    NOT NULL DEFAULT '',
+  harness       TEXT    NOT NULL DEFAULT '',
+  model         TEXT    NOT NULL DEFAULT '',
+  parent_uid    TEXT    NOT NULL DEFAULT '',
+  fork_seq      INTEGER NOT NULL DEFAULT 0,
+  compute_state TEXT    NOT NULL DEFAULT '',
+  created_at    INTEGER NOT NULL DEFAULT 0,
+  updated_at    INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS events (
   session   TEXT    NOT NULL,
@@ -54,11 +63,33 @@ CREATE TABLE IF NOT EXISTS events (
   fence     INTEGER NOT NULL,
   event     BLOB    NOT NULL,
   PRIMARY KEY (session, seq)
-);`
+);
+CREATE INDEX IF NOT EXISTS sessions_project_created
+  ON sessions(project, created_at DESC, session);`
+
+// DefaultProject is the tenant a session lands in when none is supplied. A session is never stored
+// with an empty project: a listing filters on an exact project, so a project-less row would be
+// invisible to every caller that asks for a real one.
+const DefaultProject = "default"
+
+type options struct{ defaultProject string }
+
+// Option configures a Store at Open.
+type Option func(*options)
+
+// WithDefaultProject sets the tenant used for sessions created without one.
+func WithDefaultProject(project string) Option {
+	return func(o *options) {
+		if project != "" {
+			o.defaultProject = project
+		}
+	}
+}
 
 // Store is a durable, multi-session event log over a single sqlite database.
 type Store struct {
-	db *sql.DB
+	db             *sql.DB
+	defaultProject string
 }
 
 // Open opens (creating if needed) the sqlite database at path and applies the schema. Use
@@ -70,7 +101,11 @@ type Store struct {
 // Durability boundary: a *committed* append survives process death and power loss. A crash
 // mid-append (before commit) drops only that uncommitted event, which is re-driven on resume
 // (determinism contract I3/I4). TestPersistenceAcrossReopen proves the clean-restart case.
-func Open(path string) (*Store, error) {
+func Open(path string, opts ...Option) (*Store, error) {
+	cfg := options{defaultProject: DefaultProject}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	dsn := path
 	if path != ":memory:" && !strings.Contains(path, "?") && !strings.HasPrefix(path, "file:") {
 		dsn = "file:" + path + "?_txlock=immediate"
@@ -82,16 +117,19 @@ func Open(path string) (*Store, error) {
 	// One connection: guarantees a ":memory:" DB is a single shared instance (a pooled second
 	// connection would otherwise get its own empty DB), and serializes the single writer.
 	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{
-		busyTimeoutPragma,
-		"PRAGMA synchronous=FULL",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("sqlitelog: %q: %w", pragma, err)
-		}
+	if _, err := db.Exec(busyTimeoutPragma); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("sqlitelog: %q: %w", busyTimeoutPragma, err)
 	}
 	if err := setWALMode(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec("PRAGMA synchronous=FULL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("sqlitelog: %q: %w", "PRAGMA synchronous=FULL", err)
+	}
+	if err := checkSchema(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -99,7 +137,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("sqlitelog: schema: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, defaultProject: cfg.defaultProject}, nil
 }
 
 // Close closes the underlying database.
@@ -107,7 +145,7 @@ func (s *Store) Close() error { return s.db.Close() }
 
 const (
 	// busyTimeoutPragma makes ordinary statements wait for a contended write lock instead of
-	// failing immediately with SQLITE_BUSY.
+	// failing immediately.
 	busyTimeoutPragma = "PRAGMA busy_timeout=5000"
 	// walSwitchBudget bounds setWALMode's own retry loop, matching busyTimeoutPragma.
 	walSwitchBudget  = 5 * time.Second
@@ -176,10 +214,16 @@ func (l *Log) Head() (int64, error) {
 // over; appends carrying an older token are rejected with eventlog.ErrFenced.
 func (l *Log) NewFence() (int64, error) {
 	var fence int64
+	now := time.Now().UnixNano()
 	err := l.store.db.QueryRow(
-		`INSERT INTO sessions(session, fence) VALUES(?, 1)
-		 ON CONFLICT(session) DO UPDATE SET fence = fence + 1
-		 RETURNING fence`, l.session,
+		`INSERT INTO sessions(session, fence, project, created_at, updated_at)
+		 VALUES(?, 1, ?, ?, ?)
+		 ON CONFLICT(session) DO UPDATE SET
+		   fence      = sessions.fence + 1,
+		   project    = CASE WHEN sessions.project = '' THEN excluded.project ELSE sessions.project END,
+		   created_at = CASE WHEN sessions.created_at = 0 THEN excluded.created_at ELSE sessions.created_at END,
+		   updated_at = excluded.updated_at
+		 RETURNING fence`, l.session, l.store.defaultProject, now, now,
 	).Scan(&fence)
 	return fence, err
 }
@@ -244,10 +288,52 @@ func (l *Log) Append(expectedLastSeq, fence int64, ev api.Event) (eventlog.Recor
 		}
 		return eventlog.Record{}, err
 	}
+	if err := touchSession(tx, l.session, l.store.defaultProject, ev); err != nil {
+		return eventlog.Record{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return eventlog.Record{}, err
 	}
 	return eventlog.Record{Seq: seq, PrevHash: prev, Hash: hash, Fence: fence, Event: ev}, nil
+}
+
+// touchSession keeps the session's metadata row in step with its log, inside Append's transaction.
+//
+// It does two things. First, it guarantees the row exists: Append does not require one, so a
+// session driven straight through the log — a direct Exec, a fork child, a caller that never took a
+// fence — would otherwise have events but no metadata and be invisible to a listing. Second, when
+// the committed event is a lifecycle transition, it advances the compute-state projection.
+//
+// The projection exists because events.event is an opaque blob that no query can filter on
+// lifecycle kind, so a listing cannot fold the log itself. Running in the same transaction that
+// commits the event is what keeps it from drifting: there is no window in which the log records a
+// suspend that the projection missed, and every existing writer gets it for free because they all
+// reach the log through Append.
+//
+// On conflict it touches only what it owns. compute_state moves only for an event that implies one,
+// so a marker that says nothing about the incarnation cannot reset a suspended session to NONE;
+// project and created_at are filled only when still unset, so an explicit PutSession is never
+// overwritten by later log activity.
+func touchSession(tx *sql.Tx, session, defaultProject string, ev api.Event) error {
+	state, moves := eventComputeState(ev)
+	if !moves {
+		state = api.ComputeNone
+	}
+	now := time.Now().UnixNano()
+	_, err := tx.Exec(
+		`INSERT INTO sessions(session, fence, project, compute_state, created_at, updated_at)
+		 VALUES(?, 0, ?, ?, ?, ?)
+		 ON CONFLICT(session) DO UPDATE SET
+		   compute_state = CASE WHEN ? THEN excluded.compute_state ELSE sessions.compute_state END,
+		   project       = CASE WHEN sessions.project = '' THEN excluded.project ELSE sessions.project END,
+		   created_at    = CASE WHEN sessions.created_at = 0 THEN excluded.created_at ELSE sessions.created_at END,
+		   updated_at    = excluded.updated_at`,
+		session, defaultProject, string(state), now, now, moves,
+	)
+	if err != nil {
+		return fmt.Errorf("sqlitelog: touch session %q: %w", session, err)
+	}
+	return nil
 }
 
 // Read returns all records with seq >= fromSeq, in order. It returns the stored hashes verbatim
