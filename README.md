@@ -86,6 +86,8 @@ Full docs live in [`docs/`](docs/README.md):
 - [**Running on agent-substrate**](docs/substrate-conformance.md): both capability tiers, green in CI.
 - [**Observability**](docs/observability.md): structured request-flow logs and correlation.
 - [**FAQ**](docs/faq.md): what this is, what it is not, and how it behaves.
+- [**API reference**](docs/api-reference.md): every message, field, enum, and RPC in
+  `agentsessions.v1`, generated from the `.proto` comments.
 
 ## Repo layout
 

@@ -1,0 +1,14 @@
+# Generates the human-readable API reference (docs/api-reference.md) from the .proto
+# comments, so the published reference cannot drift from the schema it documents.
+#
+# This is a SEPARATE template from buf.gen.yaml on purpose: that one sets `clean: true`,
+# which deletes each plugin's output directory before generating. Pointing a docs plugin at
+# `out: docs` from there would delete the entire hand-written docs/ tree.
+version: v2
+plugins:
+  # Pinned remote plugin (not a local $PATH binary) so the generated reference is
+  # reproducible across machines and CI, matching how buf.gen.yaml pins codegen.
+  - remote: buf.build/community/pseudomuto-doc:v1.5.1
+    out: docs
+    opt:
+      - markdown,api-reference.md

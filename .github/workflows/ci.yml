@@ -33,6 +33,15 @@ jobs:
           git add -N api/genpb
           git diff --exit-code -- api/genpb
 
+      # The published API reference is generated from the same .proto comments, so a schema
+      # change that skips regeneration would ship a reference contradicting the contract.
+      # Same intent-to-add trick as the gate above.
+      - name: api reference is current
+        run: |
+          ./hack/gen-api-reference.sh
+          git add -N docs/api-reference.md
+          git diff --exit-code -- docs/api-reference.md
+
       # Proto contract gates for the neutral schema: style + backward compatibility. The breaking gate
       # compares the change against the PR's base branch so an incompatible schema edit fails the build.
       # It must name a REMOTE-TRACKING ref: actions/checkout leaves no local branch for the base, so
