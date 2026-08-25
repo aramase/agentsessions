@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 	sqlite "modernc.org/sqlite"
@@ -82,14 +83,17 @@ func Open(path string) (*Store, error) {
 	// connection would otherwise get its own empty DB), and serializes the single writer.
 	db.SetMaxOpenConns(1)
 	for _, pragma := range []string{
-		"PRAGMA busy_timeout=5000", // set first so the WAL-mode switch below waits for the lock
-		"PRAGMA journal_mode=WAL",
+		busyTimeoutPragma,
 		"PRAGMA synchronous=FULL",
 	} {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("sqlitelog: %q: %w", pragma, err)
 		}
+	}
+	if err := setWALMode(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -100,6 +104,52 @@ func Open(path string) (*Store, error) {
 
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
+
+const (
+	// busyTimeoutPragma makes ordinary statements wait for a contended write lock instead of
+	// failing immediately with SQLITE_BUSY.
+	busyTimeoutPragma = "PRAGMA busy_timeout=5000"
+	// walSwitchBudget bounds setWALMode's own retry loop, matching busyTimeoutPragma.
+	walSwitchBudget  = 5 * time.Second
+	walSwitchBackoff = 2 * time.Millisecond
+)
+
+// setWALMode puts the database in WAL journaling mode.
+//
+// busy_timeout does not cover this statement. Sqlite does not run the busy handler for the
+// journal-mode switch, which needs a database-wide exclusive lock and returns SQLITE_BUSY the
+// moment another connection holds the write lock. Measured against a held write transaction: the
+// switch fails after ~90µs, while a plain INSERT on the same connection waits the full 5s timeout.
+// Concurrent openers of one database therefore need explicit handling here.
+//
+// Reading the current mode takes no lock at all, so an already-WAL database — every reopen after
+// the first, which is the case that matters for a restarting pod — skips the exclusive lock
+// entirely. Only openers racing to initialize a fresh database can still collide, bounded by the
+// winner's schema creation, so retry that within the same budget ordinary statements get.
+func setWALMode(db *sql.DB) error {
+	deadline := time.Now().Add(walSwitchBudget)
+	for delay := walSwitchBackoff; ; delay *= 2 {
+		var mode string
+		if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+			return fmt.Errorf("sqlitelog: read journal mode: %w", err)
+		}
+		if strings.EqualFold(mode, "wal") {
+			return nil
+		}
+		// An in-memory database cannot be WAL and reports "memory"; the switch is a no-op there
+		// rather than an error, so this returns on the first attempt.
+		_, err := db.Exec("PRAGMA journal_mode=WAL")
+		if err == nil {
+			return nil
+		}
+		if remaining := time.Until(deadline); remaining <= 0 {
+			return fmt.Errorf("sqlitelog: %q: %w", "PRAGMA journal_mode=WAL", err)
+		} else if delay > remaining {
+			delay = remaining
+		}
+		time.Sleep(delay)
+	}
+}
 
 // Session returns a handle to one session's append-only chain.
 func (s *Store) Session(uid string) *Log { return &Log{store: s, session: uid} }

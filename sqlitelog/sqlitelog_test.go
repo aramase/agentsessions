@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -252,5 +253,62 @@ func TestNoRawErrorUnderContention(t *testing.T) {
 		if !errors.Is(err, eventlog.ErrConflict) && !errors.Is(err, eventlog.ErrFenced) {
 			t.Fatalf("raw error leaked (want ErrConflict/ErrFenced): %v", err)
 		}
+	}
+}
+
+// TestOpenWaitsOutAConcurrentInitializer pins the retry in setWALMode. Sqlite does not run the
+// busy handler for PRAGMA journal_mode, so a second opener racing the process that is creating the
+// schema used to fail instantly with SQLITE_BUSY instead of waiting like every other statement.
+func TestOpenWaitsOutAConcurrentInitializer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "contended.db")
+
+	// Stand in for an opener that has created the schema and still holds the write lock, on a
+	// database that is not in WAL mode yet.
+	holder, err := sql.Open("sqlite", "file:"+path+"?_txlock=immediate")
+	if err != nil {
+		t.Fatalf("open holder: %v", err)
+	}
+	defer holder.Close()
+	holder.SetMaxOpenConns(1)
+	if _, err := holder.Exec(`CREATE TABLE sessions (
+	  session TEXT PRIMARY KEY,
+	  fence   INTEGER NOT NULL DEFAULT 0
+	)`); err != nil {
+		t.Fatalf("holder schema: %v", err)
+	}
+	tx, err := holder.Begin()
+	if err != nil {
+		t.Fatalf("holder begin: %v", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO sessions(session, fence) VALUES ('held', 1)`); err != nil {
+		t.Fatalf("holder write: %v", err)
+	}
+
+	opened := make(chan error, 1)
+	go func() {
+		s, err := sqlitelog.Open(path)
+		if err == nil {
+			t.Cleanup(func() { s.Close() })
+		}
+		opened <- err
+	}()
+
+	// Long enough that an unretried journal_mode switch (measured at ~90µs) has certainly run.
+	select {
+	case err := <-opened:
+		t.Fatalf("Open returned while the write lock was held: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("holder commit: %v", err)
+	}
+	select {
+	case err := <-opened:
+		if err != nil {
+			t.Fatalf("Open after the write lock was released: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Open did not return after the write lock was released")
 	}
 }
