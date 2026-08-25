@@ -157,6 +157,17 @@ message ForkRequest {
   int32 count = 3;          // fan-out N children; must be 1..128, else INVALID_ARGUMENT
   IdentityRef identity = 4; // optional child principal
   map<string, string> labels = 5;
+  // Display names for the children, in the order they are returned. Length must be 0 or exactly
+  // count, else INVALID_ARGUMENT.
+  //
+  // Left unset, a child's name is empty rather than a copy of the parent's. A fork inherits the
+  // parent's workload (project, harness, model) because that is what defines the run, but a name is
+  // a caller-supplied label the server has no basis to invent. Copying it makes a listing report N+1
+  // rows that claim to be the same session, and synthesizing one ("<parent> fork 2") would put a
+  // presentation convention in the wire contract and be wrong the moment the same parent is forked
+  // by two separate calls. Lineage is already on the child as parent_uid and fork_seq, so a caller
+  // that wants a derived label can render one without the server denormalizing it into a string.
+  repeated string child_names = 6;
 }
 message ForkResponse { repeated Session children = 1; }
 
