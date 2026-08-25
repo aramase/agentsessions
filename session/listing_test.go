@@ -418,3 +418,104 @@ func TestCreateSessionDefaultsProject(t *testing.T) {
 		t.Fatalf("list with no project = %v, want the default project's sessions", got)
 	}
 }
+
+// A fork inherits the workload but not the label. Copying the parent's name made a listing report
+// N+1 rows all claiming to be the same session, distinguishable only by uid.
+func TestForkChildrenDoNotInheritTheParentName(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+
+	parent, err := client.CreateSession(ctx, &v1.CreateSessionRequest{
+		Session: &v1.Session{
+			Metadata: &v1.ResourceMetadata{Project: "acme", Name: "planning agent"},
+			Model:    "echo-1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forked, err := client.Fork(ctx, &v1.ForkRequest{Session: parent.GetMetadata().GetUid(), Count: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, child := range forked.GetChildren() {
+		got, err := client.GetSession(ctx, &v1.GetSessionRequest{Uid: child.GetMetadata().GetUid()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name := got.GetMetadata().GetName(); name != "" {
+			t.Errorf("child name = %q, want it empty rather than a copy of the parent's", name)
+		}
+		// The workload still follows the parent; only the label is dropped.
+		if got.GetModel() != "echo-1" {
+			t.Errorf("child model = %q, want it inherited as echo-1", got.GetModel())
+		}
+	}
+}
+
+// Naming children is the caller's job, so the names it supplies must land on the children in the
+// order they are returned.
+func TestForkAppliesCallerSuppliedChildNames(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+
+	parent, err := client.CreateSession(ctx, &v1.CreateSessionRequest{
+		Session: &v1.Session{Metadata: &v1.ResourceMetadata{Project: "acme", Name: "base"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"optimistic branch", "pessimistic branch"}
+	forked, err := client.Fork(ctx, &v1.ForkRequest{
+		Session:    parent.GetMetadata().GetUid(),
+		Count:      2,
+		ChildNames: want,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, child := range forked.GetChildren() {
+		if got := child.GetMetadata().GetName(); got != want[i] {
+			t.Errorf("child %d name = %q, want %q", i, got, want[i])
+		}
+		// Re-read so this proves the name was persisted, not just echoed in the response.
+		stored, err := client.GetSession(ctx, &v1.GetSessionRequest{Uid: child.GetMetadata().GetUid()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := stored.GetMetadata().GetName(); got != want[i] {
+			t.Errorf("child %d name after reload = %q, want %q", i, got, want[i])
+		}
+	}
+}
+
+// A name/count mismatch is rejected before anything is provisioned, so a caller never ends up with
+// children it could not name.
+func TestForkRejectsChildNameCountMismatch(t *testing.T) {
+	client := newClient(t)
+	ctx := context.Background()
+
+	parent, err := client.CreateSession(ctx, &v1.CreateSessionRequest{
+		Session: &v1.Session{Metadata: &v1.ResourceMetadata{Project: "acme", Name: "base"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentUID := parent.GetMetadata().GetUid()
+	_, err = client.Fork(ctx, &v1.ForkRequest{
+		Session:    parentUID,
+		Count:      3,
+		ChildNames: []string{"only one"},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("fork with mismatched child_names = %v, want InvalidArgument", err)
+	}
+	// Nothing was provisioned, so the parent is still the only session in the project.
+	resp, err := client.ListSessions(ctx, &v1.ListSessionsRequest{Project: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(resp.GetSessions()); got != 1 {
+		t.Fatalf("list returned %d sessions, want only the parent", got)
+	}
+}
