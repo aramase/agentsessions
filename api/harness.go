@@ -90,17 +90,23 @@ type EventSink interface {
 	// replay rule. Reasoning parts ride in the returned ModelResponse.Message and are
 	// recorded verbatim for replay/fork continuity (I2). The completion is recorded as the
 	// turn's output by the host; do not also emit the same content via Output (double-record).
-	Model(ModelRequest) (ModelResponse, error)
+	//
+	// ctx carries the execution's cancellation and deadline through to the provider call, so
+	// a cancelled turn stops an in-flight completion instead of orphaning it. Pass the ctx
+	// from Run, or one derived from it.
+	Model(ctx context.Context, req ModelRequest) (ModelResponse, error)
 	// Output streams assistant output (a delta or a full message).
-	Output(delta string) error
+	Output(ctx context.Context, delta string) error
 	// ToolCall emits a tool call and returns its result. For CONTROLLER_MEDIATED or
 	// REQUIRES_APPROVAL tools it blocks until the host returns a result; for
 	// IN_HARNESS_REPORTED tools the author executes the tool and calls Report instead.
-	ToolCall(ToolCall) (ToolResult, error)
+	// ctx bounds that wait: a cancelled ctx unblocks it rather than hanging on a host that
+	// never replies.
+	ToolCall(ctx context.Context, tc ToolCall) (ToolResult, error)
 	// Report records the result of a tool the harness executed itself.
-	Report(ToolResult) error
+	Report(ctx context.Context, tr ToolResult) error
 	// Usage records token/cost accounting.
-	Usage(Usage) error
+	Usage(ctx context.Context, u Usage) error
 }
 
 // ModelRequest is a model call: the message context + model selection.

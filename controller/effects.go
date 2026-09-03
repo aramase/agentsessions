@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -19,14 +20,14 @@ var _ api.EventSink = (*liveSink)(nil)
 //
 // Footgun: the completion is ALREADY recorded as the output here. A harness that also calls
 // Output() with the same content double-records it; use Output() only for additional/streamed text.
-func (s *liveSink) Model(req api.ModelRequest) (api.ModelResponse, error) {
+func (s *liveSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 	if _, err := s.c.appendSeq(api.Event{
 		Kind:      api.EventModelCall,
 		ModelCall: &api.ModelCall{Model: req.Model, InputHash: hashModelInput(req), ID: newID()},
 	}); err != nil {
 		return api.ModelResponse{}, err
 	}
-	resp, err := s.c.model(req)
+	resp, err := s.c.model(ctx, req)
 	if err != nil {
 		return api.ModelResponse{}, err
 	}
@@ -38,12 +39,12 @@ func (s *liveSink) Model(req api.ModelRequest) (api.ModelResponse, error) {
 	return resp, nil
 }
 
-func (s *liveSink) Output(delta string) error {
+func (s *liveSink) Output(_ context.Context, delta string) error {
 	_, err := s.c.appendSeq(api.Event{Kind: api.EventOutput, Message: api.TextMessage("assistant", delta)})
 	return err
 }
 
-func (s *liveSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
+func (s *liveSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
 	call := tc
 	// ToolCall is the HOST-EXECUTED path. Branch on the mediation tier up front, before recording,
 	// so nothing the controller cannot safely run reaches execTool:
@@ -68,20 +69,20 @@ func (s *liveSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
 	if _, err := s.c.appendSeq(api.Event{Kind: api.EventToolCall, ToolCall: &call}); err != nil {
 		return api.ToolResult{}, err
 	}
-	return s.execTool(call)
+	return s.execTool(ctx, call)
 }
 
 // execTool runs a controller-mediated tool and write-ahead records its TOOL_RESULT. The TOOL_CALL
 // intent MUST already be recorded by the caller — execTool performs only phases 2 and 3 of §3
 // (execute, then append the result), so it is reused verbatim on crash-recovery, where the intent
 // is already durable in the journal.
-func (s *liveSink) execTool(call api.ToolCall) (api.ToolResult, error) {
+func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolResult, error) {
 	if s.c.tool == nil {
 		// ToolCall is the controller-mediated path; without an executor it is a misconfiguration
 		// (in-harness-reported tools use Report instead).
 		return api.ToolResult{}, errors.New("controller: no tool executor configured")
 	}
-	res, err := s.c.tool(call)
+	res, err := s.c.tool(ctx, call)
 	if err != nil {
 		return api.ToolResult{}, err
 	}
@@ -94,13 +95,13 @@ func (s *liveSink) execTool(call api.ToolCall) (api.ToolResult, error) {
 	return result, nil
 }
 
-func (s *liveSink) Report(tr api.ToolResult) error {
+func (s *liveSink) Report(_ context.Context, tr api.ToolResult) error {
 	res := tr
 	_, err := s.c.appendSeq(api.Event{Kind: api.EventToolResult, Result: &res})
 	return err
 }
 
-func (s *liveSink) Usage(u api.Usage) error {
+func (s *liveSink) Usage(_ context.Context, u api.Usage) error {
 	usage := u
 	_, err := s.c.appendSeq(api.Event{Kind: api.EventUsage, Usage: &usage})
 	return err
@@ -126,7 +127,7 @@ func (s *replaySink) nextOf(kind api.EventKind) (api.Event, bool) {
 	return ev, true
 }
 
-func (s *replaySink) Model(req api.ModelRequest) (api.ModelResponse, error) {
+func (s *replaySink) Model(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 	mc, ok := s.nextOf(api.EventModelCall)
 	if !ok {
 		return api.ModelResponse{}, errors.New("replay: expected a recorded model call, found none")
@@ -146,7 +147,7 @@ func (s *replaySink) Model(req api.ModelRequest) (api.ModelResponse, error) {
 	return api.ModelResponse{Message: msg}, nil
 }
 
-func (s *replaySink) Output(delta string) error {
+func (s *replaySink) Output(_ context.Context, delta string) error {
 	ev, ok := s.nextOf(api.EventOutput)
 	if !ok {
 		return errors.New("replay: unexpected output (no matching recorded event)")
@@ -165,7 +166,7 @@ func (s *replaySink) Output(delta string) error {
 	return nil
 }
 
-func (s *replaySink) ToolCall(api.ToolCall) (api.ToolResult, error) {
+func (s *replaySink) ToolCall(context.Context, api.ToolCall) (api.ToolResult, error) {
 	if _, ok := s.nextOf(api.EventToolCall); !ok {
 		return api.ToolResult{}, errors.New("replay: expected a recorded tool call, found none")
 	}
@@ -179,7 +180,7 @@ func (s *replaySink) ToolCall(api.ToolCall) (api.ToolResult, error) {
 	return *tr.Result, nil
 }
 
-func (s *replaySink) Report(api.ToolResult) error {
+func (s *replaySink) Report(context.Context, api.ToolResult) error {
 	if _, ok := s.nextOf(api.EventToolResult); !ok {
 		return errors.New("replay: unexpected report (no matching recorded event)")
 	}
@@ -187,4 +188,4 @@ func (s *replaySink) Report(api.ToolResult) error {
 }
 
 // Usage is auxiliary accounting and not part of the served effect stream, so replay ignores it.
-func (s *replaySink) Usage(api.Usage) error { return nil }
+func (s *replaySink) Usage(context.Context, api.Usage) error { return nil }

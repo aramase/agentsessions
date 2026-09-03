@@ -101,7 +101,7 @@ func (s *resumeSink) recordedNext(kind api.EventKind) (api.Event, bool) {
 	return ev, true
 }
 
-func (s *resumeSink) Model(req api.ModelRequest) (api.ModelResponse, error) {
+func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 	if s.i < len(s.stream) {
 		mc, ok := s.recordedNext(api.EventModelCall)
 		if !ok {
@@ -120,10 +120,10 @@ func (s *resumeSink) Model(req api.ModelRequest) (api.ModelResponse, error) {
 		}
 		return api.ModelResponse{Message: msg}, nil // served — model NOT re-invoked
 	}
-	return s.live.Model(req) // past the crash point: first-ever execution
+	return s.live.Model(ctx, req) // past the crash point: first-ever execution
 }
 
-func (s *resumeSink) Output(delta string) error {
+func (s *resumeSink) Output(ctx context.Context, delta string) error {
 	if s.i < len(s.stream) {
 		out, ok := s.recordedNext(api.EventOutput)
 		if !ok {
@@ -138,10 +138,10 @@ func (s *resumeSink) Output(delta string) error {
 		}
 		return nil
 	}
-	return s.live.Output(delta)
+	return s.live.Output(ctx, delta)
 }
 
-func (s *resumeSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
+func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
 	if s.i < len(s.stream) {
 		call, ok := s.recordedNext(api.EventToolCall)
 		if !ok {
@@ -161,24 +161,24 @@ func (s *resumeSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
 		if call.ToolCall == nil {
 			return api.ToolResult{}, errors.New("resume: recorded tool call missing its payload")
 		}
-		return s.live.execTool(*call.ToolCall)
+		return s.live.execTool(ctx, *call.ToolCall)
 	}
-	return s.live.ToolCall(tc)
+	return s.live.ToolCall(ctx, tc)
 }
 
-func (s *resumeSink) Report(tr api.ToolResult) error {
+func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
 	if s.i < len(s.stream) {
 		if _, ok := s.recordedNext(api.EventToolResult); !ok {
 			return errors.New("resume: recorded stream diverged (expected tool result)")
 		}
 		return nil
 	}
-	return s.live.Report(tr)
+	return s.live.Report(ctx, tr)
 }
 
-func (s *resumeSink) Usage(u api.Usage) error {
+func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
 	if s.i >= len(s.stream) {
-		return s.live.Usage(u)
+		return s.live.Usage(ctx, u)
 	}
 	return nil // usage is not part of the served effect stream
 }

@@ -11,13 +11,18 @@ import (
 // captureSink records Output deltas; the counter only ever calls Output.
 type captureSink struct{ outputs []string }
 
-func (s *captureSink) Model(api.ModelRequest) (api.ModelResponse, error) {
+func (s *captureSink) Model(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 	return api.ModelResponse{}, nil
 }
-func (s *captureSink) Output(delta string) error                     { s.outputs = append(s.outputs, delta); return nil }
-func (s *captureSink) ToolCall(api.ToolCall) (api.ToolResult, error) { return api.ToolResult{}, nil }
-func (s *captureSink) Report(api.ToolResult) error                   { return nil }
-func (s *captureSink) Usage(api.Usage) error                         { return nil }
+func (s *captureSink) Output(_ context.Context, delta string) error {
+	s.outputs = append(s.outputs, delta)
+	return nil
+}
+func (s *captureSink) ToolCall(context.Context, api.ToolCall) (api.ToolResult, error) {
+	return api.ToolResult{}, nil
+}
+func (s *captureSink) Report(context.Context, api.ToolResult) error { return nil }
+func (s *captureSink) Usage(context.Context, api.Usage) error       { return nil }
 
 func TestCounterIncrementsInRAM(t *testing.T) {
 	h := &Harness{}

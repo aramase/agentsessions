@@ -33,7 +33,7 @@ func (Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error 
 	if n := len(s.Inputs); n > 0 {
 		text = s.Inputs[n-1].Text()
 	}
-	_, err := sink.Model(api.ModelRequest{
+	_, err := sink.Model(ctx, api.ModelRequest{
 		Model:    "echo",
 		Messages: []api.Message{*api.TextMessage("user", text)},
 	})
@@ -43,7 +43,7 @@ func (Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error 
 // Model is the echo "model": it returns the last message text prefixed with "echo:". It stands in
 // for a real model provider; on replay the host serves the recorded completion instead of calling
 // this.
-func Model(req api.ModelRequest) (api.ModelResponse, error) {
+func Model(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 	last := ""
 	if n := len(req.Messages); n > 0 {
 		last = req.Messages[n-1].Text()

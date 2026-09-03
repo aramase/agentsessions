@@ -46,13 +46,18 @@ var ErrUnmediatedToolCall = errors.New("controller: ToolCall requires a host-med
 
 // ModelFunc performs a live model invocation. It is the nondeterministic op the controller records
 // on the live path and serves from the journal on replay.
-type ModelFunc func(api.ModelRequest) (api.ModelResponse, error)
+//
+// ctx is the execution's context: it carries cancellation, the turn deadline, and request
+// correlation, so a provider implementation can abort an in-flight completion when the turn is
+// cancelled rather than running to completion against a caller that has gone away.
+type ModelFunc func(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error)
 
 // ToolFunc executes a CONTROLLER_MEDIATED tool. The host calls it between appending the TOOL_CALL
 // intent and appending the TOOL_RESULT (the two-phase write-ahead of §3/I3). It receives the call's
 // IdempotencyKey and owns tool-side deduplication: on crash-recovery the host re-executes the same
-// call under the same key, and an idempotent tool MUST NOT repeat the external effect.
-type ToolFunc func(api.ToolCall) (api.ToolResult, error)
+// call under the same key, and an idempotent tool MUST NOT repeat the external effect. ctx carries
+// the execution's cancellation and deadline.
+type ToolFunc func(ctx context.Context, tc api.ToolCall) (api.ToolResult, error)
 
 // Option configures a Controller at construction.
 type Option func(*Controller)

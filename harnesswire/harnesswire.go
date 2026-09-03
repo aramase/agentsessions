@@ -86,7 +86,22 @@ type streamSink struct {
 	results <-chan *v1.ControllerFrame
 }
 
-func (s *streamSink) Model(req api.ModelRequest) (api.ModelResponse, error) {
+// awaitResult blocks for the host's reply frame, honoring cancellation. The ctx arm is what stops a
+// harness hanging forever on a host that never replies: without it a dead or wedged controller
+// leaves the harness parked on a channel receive with no way out.
+func (s *streamSink) awaitResult(ctx context.Context) (*v1.ControllerFrame, error) {
+	select {
+	case frame, ok := <-s.results:
+		if !ok {
+			return nil, io.EOF
+		}
+		return frame, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 	id := newID()
 	ev := &v1.Event{
 		Kind: v1.EventKind_EVENT_MODEL_CALL,
@@ -100,9 +115,9 @@ func (s *streamSink) Model(req api.ModelRequest) (api.ModelResponse, error) {
 	if err := s.stream.Send(ev); err != nil {
 		return api.ModelResponse{}, err
 	}
-	frame, ok := <-s.results
-	if !ok {
-		return api.ModelResponse{}, io.EOF
+	frame, err := s.awaitResult(ctx)
+	if err != nil {
+		return api.ModelResponse{}, err
 	}
 	mr := frame.GetModel()
 	if mr == nil {
@@ -120,7 +135,7 @@ func (s *streamSink) Model(req api.ModelRequest) (api.ModelResponse, error) {
 	return api.ModelResponse{Message: msg}, nil
 }
 
-func (s *streamSink) Output(delta string) error {
+func (s *streamSink) Output(_ context.Context, delta string) error {
 	return s.stream.Send(&v1.Event{
 		Kind: v1.EventKind_EVENT_OUTPUT,
 		Body: &v1.Event_Message{Message: wire.MessageToProto(api.TextMessage("assistant", delta))},
@@ -131,7 +146,7 @@ func (s *streamSink) Output(delta string) error {
 // EVENT_TOOL_CALL (carrying args + idempotency key) and blocks for the host's ToolResult frame. The
 // host — not the harness — executes and records the tool (record-before-effect, §3), exactly as it
 // mediates a model call, so the load-bearing rule holds across the process boundary.
-func (s *streamSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
+func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
 	call := tc
 	if err := s.stream.Send(&v1.Event{
 		Kind: v1.EventKind_EVENT_TOOL_CALL,
@@ -139,9 +154,9 @@ func (s *streamSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
 	}); err != nil {
 		return api.ToolResult{}, err
 	}
-	frame, ok := <-s.results
-	if !ok {
-		return api.ToolResult{}, io.EOF
+	frame, err := s.awaitResult(ctx)
+	if err != nil {
+		return api.ToolResult{}, err
 	}
 	tr := frame.GetTool()
 	if tr == nil {
@@ -161,14 +176,14 @@ func (s *streamSink) ToolCall(tc api.ToolCall) (api.ToolResult, error) {
 
 // Report records the result of a tool the harness executed in-sandbox (IN_HARNESS_REPORTED): it
 // emits an EVENT_TOOL_RESULT the host records, mirroring the in-process liveSink.Report.
-func (s *streamSink) Report(tr api.ToolResult) error {
+func (s *streamSink) Report(_ context.Context, tr api.ToolResult) error {
 	res := tr
 	return s.stream.Send(&v1.Event{
 		Kind: v1.EventKind_EVENT_TOOL_RESULT,
 		Body: &v1.Event_Result{Result: wire.ToolResultToProto(&res)},
 	})
 }
-func (s *streamSink) Usage(u api.Usage) error {
+func (s *streamSink) Usage(_ context.Context, u api.Usage) error {
 	return s.stream.Send(&v1.Event{Kind: v1.EventKind_EVENT_USAGE, Body: &v1.Event_Usage{Usage: &v1.Usage{
 		Model: u.Model, InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, ReasoningTokens: u.ReasoningTokens,
 	}}})
@@ -218,7 +233,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 		switch ev.GetKind() {
 		case v1.EventKind_EVENT_MODEL_CALL:
 			mc := ev.GetModel()
-			resp, err := sink.Model(api.ModelRequest{
+			resp, err := sink.Model(ctx, api.ModelRequest{
 				Model:    mc.GetModel(),
 				Params:   mc.GetParams(),
 				Messages: messagesFromProto(mc.GetMessages()),
@@ -234,7 +249,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			}
 		case v1.EventKind_EVENT_OUTPUT:
 			if msg := wire.MessageFromProto(ev.GetMessage()); msg != nil {
-				if err := sink.Output(msg.Text()); err != nil {
+				if err := sink.Output(ctx, msg.Text()); err != nil {
 					return err
 				}
 			}
@@ -243,7 +258,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			if tc == nil {
 				return errors.New("harnesswire: EVENT_TOOL_CALL missing its payload")
 			}
-			res, err := sink.ToolCall(*tc)
+			res, err := sink.ToolCall(ctx, *tc)
 			if err != nil {
 				return err
 			}
@@ -252,13 +267,13 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			}
 		case v1.EventKind_EVENT_TOOL_RESULT:
 			if tr := wire.ToolResultFromProto(ev.GetResult()); tr != nil {
-				if err := sink.Report(*tr); err != nil {
+				if err := sink.Report(ctx, *tr); err != nil {
 					return err
 				}
 			}
 		case v1.EventKind_EVENT_USAGE:
 			if u := ev.GetUsage(); u != nil {
-				_ = sink.Usage(api.Usage{Model: u.GetModel(), InputTokens: u.GetInputTokens(), OutputTokens: u.GetOutputTokens(), ReasoningTokens: u.GetReasoningTokens()})
+				_ = sink.Usage(ctx, api.Usage{Model: u.GetModel(), InputTokens: u.GetInputTokens(), OutputTokens: u.GetOutputTokens(), ReasoningTokens: u.GetReasoningTokens()})
 			}
 		case v1.EventKind_EVENT_END:
 			return endError(ev.GetEnd())

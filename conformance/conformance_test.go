@@ -25,7 +25,7 @@ import (
 // replay guarantee non-trivial — replay must serve the RECORDED answer, not a fresh one.
 type countModel struct{ n int }
 
-func (m *countModel) call(req api.ModelRequest) (api.ModelResponse, error) {
+func (m *countModel) call(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 	m.n++
 	last := ""
 	if k := len(req.Messages); k > 0 {
@@ -72,7 +72,7 @@ func TestReplayReconstructsNondeterministicOutput(t *testing.T) {
 	live, _ := c.Outputs()
 
 	// Prove the model is actually nondeterministic: a direct re-call differs from what was recorded.
-	again, _ := m.call(api.ModelRequest{Model: "echo", Messages: []api.Message{*api.TextMessage("user", "hi")}})
+	again, _ := m.call(t.Context(), api.ModelRequest{Model: "echo", Messages: []api.Message{*api.TextMessage("user", "hi")}})
 	if len(live) != 1 || again.Message.Text() == live[0] {
 		t.Fatalf("model is not nondeterministic (live=%v again=%q); test can't prove replay matters", live, again.Message.Text())
 	}
@@ -291,7 +291,7 @@ func newIdempotentTool() *idempotentTool {
 	return &idempotentTool{effects: map[string]int{}, results: map[string]api.ToolResult{}}
 }
 
-func (t *idempotentTool) exec(tc api.ToolCall) (api.ToolResult, error) {
+func (t *idempotentTool) exec(_ context.Context, tc api.ToolCall) (api.ToolResult, error) {
 	if r, ok := t.results[tc.IdempotencyKey]; ok {
 		return r, nil // deduped: the effect already ran under this key
 	}
@@ -309,8 +309,8 @@ func (toolHarness) Describe(context.Context) (api.Descriptor, error) {
 	return api.Descriptor{ID: "tool"}, nil
 }
 
-func (h toolHarness) Run(_ context.Context, _ *api.Start, sink api.EventSink) error {
-	_, err := sink.ToolCall(api.ToolCall{
+func (h toolHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	_, err := sink.ToolCall(ctx, api.ToolCall{
 		ID:             "t1",
 		Tool:           "charge",
 		Mediation:      api.MediationControllerMediated,
@@ -419,8 +419,8 @@ func (unmediatedToolHarness) Describe(context.Context) (api.Descriptor, error) {
 	return api.Descriptor{ID: "u"}, nil
 }
 
-func (unmediatedToolHarness) Run(_ context.Context, _ *api.Start, sink api.EventSink) error {
-	_, err := sink.ToolCall(api.ToolCall{ID: "u1", Tool: "x"})
+func (unmediatedToolHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	_, err := sink.ToolCall(ctx, api.ToolCall{ID: "u1", Tool: "x"})
 	return err
 }
 

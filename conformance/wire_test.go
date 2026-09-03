@@ -115,7 +115,7 @@ func TestWireNondeterministicReplay(t *testing.T) {
 		t.Fatalf("wire exec: %v", err)
 	}
 	live, _ := c.Outputs()
-	again, _ := m.call(api.ModelRequest{Model: "echo", Messages: []api.Message{*api.TextMessage("user", "hi")}})
+	again, _ := m.call(t.Context(), api.ModelRequest{Model: "echo", Messages: []api.Message{*api.TextMessage("user", "hi")}})
 	if len(live) != 1 || again.Message.Text() == live[0] {
 		t.Fatalf("model not nondeterministic (live=%v again=%q)", live, again.Message.Text())
 	}
