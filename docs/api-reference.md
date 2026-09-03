@@ -1184,13 +1184,16 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 <a name="agentsessions-v1-SnapshotRef"></a>
 
 ### SnapshotRef
-SnapshotRef is the session-STATUS ref carried in ComputeRef below. It is NOT yet wired in Go (no
-converter). The canonical wired form is api.SnapshotRef, and the durable log carries the ref inline
-on the SUSPEND Lifecycle event (common.proto Lifecycle.snapshot_*). The oneof here cannot hold both
-local AND external_uri, which a substrate ref needs.
-TODO(spike): flatten this oneof to match api.SnapshotRef when ComputeRef/substrate status is wired.
-An in-place flatten is buf-breaking (oneof-exit is flagged even under WIRE_JSON), so it needs a
-coordinated schema version bump, not an edit.
+SnapshotRef is the session-STATUS ref carried in ComputeRef below. Its shape mirrors the canonical
+Go SPI type api.SnapshotRef and the durable form the log carries inline on the SUSPEND Lifecycle
+event (common.proto Lifecycle.snapshot_*), so the three agree field for field.
+
+local and external_uri are deliberately NOT a oneof: a memory-capable backend sets both at once
+(substrate reports an actor handle in local and the object-storage URI in external_uri), which a
+oneof cannot express. A filesystem-only backend sets only local, with memory=false.
+
+ComputeRef is not yet populated on the wire; the Placer records the ref on the SUSPEND event
+instead. Wiring session status is tracked separately.
 
 
 | Field | Type | Label | Description |
