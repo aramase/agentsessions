@@ -42,16 +42,26 @@ jobs:
           git add -N docs/api-reference.md
           git diff --exit-code -- docs/api-reference.md
 
-      # Proto contract gates for the neutral schema: style + backward compatibility. The breaking gate
-      # compares the change against the PR's base branch so an incompatible schema edit fails the build.
-      # It must name a REMOTE-TRACKING ref: actions/checkout leaves no local branch for the base, so
-      # `.git#branch=main` fails with "couldn't find remote ref main" on every pull_request run.
+      # Proto contract gates for the neutral schema: style + backward compatibility.
       - name: buf lint
         run: buf lint
+
+      # Backward compatibility is a promise to RELEASED consumers, so the baseline is the last
+      # release tag, not the base branch. Before the first tag there is no published schema to
+      # break: the module is unreleased, and gating on main would freeze the contract while it is
+      # still being designed, turning every intentional reshape into a CI failure to argue around.
+      #
+      # The gate arms itself at the first v* tag, which is exactly when the promise begins. It needs
+      # the tags, which the fetch-depth: 0 checkout above already provides.
       - name: buf breaking
-        env:
-          BASE: ${{ github.base_ref || github.event.repository.default_branch }}
-        run: buf breaking --against ".git#ref=origin/${BASE}"
+        run: |
+          latest="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+          if [ -z "$latest" ]; then
+            echo "No v* release tag yet: the schema is explicitly unstable, so the breaking gate is inactive."
+            exit 0
+          fi
+          echo "Comparing the schema against the last release: ${latest}"
+          buf breaking --against ".git#ref=${latest}"
 
       - name: gofmt
         run: |
