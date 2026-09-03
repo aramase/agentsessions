@@ -999,50 +999,6 @@ func (x *ReplayRequest) GetToSeq() int64 {
 	return 0
 }
 
-type PauseRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Session       string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PauseRequest) Reset() {
-	*x = PauseRequest{}
-	mi := &file_session_proto_msgTypes[11]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PauseRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PauseRequest) ProtoMessage() {}
-
-func (x *PauseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[11]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PauseRequest.ProtoReflect.Descriptor instead.
-func (*PauseRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{11}
-}
-
-func (x *PauseRequest) GetSession() string {
-	if x != nil {
-		return x.Session
-	}
-	return ""
-}
-
 type SuspendRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Session       string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
@@ -1052,7 +1008,7 @@ type SuspendRequest struct {
 
 func (x *SuspendRequest) Reset() {
 	*x = SuspendRequest{}
-	mi := &file_session_proto_msgTypes[12]
+	mi := &file_session_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1064,7 +1020,7 @@ func (x *SuspendRequest) String() string {
 func (*SuspendRequest) ProtoMessage() {}
 
 func (x *SuspendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[12]
+	mi := &file_session_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1077,7 +1033,7 @@ func (x *SuspendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SuspendRequest.ProtoReflect.Descriptor instead.
 func (*SuspendRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{12}
+	return file_session_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SuspendRequest) GetSession() string {
@@ -1097,7 +1053,7 @@ type ResumeRequest struct {
 
 func (x *ResumeRequest) Reset() {
 	*x = ResumeRequest{}
-	mi := &file_session_proto_msgTypes[13]
+	mi := &file_session_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1109,7 +1065,7 @@ func (x *ResumeRequest) String() string {
 func (*ResumeRequest) ProtoMessage() {}
 
 func (x *ResumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[13]
+	mi := &file_session_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1122,7 +1078,7 @@ func (x *ResumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResumeRequest.ProtoReflect.Descriptor instead.
 func (*ResumeRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{13}
+	return file_session_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ResumeRequest) GetSession() string {
@@ -1165,7 +1121,7 @@ type ForkRequest struct {
 
 func (x *ForkRequest) Reset() {
 	*x = ForkRequest{}
-	mi := &file_session_proto_msgTypes[14]
+	mi := &file_session_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1177,7 +1133,7 @@ func (x *ForkRequest) String() string {
 func (*ForkRequest) ProtoMessage() {}
 
 func (x *ForkRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[14]
+	mi := &file_session_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1190,7 +1146,7 @@ func (x *ForkRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkRequest.ProtoReflect.Descriptor instead.
 func (*ForkRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{14}
+	return file_session_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ForkRequest) GetSession() string {
@@ -1244,7 +1200,7 @@ type ForkResponse struct {
 
 func (x *ForkResponse) Reset() {
 	*x = ForkResponse{}
-	mi := &file_session_proto_msgTypes[15]
+	mi := &file_session_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1256,7 +1212,7 @@ func (x *ForkResponse) String() string {
 func (*ForkResponse) ProtoMessage() {}
 
 func (x *ForkResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[15]
+	mi := &file_session_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1269,7 +1225,7 @@ func (x *ForkResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkResponse.ProtoReflect.Descriptor instead.
 func (*ForkResponse) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{15}
+	return file_session_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ForkResponse) GetChildren() []*Session {
@@ -1290,7 +1246,7 @@ type CancelRequest struct {
 
 func (x *CancelRequest) Reset() {
 	*x = CancelRequest{}
-	mi := &file_session_proto_msgTypes[16]
+	mi := &file_session_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1302,7 +1258,7 @@ func (x *CancelRequest) String() string {
 func (*CancelRequest) ProtoMessage() {}
 
 func (x *CancelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[16]
+	mi := &file_session_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1315,7 +1271,7 @@ func (x *CancelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelRequest.ProtoReflect.Descriptor instead.
 func (*CancelRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{16}
+	return file_session_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *CancelRequest) GetSession() string {
@@ -1339,58 +1295,6 @@ func (x *CancelRequest) GetReason() string {
 	return ""
 }
 
-type HeartbeatRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Session       string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
-	ExecutionId   string                 `protobuf:"bytes,2,opt,name=execution_id,json=executionId,proto3" json:"execution_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *HeartbeatRequest) Reset() {
-	*x = HeartbeatRequest{}
-	mi := &file_session_proto_msgTypes[17]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *HeartbeatRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*HeartbeatRequest) ProtoMessage() {}
-
-func (x *HeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[17]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use HeartbeatRequest.ProtoReflect.Descriptor instead.
-func (*HeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{17}
-}
-
-func (x *HeartbeatRequest) GetSession() string {
-	if x != nil {
-		return x.Session
-	}
-	return ""
-}
-
-func (x *HeartbeatRequest) GetExecutionId() string {
-	if x != nil {
-		return x.ExecutionId
-	}
-	return ""
-}
-
 // ExecUpdate is what the live Exec stream carries: a committed LogRecord, or an ephemeral
 // streaming Delta (transport only — not logged, not hash-chained).
 type ExecUpdate struct {
@@ -1406,7 +1310,7 @@ type ExecUpdate struct {
 
 func (x *ExecUpdate) Reset() {
 	*x = ExecUpdate{}
-	mi := &file_session_proto_msgTypes[18]
+	mi := &file_session_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1418,7 +1322,7 @@ func (x *ExecUpdate) String() string {
 func (*ExecUpdate) ProtoMessage() {}
 
 func (x *ExecUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[18]
+	mi := &file_session_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1431,7 +1335,7 @@ func (x *ExecUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecUpdate.ProtoReflect.Descriptor instead.
 func (*ExecUpdate) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{18}
+	return file_session_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ExecUpdate) GetUpdate() isExecUpdate_Update {
@@ -1489,7 +1393,7 @@ type Delta struct {
 
 func (x *Delta) Reset() {
 	*x = Delta{}
-	mi := &file_session_proto_msgTypes[19]
+	mi := &file_session_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1501,7 +1405,7 @@ func (x *Delta) String() string {
 func (*Delta) ProtoMessage() {}
 
 func (x *Delta) ProtoReflect() protoreflect.Message {
-	mi := &file_session_proto_msgTypes[19]
+	mi := &file_session_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1514,7 +1418,7 @@ func (x *Delta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Delta.ProtoReflect.Descriptor instead.
 func (*Delta) Descriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{19}
+	return file_session_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Delta) GetExecutionId() string {
@@ -1622,9 +1526,7 @@ const file_session_proto_rawDesc = "" +
 	"\rReplayRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12\x19\n" +
 	"\bfrom_seq\x18\x02 \x01(\x03R\afromSeq\x12\x15\n" +
-	"\x06to_seq\x18\x03 \x01(\x03R\x05toSeq\"(\n" +
-	"\fPauseRequest\x12\x18\n" +
-	"\asession\x18\x01 \x01(\tR\asession\"*\n" +
+	"\x06to_seq\x18\x03 \x01(\x03R\x05toSeq\"*\n" +
 	"\x0eSuspendRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\"=\n" +
 	"\rResumeRequest\x12\x18\n" +
@@ -1646,10 +1548,7 @@ const file_session_proto_rawDesc = "" +
 	"\rCancelRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"O\n" +
-	"\x10HeartbeatRequest\x12\x18\n" +
-	"\asession\x18\x01 \x01(\tR\asession\x12!\n" +
-	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\"~\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"~\n" +
 	"\n" +
 	"ExecUpdate\x125\n" +
 	"\x06record\x18\x01 \x01(\v2\x1b.agentsessions.v1.LogRecordH\x00R\x06record\x12/\n" +
@@ -1688,7 +1587,7 @@ const file_session_proto_rawDesc = "" +
 	"\fCOMPUTE_LIVE\x10\x02\x12\x10\n" +
 	"\fCOMPUTE_WARM\x10\x03\x12\x10\n" +
 	"\fCOMPUTE_COLD\x10\x04\x12\x16\n" +
-	"\x12COMPUTE_TERMINATED\x10\x052\x9b\a\n" +
+	"\x12COMPUTE_TERMINATED\x10\x052\x8b\x06\n" +
 	"\bSessions\x12R\n" +
 	"\rCreateSession\x12&.agentsessions.v1.CreateSessionRequest\x1a\x19.agentsessions.v1.Session\x12L\n" +
 	"\n" +
@@ -1697,9 +1596,7 @@ const file_session_proto_rawDesc = "" +
 	"\rDeleteSession\x12&.agentsessions.v1.DeleteSessionRequest\x1a\x19.agentsessions.v1.Session\x12E\n" +
 	"\x04Exec\x12\x1d.agentsessions.v1.ExecRequest\x1a\x1c.agentsessions.v1.ExecUpdate0\x01\x12H\n" +
 	"\x06Replay\x12\x1f.agentsessions.v1.ReplayRequest\x1a\x1b.agentsessions.v1.LogRecord0\x01\x12D\n" +
-	"\x06Cancel\x12\x1f.agentsessions.v1.CancelRequest\x1a\x19.agentsessions.v1.Session\x12J\n" +
-	"\tHeartbeat\x12\".agentsessions.v1.HeartbeatRequest\x1a\x19.agentsessions.v1.Session\x12B\n" +
-	"\x05Pause\x12\x1e.agentsessions.v1.PauseRequest\x1a\x19.agentsessions.v1.Session\x12F\n" +
+	"\x06Cancel\x12\x1f.agentsessions.v1.CancelRequest\x1a\x19.agentsessions.v1.Session\x12F\n" +
 	"\aSuspend\x12 .agentsessions.v1.SuspendRequest\x1a\x19.agentsessions.v1.Session\x12D\n" +
 	"\x06Resume\x12\x1f.agentsessions.v1.ResumeRequest\x1a\x19.agentsessions.v1.Session\x12E\n" +
 	"\x04Fork\x12\x1d.agentsessions.v1.ForkRequest\x1a\x1e.agentsessions.v1.ForkResponseB<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
@@ -1717,7 +1614,7 @@ func file_session_proto_rawDescGZIP() []byte {
 }
 
 var file_session_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_session_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_session_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_session_proto_goTypes = []any{
 	(Phase)(0),                   // 0: agentsessions.v1.Phase
 	(ExecState)(0),               // 1: agentsessions.v1.ExecState
@@ -1733,71 +1630,65 @@ var file_session_proto_goTypes = []any{
 	(*DeleteSessionRequest)(nil), // 11: agentsessions.v1.DeleteSessionRequest
 	(*ExecRequest)(nil),          // 12: agentsessions.v1.ExecRequest
 	(*ReplayRequest)(nil),        // 13: agentsessions.v1.ReplayRequest
-	(*PauseRequest)(nil),         // 14: agentsessions.v1.PauseRequest
-	(*SuspendRequest)(nil),       // 15: agentsessions.v1.SuspendRequest
-	(*ResumeRequest)(nil),        // 16: agentsessions.v1.ResumeRequest
-	(*ForkRequest)(nil),          // 17: agentsessions.v1.ForkRequest
-	(*ForkResponse)(nil),         // 18: agentsessions.v1.ForkResponse
-	(*CancelRequest)(nil),        // 19: agentsessions.v1.CancelRequest
-	(*HeartbeatRequest)(nil),     // 20: agentsessions.v1.HeartbeatRequest
-	(*ExecUpdate)(nil),           // 21: agentsessions.v1.ExecUpdate
-	(*Delta)(nil),                // 22: agentsessions.v1.Delta
-	nil,                          // 23: agentsessions.v1.ComputeRef.AttributesEntry
-	nil,                          // 24: agentsessions.v1.Session.LabelsEntry
-	nil,                          // 25: agentsessions.v1.Session.AnnotationsEntry
-	nil,                          // 26: agentsessions.v1.ForkRequest.LabelsEntry
-	(*ResourceMetadata)(nil),     // 27: agentsessions.v1.ResourceMetadata
-	(*IdentityRef)(nil),          // 28: agentsessions.v1.IdentityRef
-	(*Origin)(nil),               // 29: agentsessions.v1.Origin
-	(*Message)(nil),              // 30: agentsessions.v1.Message
-	(*LogRecord)(nil),            // 31: agentsessions.v1.LogRecord
+	(*SuspendRequest)(nil),       // 14: agentsessions.v1.SuspendRequest
+	(*ResumeRequest)(nil),        // 15: agentsessions.v1.ResumeRequest
+	(*ForkRequest)(nil),          // 16: agentsessions.v1.ForkRequest
+	(*ForkResponse)(nil),         // 17: agentsessions.v1.ForkResponse
+	(*CancelRequest)(nil),        // 18: agentsessions.v1.CancelRequest
+	(*ExecUpdate)(nil),           // 19: agentsessions.v1.ExecUpdate
+	(*Delta)(nil),                // 20: agentsessions.v1.Delta
+	nil,                          // 21: agentsessions.v1.ComputeRef.AttributesEntry
+	nil,                          // 22: agentsessions.v1.Session.LabelsEntry
+	nil,                          // 23: agentsessions.v1.Session.AnnotationsEntry
+	nil,                          // 24: agentsessions.v1.ForkRequest.LabelsEntry
+	(*ResourceMetadata)(nil),     // 25: agentsessions.v1.ResourceMetadata
+	(*IdentityRef)(nil),          // 26: agentsessions.v1.IdentityRef
+	(*Origin)(nil),               // 27: agentsessions.v1.Origin
+	(*Message)(nil),              // 28: agentsessions.v1.Message
+	(*LogRecord)(nil),            // 29: agentsessions.v1.LogRecord
 }
 var file_session_proto_depIdxs = []int32{
 	3,  // 0: agentsessions.v1.ComputeRef.snapshot:type_name -> agentsessions.v1.SnapshotRef
 	4,  // 1: agentsessions.v1.ComputeRef.capabilities:type_name -> agentsessions.v1.RuntimeCapabilities
-	23, // 2: agentsessions.v1.ComputeRef.attributes:type_name -> agentsessions.v1.ComputeRef.AttributesEntry
-	27, // 3: agentsessions.v1.Session.metadata:type_name -> agentsessions.v1.ResourceMetadata
+	21, // 2: agentsessions.v1.ComputeRef.attributes:type_name -> agentsessions.v1.ComputeRef.AttributesEntry
+	25, // 3: agentsessions.v1.Session.metadata:type_name -> agentsessions.v1.ResourceMetadata
 	1,  // 4: agentsessions.v1.Session.exec_state:type_name -> agentsessions.v1.ExecState
 	2,  // 5: agentsessions.v1.Session.compute_state:type_name -> agentsessions.v1.ComputeState
-	28, // 6: agentsessions.v1.Session.identity:type_name -> agentsessions.v1.IdentityRef
+	26, // 6: agentsessions.v1.Session.identity:type_name -> agentsessions.v1.IdentityRef
 	5,  // 7: agentsessions.v1.Session.compute:type_name -> agentsessions.v1.ComputeRef
-	29, // 8: agentsessions.v1.Session.origin:type_name -> agentsessions.v1.Origin
-	24, // 9: agentsessions.v1.Session.labels:type_name -> agentsessions.v1.Session.LabelsEntry
-	25, // 10: agentsessions.v1.Session.annotations:type_name -> agentsessions.v1.Session.AnnotationsEntry
+	27, // 8: agentsessions.v1.Session.origin:type_name -> agentsessions.v1.Origin
+	22, // 9: agentsessions.v1.Session.labels:type_name -> agentsessions.v1.Session.LabelsEntry
+	23, // 10: agentsessions.v1.Session.annotations:type_name -> agentsessions.v1.Session.AnnotationsEntry
 	6,  // 11: agentsessions.v1.CreateSessionRequest.session:type_name -> agentsessions.v1.Session
 	6,  // 12: agentsessions.v1.ListSessionsResponse.sessions:type_name -> agentsessions.v1.Session
-	30, // 13: agentsessions.v1.ExecRequest.inputs:type_name -> agentsessions.v1.Message
-	28, // 14: agentsessions.v1.ForkRequest.identity:type_name -> agentsessions.v1.IdentityRef
-	26, // 15: agentsessions.v1.ForkRequest.labels:type_name -> agentsessions.v1.ForkRequest.LabelsEntry
+	28, // 13: agentsessions.v1.ExecRequest.inputs:type_name -> agentsessions.v1.Message
+	26, // 14: agentsessions.v1.ForkRequest.identity:type_name -> agentsessions.v1.IdentityRef
+	24, // 15: agentsessions.v1.ForkRequest.labels:type_name -> agentsessions.v1.ForkRequest.LabelsEntry
 	6,  // 16: agentsessions.v1.ForkResponse.children:type_name -> agentsessions.v1.Session
-	31, // 17: agentsessions.v1.ExecUpdate.record:type_name -> agentsessions.v1.LogRecord
-	22, // 18: agentsessions.v1.ExecUpdate.delta:type_name -> agentsessions.v1.Delta
+	29, // 17: agentsessions.v1.ExecUpdate.record:type_name -> agentsessions.v1.LogRecord
+	20, // 18: agentsessions.v1.ExecUpdate.delta:type_name -> agentsessions.v1.Delta
 	7,  // 19: agentsessions.v1.Sessions.CreateSession:input_type -> agentsessions.v1.CreateSessionRequest
 	8,  // 20: agentsessions.v1.Sessions.GetSession:input_type -> agentsessions.v1.GetSessionRequest
 	9,  // 21: agentsessions.v1.Sessions.ListSessions:input_type -> agentsessions.v1.ListSessionsRequest
 	11, // 22: agentsessions.v1.Sessions.DeleteSession:input_type -> agentsessions.v1.DeleteSessionRequest
 	12, // 23: agentsessions.v1.Sessions.Exec:input_type -> agentsessions.v1.ExecRequest
 	13, // 24: agentsessions.v1.Sessions.Replay:input_type -> agentsessions.v1.ReplayRequest
-	19, // 25: agentsessions.v1.Sessions.Cancel:input_type -> agentsessions.v1.CancelRequest
-	20, // 26: agentsessions.v1.Sessions.Heartbeat:input_type -> agentsessions.v1.HeartbeatRequest
-	14, // 27: agentsessions.v1.Sessions.Pause:input_type -> agentsessions.v1.PauseRequest
-	15, // 28: agentsessions.v1.Sessions.Suspend:input_type -> agentsessions.v1.SuspendRequest
-	16, // 29: agentsessions.v1.Sessions.Resume:input_type -> agentsessions.v1.ResumeRequest
-	17, // 30: agentsessions.v1.Sessions.Fork:input_type -> agentsessions.v1.ForkRequest
-	6,  // 31: agentsessions.v1.Sessions.CreateSession:output_type -> agentsessions.v1.Session
-	6,  // 32: agentsessions.v1.Sessions.GetSession:output_type -> agentsessions.v1.Session
-	10, // 33: agentsessions.v1.Sessions.ListSessions:output_type -> agentsessions.v1.ListSessionsResponse
-	6,  // 34: agentsessions.v1.Sessions.DeleteSession:output_type -> agentsessions.v1.Session
-	21, // 35: agentsessions.v1.Sessions.Exec:output_type -> agentsessions.v1.ExecUpdate
-	31, // 36: agentsessions.v1.Sessions.Replay:output_type -> agentsessions.v1.LogRecord
-	6,  // 37: agentsessions.v1.Sessions.Cancel:output_type -> agentsessions.v1.Session
-	6,  // 38: agentsessions.v1.Sessions.Heartbeat:output_type -> agentsessions.v1.Session
-	6,  // 39: agentsessions.v1.Sessions.Pause:output_type -> agentsessions.v1.Session
-	6,  // 40: agentsessions.v1.Sessions.Suspend:output_type -> agentsessions.v1.Session
-	6,  // 41: agentsessions.v1.Sessions.Resume:output_type -> agentsessions.v1.Session
-	18, // 42: agentsessions.v1.Sessions.Fork:output_type -> agentsessions.v1.ForkResponse
-	31, // [31:43] is the sub-list for method output_type
-	19, // [19:31] is the sub-list for method input_type
+	18, // 25: agentsessions.v1.Sessions.Cancel:input_type -> agentsessions.v1.CancelRequest
+	14, // 26: agentsessions.v1.Sessions.Suspend:input_type -> agentsessions.v1.SuspendRequest
+	15, // 27: agentsessions.v1.Sessions.Resume:input_type -> agentsessions.v1.ResumeRequest
+	16, // 28: agentsessions.v1.Sessions.Fork:input_type -> agentsessions.v1.ForkRequest
+	6,  // 29: agentsessions.v1.Sessions.CreateSession:output_type -> agentsessions.v1.Session
+	6,  // 30: agentsessions.v1.Sessions.GetSession:output_type -> agentsessions.v1.Session
+	10, // 31: agentsessions.v1.Sessions.ListSessions:output_type -> agentsessions.v1.ListSessionsResponse
+	6,  // 32: agentsessions.v1.Sessions.DeleteSession:output_type -> agentsessions.v1.Session
+	19, // 33: agentsessions.v1.Sessions.Exec:output_type -> agentsessions.v1.ExecUpdate
+	29, // 34: agentsessions.v1.Sessions.Replay:output_type -> agentsessions.v1.LogRecord
+	6,  // 35: agentsessions.v1.Sessions.Cancel:output_type -> agentsessions.v1.Session
+	6,  // 36: agentsessions.v1.Sessions.Suspend:output_type -> agentsessions.v1.Session
+	6,  // 37: agentsessions.v1.Sessions.Resume:output_type -> agentsessions.v1.Session
+	17, // 38: agentsessions.v1.Sessions.Fork:output_type -> agentsessions.v1.ForkResponse
+	29, // [29:39] is the sub-list for method output_type
+	19, // [19:29] is the sub-list for method input_type
 	19, // [19:19] is the sub-list for extension type_name
 	19, // [19:19] is the sub-list for extension extendee
 	0,  // [0:19] is the sub-list for field type_name
@@ -1809,7 +1700,7 @@ func file_session_proto_init() {
 		return
 	}
 	file_common_proto_init()
-	file_session_proto_msgTypes[18].OneofWrappers = []any{
+	file_session_proto_msgTypes[16].OneofWrappers = []any{
 		(*ExecUpdate_Record)(nil),
 		(*ExecUpdate_Delta)(nil),
 	}
@@ -1819,7 +1710,7 @@ func file_session_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_session_proto_rawDesc), len(file_session_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   24,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

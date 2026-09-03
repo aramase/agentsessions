@@ -56,7 +56,6 @@ type Sessions interface {
 	// Replay re-delivers committed events from fromSeq (read-only; audit / provenance).
 	Replay(ctx context.Context, uid string, fromSeq int64, sink func(Event) error) error
 
-	Pause(ctx context.Context, uid string) (*Session, error)             // warm, keep worker
 	Suspend(ctx context.Context, uid string) (*Session, error)           // cold, free worker
 	Resume(ctx context.Context, uid string, boot bool) (*Session, error) // boot = cold+replay vs restore
 	Fork(ctx context.Context, uid string, atSeq int64, count int) ([]*Session, error)
