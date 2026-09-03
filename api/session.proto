@@ -10,24 +10,9 @@ option go_package = "github.com/aramase/agentsessions/api/genpb;agentsessionsv1"
 
 import "common.proto";
 
-// Phase flattens two axes — execution (the log) and compute (the incarnation) — into a
-// single lifecycle enum.
-enum Phase {
-  PHASE_UNSPECIFIED = 0;
-  PHASE_PENDING = 1;
-  PHASE_RUNNING = 2;
-  PHASE_PAUSING = 3;
-  PHASE_PAUSED = 4;      // warm: resident, worker held
-  PHASE_SUSPENDING = 5;
-  PHASE_SUSPENDED = 6;   // cold: snapshot in storage, worker freed
-  PHASE_RESUMING = 7;
-  PHASE_FORKING = 8;
-  PHASE_TERMINATED = 9;  // log retained + replayable
-  PHASE_FAILED = 10;
-}
-
 // ExecState is the execution/turn axis; ComputeState is the incarnation axis. The two are
-// modeled explicitly (§6 of the replay contract); Phase above is a derived summary.
+// modeled explicitly (§6 of the replay contract) and reported independently: there is no
+// flattened lifecycle enum, because collapsing them loses which axis actually moved.
 enum ExecState {
   EXEC_STATE_UNSPECIFIED = 0;
   EXEC_PENDING = 1;
@@ -85,7 +70,7 @@ message Session {
   string harness = 2;
   string model = 3; // model-agnostic id
 
-  reserved 4; // retired: Phase phase — split into the two axes below
+  reserved 4; // retired: a flattened lifecycle phase, replaced by the two axes below
   ExecState exec_state = 13;       // execution/turn axis
   ComputeState compute_state = 14; // incarnation axis
   int64 last_seq = 5;              // event-log cursor

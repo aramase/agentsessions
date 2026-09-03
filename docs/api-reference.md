@@ -79,7 +79,6 @@ Source of truth: api/*.proto. Edit the proto comments, not this file.
   
     - [ComputeState](#agentsessions-v1-ComputeState)
     - [ExecState](#agentsessions-v1-ExecState)
-    - [Phase](#agentsessions-v1-Phase)
   
     - [Sessions](#agentsessions-v1-Sessions)
   
@@ -1212,7 +1211,8 @@ instead. Wiring session status is tracked separately.
 
 ### ExecState
 ExecState is the execution/turn axis; ComputeState is the incarnation axis. The two are
-modeled explicitly (§6 of the replay contract); Phase above is a derived summary.
+modeled explicitly (§6 of the replay contract) and reported independently: there is no
+flattened lifecycle enum, because collapsing them loses which axis actually moved.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -1223,28 +1223,6 @@ modeled explicitly (§6 of the replay contract); Phase above is a derived summar
 | EXEC_COMPLETED | 4 |  |
 | EXEC_FAILED | 5 |  |
 | EXEC_CANCELED | 6 |  |
-
-
-
-<a name="agentsessions-v1-Phase"></a>
-
-### Phase
-Phase flattens two axes — execution (the log) and compute (the incarnation) — into a
-single lifecycle enum.
-
-| Name | Number | Description |
-| ---- | ------ | ----------- |
-| PHASE_UNSPECIFIED | 0 |  |
-| PHASE_PENDING | 1 |  |
-| PHASE_RUNNING | 2 |  |
-| PHASE_PAUSING | 3 |  |
-| PHASE_PAUSED | 4 | warm: resident, worker held |
-| PHASE_SUSPENDING | 5 |  |
-| PHASE_SUSPENDED | 6 | cold: snapshot in storage, worker freed |
-| PHASE_RESUMING | 7 |  |
-| PHASE_FORKING | 8 |  |
-| PHASE_TERMINATED | 9 | log retained &#43; replayable |
-| PHASE_FAILED | 10 |  |
 
 
  
