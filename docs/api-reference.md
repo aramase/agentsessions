@@ -66,10 +66,8 @@ Source of truth: api/*.proto. Edit the proto comments, not this file.
     - [ForkRequest.LabelsEntry](#agentsessions-v1-ForkRequest-LabelsEntry)
     - [ForkResponse](#agentsessions-v1-ForkResponse)
     - [GetSessionRequest](#agentsessions-v1-GetSessionRequest)
-    - [HeartbeatRequest](#agentsessions-v1-HeartbeatRequest)
     - [ListSessionsRequest](#agentsessions-v1-ListSessionsRequest)
     - [ListSessionsResponse](#agentsessions-v1-ListSessionsResponse)
-    - [PauseRequest](#agentsessions-v1-PauseRequest)
     - [ReplayRequest](#agentsessions-v1-ReplayRequest)
     - [ResumeRequest](#agentsessions-v1-ResumeRequest)
     - [RuntimeCapabilities](#agentsessions-v1-RuntimeCapabilities)
@@ -1005,22 +1003,6 @@ Left unset, a child&#39;s name is empty rather than a copy of the parent&#39;s. 
 
 
 
-<a name="agentsessions-v1-HeartbeatRequest"></a>
-
-### HeartbeatRequest
-
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| session | [string](#string) |  |  |
-| execution_id | [string](#string) |  |  |
-
-
-
-
-
-
 <a name="agentsessions-v1-ListSessionsRequest"></a>
 
 ### ListSessionsRequest
@@ -1050,21 +1032,6 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | ----- | ---- | ----- | ----------- |
 | sessions | [Session](#agentsessions-v1-Session) | repeated |  |
 | next_page_token | [string](#string) |  | empty on the last page |
-
-
-
-
-
-
-<a name="agentsessions-v1-PauseRequest"></a>
-
-### PauseRequest
-
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| session | [string](#string) |  |  |
 
 
 
@@ -1301,11 +1268,9 @@ single lifecycle enum.
 | Cancel | [CancelRequest](#agentsessions-v1-CancelRequest) | [Session](#agentsessions-v1-Session) | In-flight control.
 
 cancel the in-flight execution |
-| Heartbeat | [HeartbeatRequest](#agentsessions-v1-HeartbeatRequest) | [Session](#agentsessions-v1-Session) | liveness for long-running turns |
-| Pause | [PauseRequest](#agentsessions-v1-PauseRequest) | [Session](#agentsessions-v1-Session) | Compute-layer durability.
+| Suspend | [SuspendRequest](#agentsessions-v1-SuspendRequest) | [Session](#agentsessions-v1-Session) | Compute-layer durability. There is no warm Pause: no Runtime backend implements a node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
 
-warm, keep worker |
-| Suspend | [SuspendRequest](#agentsessions-v1-SuspendRequest) | [Session](#agentsessions-v1-Session) | cold, free worker |
+cold, free worker |
 | Resume | [ResumeRequest](#agentsessions-v1-ResumeRequest) | [Session](#agentsessions-v1-Session) |  |
 | Fork | [ForkRequest](#agentsessions-v1-ForkRequest) | [ForkResponse](#agentsessions-v1-ForkResponse) | The differentiator: branch a session at a sequence into one or more children. Forking a REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event lands on its chain) because the children are cloned from that snapshot; resume brings it back. |
 

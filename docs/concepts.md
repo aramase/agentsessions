@@ -37,9 +37,7 @@ on one incarnation now, be killed, and continue on a different one later. Its li
 stateDiagram-v2
   [*] --> PENDING
   PENDING --> RUNNING: exec
-  RUNNING --> PAUSED: pause (warm, worker resident)
   RUNNING --> SUSPENDED: suspend (cold, snapshot in storage)
-  PAUSED --> RUNNING: resume
   SUSPENDED --> RUNNING: resume
   RUNNING --> FORKING: fork
   FORKING --> RUNNING
@@ -47,8 +45,12 @@ stateDiagram-v2
   RUNNING --> FAILED
 ```
 
-`PAUSED` is warm (still resident on a worker, instant resume). `SUSPENDED` is cold (snapshot written to
-storage, the worker is freed). `TERMINATED` still keeps the log, so a finished session stays replayable.
+`SUSPENDED` is cold: the snapshot is written to storage and the worker is freed. `TERMINATED` still
+keeps the log, so a finished session stays replayable.
+
+There is no warm pause. The state model reserves a warm tier, but no `Runtime` backend implements a
+node-local warm checkpoint, so nothing can currently move a session into it and there is no operation
+that tries. A session goes from live to a cold snapshot and back.
 
 ### Metadata and listing
 

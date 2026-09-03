@@ -142,7 +142,6 @@ message ReplayRequest {
   int64 to_seq = 3; // 0 = to head
 }
 
-message PauseRequest { string session = 1; }
 message SuspendRequest { string session = 1; }
 
 message ResumeRequest {
@@ -177,10 +176,6 @@ message CancelRequest {
   string execution_id = 2;
   string reason = 3; // USER | TIMEOUT | INTERNAL
 }
-message HeartbeatRequest {
-  string session = 1;
-  string execution_id = 2;
-}
 
 // ExecUpdate is what the live Exec stream carries: a committed LogRecord, or an ephemeral
 // streaming Delta (transport only — not logged, not hash-chained).
@@ -212,11 +207,10 @@ service Sessions {
   rpc Replay(ReplayRequest) returns (stream LogRecord);
 
   // In-flight control.
-  rpc Cancel(CancelRequest) returns (Session);       // cancel the in-flight execution
-  rpc Heartbeat(HeartbeatRequest) returns (Session); // liveness for long-running turns
+  rpc Cancel(CancelRequest) returns (Session); // cancel the in-flight execution
 
-  // Compute-layer durability.
-  rpc Pause(PauseRequest) returns (Session);     // warm, keep worker
+  // Compute-layer durability. There is no warm Pause: no Runtime backend implements a
+  // node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
   rpc Suspend(SuspendRequest) returns (Session); // cold, free worker
   rpc Resume(ResumeRequest) returns (Session);
 

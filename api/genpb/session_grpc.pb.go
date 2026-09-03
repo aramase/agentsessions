@@ -31,8 +31,6 @@ const (
 	Sessions_Exec_FullMethodName          = "/agentsessions.v1.Sessions/Exec"
 	Sessions_Replay_FullMethodName        = "/agentsessions.v1.Sessions/Replay"
 	Sessions_Cancel_FullMethodName        = "/agentsessions.v1.Sessions/Cancel"
-	Sessions_Heartbeat_FullMethodName     = "/agentsessions.v1.Sessions/Heartbeat"
-	Sessions_Pause_FullMethodName         = "/agentsessions.v1.Sessions/Pause"
 	Sessions_Suspend_FullMethodName       = "/agentsessions.v1.Sessions/Suspend"
 	Sessions_Resume_FullMethodName        = "/agentsessions.v1.Sessions/Resume"
 	Sessions_Fork_FullMethodName          = "/agentsessions.v1.Sessions/Fork"
@@ -52,9 +50,8 @@ type SessionsClient interface {
 	Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogRecord], error)
 	// In-flight control.
 	Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*Session, error)
-	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*Session, error)
-	// Compute-layer durability.
-	Pause(ctx context.Context, in *PauseRequest, opts ...grpc.CallOption) (*Session, error)
+	// Compute-layer durability. There is no warm Pause: no Runtime backend implements a
+	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
 	Suspend(ctx context.Context, in *SuspendRequest, opts ...grpc.CallOption) (*Session, error)
 	Resume(ctx context.Context, in *ResumeRequest, opts ...grpc.CallOption) (*Session, error)
 	// The differentiator: branch a session at a sequence into one or more children. Forking a
@@ -159,26 +156,6 @@ func (c *sessionsClient) Cancel(ctx context.Context, in *CancelRequest, opts ...
 	return out, nil
 }
 
-func (c *sessionsClient) Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*Session, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Session)
-	err := c.cc.Invoke(ctx, Sessions_Heartbeat_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *sessionsClient) Pause(ctx context.Context, in *PauseRequest, opts ...grpc.CallOption) (*Session, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Session)
-	err := c.cc.Invoke(ctx, Sessions_Pause_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *sessionsClient) Suspend(ctx context.Context, in *SuspendRequest, opts ...grpc.CallOption) (*Session, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Session)
@@ -223,9 +200,8 @@ type SessionsServer interface {
 	Replay(*ReplayRequest, grpc.ServerStreamingServer[LogRecord]) error
 	// In-flight control.
 	Cancel(context.Context, *CancelRequest) (*Session, error)
-	Heartbeat(context.Context, *HeartbeatRequest) (*Session, error)
-	// Compute-layer durability.
-	Pause(context.Context, *PauseRequest) (*Session, error)
+	// Compute-layer durability. There is no warm Pause: no Runtime backend implements a
+	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
 	Suspend(context.Context, *SuspendRequest) (*Session, error)
 	Resume(context.Context, *ResumeRequest) (*Session, error)
 	// The differentiator: branch a session at a sequence into one or more children. Forking a
@@ -262,12 +238,6 @@ func (UnimplementedSessionsServer) Replay(*ReplayRequest, grpc.ServerStreamingSe
 }
 func (UnimplementedSessionsServer) Cancel(context.Context, *CancelRequest) (*Session, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Cancel not implemented")
-}
-func (UnimplementedSessionsServer) Heartbeat(context.Context, *HeartbeatRequest) (*Session, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Heartbeat not implemented")
-}
-func (UnimplementedSessionsServer) Pause(context.Context, *PauseRequest) (*Session, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Pause not implemented")
 }
 func (UnimplementedSessionsServer) Suspend(context.Context, *SuspendRequest) (*Session, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Suspend not implemented")
@@ -411,42 +381,6 @@ func _Sessions_Cancel_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Sessions_Heartbeat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(HeartbeatRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(SessionsServer).Heartbeat(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Sessions_Heartbeat_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SessionsServer).Heartbeat(ctx, req.(*HeartbeatRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Sessions_Pause_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(PauseRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(SessionsServer).Pause(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Sessions_Pause_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SessionsServer).Pause(ctx, req.(*PauseRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _Sessions_Suspend_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SuspendRequest)
 	if err := dec(in); err != nil {
@@ -527,14 +461,6 @@ var Sessions_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Cancel",
 			Handler:    _Sessions_Cancel_Handler,
-		},
-		{
-			MethodName: "Heartbeat",
-			Handler:    _Sessions_Heartbeat_Handler,
-		},
-		{
-			MethodName: "Pause",
-			Handler:    _Sessions_Pause_Handler,
 		},
 		{
 			MethodName: "Suspend",
