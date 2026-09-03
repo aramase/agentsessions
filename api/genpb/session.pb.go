@@ -222,22 +222,22 @@ func (ComputeState) EnumDescriptor() ([]byte, []int) {
 	return file_session_proto_rawDescGZIP(), []int{2}
 }
 
-// SnapshotRef is the session-STATUS ref carried in ComputeRef below. It is NOT yet wired in Go (no
-// converter). The canonical wired form is api.SnapshotRef, and the durable log carries the ref inline
-// on the SUSPEND Lifecycle event (common.proto Lifecycle.snapshot_*). The oneof here cannot hold both
-// local AND external_uri, which a substrate ref needs.
-// TODO(spike): flatten this oneof to match api.SnapshotRef when ComputeRef/substrate status is wired.
-// An in-place flatten is buf-breaking (oneof-exit is flagged even under WIRE_JSON), so it needs a
-// coordinated schema version bump, not an edit.
+// SnapshotRef is the session-STATUS ref carried in ComputeRef below. Its shape mirrors the canonical
+// Go SPI type api.SnapshotRef and the durable form the log carries inline on the SUSPEND Lifecycle
+// event (common.proto Lifecycle.snapshot_*), so the three agree field for field.
+//
+// local and external_uri are deliberately NOT a oneof: a memory-capable backend sets both at once
+// (substrate reports an actor handle in local and the object-storage URI in external_uri), which a
+// oneof cannot express. A filesystem-only backend sets only local, with memory=false.
+//
+// ComputeRef is not yet populated on the wire; the Placer records the ref on the SUSPEND event
+// instead. Wiring session status is tracked separately.
 type SnapshotRef struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Types that are valid to be assigned to Loc:
-	//
-	//	*SnapshotRef_Local
-	//	*SnapshotRef_ExternalUri
-	Loc           isSnapshotRef_Loc `protobuf_oneof:"loc"`
-	Memory        bool              `protobuf:"varint,3,opt,name=memory,proto3" json:"memory,omitempty"` // RAM/process captured? pod: false, kata/clh: true
-	Sealed        bool              `protobuf:"varint,4,opt,name=sealed,proto3" json:"sealed,omitempty"` // encrypted + attested (confidential)
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Local         string                 `protobuf:"bytes,1,opt,name=local,proto3" json:"local,omitempty"`
+	ExternalUri   string                 `protobuf:"bytes,2,opt,name=external_uri,json=externalUri,proto3" json:"external_uri,omitempty"`
+	Memory        bool                   `protobuf:"varint,3,opt,name=memory,proto3" json:"memory,omitempty"` // RAM/process captured? pod: false, kata/clh: true
+	Sealed        bool                   `protobuf:"varint,4,opt,name=sealed,proto3" json:"sealed,omitempty"` // encrypted + attested (confidential)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -272,27 +272,16 @@ func (*SnapshotRef) Descriptor() ([]byte, []int) {
 	return file_session_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *SnapshotRef) GetLoc() isSnapshotRef_Loc {
-	if x != nil {
-		return x.Loc
-	}
-	return nil
-}
-
 func (x *SnapshotRef) GetLocal() string {
 	if x != nil {
-		if x, ok := x.Loc.(*SnapshotRef_Local); ok {
-			return x.Local
-		}
+		return x.Local
 	}
 	return ""
 }
 
 func (x *SnapshotRef) GetExternalUri() string {
 	if x != nil {
-		if x, ok := x.Loc.(*SnapshotRef_ExternalUri); ok {
-			return x.ExternalUri
-		}
+		return x.ExternalUri
 	}
 	return ""
 }
@@ -310,22 +299,6 @@ func (x *SnapshotRef) GetSealed() bool {
 	}
 	return false
 }
-
-type isSnapshotRef_Loc interface {
-	isSnapshotRef_Loc()
-}
-
-type SnapshotRef_Local struct {
-	Local string `protobuf:"bytes,1,opt,name=local,proto3,oneof"`
-}
-
-type SnapshotRef_ExternalUri struct {
-	ExternalUri string `protobuf:"bytes,2,opt,name=external_uri,json=externalUri,proto3,oneof"`
-}
-
-func (*SnapshotRef_Local) isSnapshotRef_Loc() {}
-
-func (*SnapshotRef_ExternalUri) isSnapshotRef_Loc() {}
 
 type RuntimeCapabilities struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -1576,13 +1549,12 @@ var File_session_proto protoreflect.FileDescriptor
 
 const file_session_proto_rawDesc = "" +
 	"\n" +
-	"\rsession.proto\x12\x10agentsessions.v1\x1a\fcommon.proto\"\x81\x01\n" +
-	"\vSnapshotRef\x12\x16\n" +
-	"\x05local\x18\x01 \x01(\tH\x00R\x05local\x12#\n" +
-	"\fexternal_uri\x18\x02 \x01(\tH\x00R\vexternalUri\x12\x16\n" +
+	"\rsession.proto\x12\x10agentsessions.v1\x1a\fcommon.proto\"v\n" +
+	"\vSnapshotRef\x12\x14\n" +
+	"\x05local\x18\x01 \x01(\tR\x05local\x12!\n" +
+	"\fexternal_uri\x18\x02 \x01(\tR\vexternalUri\x12\x16\n" +
 	"\x06memory\x18\x03 \x01(\bR\x06memory\x12\x16\n" +
-	"\x06sealed\x18\x04 \x01(\bR\x06sealedB\x05\n" +
-	"\x03loc\"\x8e\x01\n" +
+	"\x06sealed\x18\x04 \x01(\bR\x06sealed\"\x8e\x01\n" +
 	"\x13RuntimeCapabilities\x12'\n" +
 	"\x0fmemory_snapshot\x18\x01 \x01(\bR\x0ememorySnapshot\x12\x19\n" +
 	"\bcow_fork\x18\x02 \x01(\bR\acowFork\x12\x16\n" +
@@ -1837,10 +1809,6 @@ func file_session_proto_init() {
 		return
 	}
 	file_common_proto_init()
-	file_session_proto_msgTypes[0].OneofWrappers = []any{
-		(*SnapshotRef_Local)(nil),
-		(*SnapshotRef_ExternalUri)(nil),
-	}
 	file_session_proto_msgTypes[18].OneofWrappers = []any{
 		(*ExecUpdate_Record)(nil),
 		(*ExecUpdate_Delta)(nil),
