@@ -78,13 +78,17 @@ SDK hides the gRPC stream, sequence numbers, and the emit-then-wait-for-host rou
 
 ```go
 type EventSink interface {
-    Model(ModelRequest) (ModelResponse, error) // mediated model call
-    Output(delta string) error                 // stream assistant output
-    ToolCall(ToolCall) (ToolResult, error)     // host-executed tool, blocks for the result
-    Report(ToolResult) error                   // record a tool YOU executed
-    Usage(Usage) error                         // token/cost accounting
+    Model(ctx context.Context, req ModelRequest) (ModelResponse, error) // mediated model call
+    Output(ctx context.Context, delta string) error                     // stream assistant output
+    ToolCall(ctx context.Context, tc ToolCall) (ToolResult, error)      // host-executed tool, blocks
+    Report(ctx context.Context, tr ToolResult) error                    // record a tool YOU executed
+    Usage(ctx context.Context, u Usage) error                           // token/cost accounting
 }
 ```
+
+Every sink method takes a `context.Context`. Pass the one `Run` gave you, or a context derived from
+it: that is what carries the turn's cancellation and deadline through to the provider call, so a
+cancelled turn stops an in-flight completion instead of orphaning it.
 
 ```mermaid
 sequenceDiagram
@@ -183,7 +187,7 @@ func (Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error 
     if n := len(s.Inputs); n > 0 {
         text = s.Inputs[n-1].Text()
     }
-    _, err := sink.Model(api.ModelRequest{
+    _, err := sink.Model(ctx, api.ModelRequest{
         Model:    "echo",
         Messages: []api.Message{*api.TextMessage("user", text)},
     })
@@ -224,7 +228,7 @@ func (h *Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) err
     h.count++
     n := h.count
     h.mu.Unlock()
-    return sink.Output(strconv.Itoa(n))
+    return sink.Output(ctx, strconv.Itoa(n))
 }
 ```
 

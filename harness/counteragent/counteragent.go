@@ -48,5 +48,5 @@ func (h *Harness) Run(ctx context.Context, s *api.Start, sink api.EventSink) err
 	h.count++
 	n := h.count
 	h.mu.Unlock()
-	return sink.Output(strconv.Itoa(n))
+	return sink.Output(ctx, strconv.Itoa(n))
 }

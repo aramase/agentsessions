@@ -34,14 +34,14 @@ func (h *echoHarness) Run(ctx context.Context, s *api.Start, sink api.EventSink)
 	if h.flaky {
 		text += "-DIFFERENT"
 	}
-	_, err := sink.Model(api.ModelRequest{
+	_, err := sink.Model(ctx, api.ModelRequest{
 		Model:    "echo",
 		Messages: []api.Message{*api.TextMessage("user", text)},
 	})
 	return err
 }
 
-func echoModel(req api.ModelRequest) (api.ModelResponse, error) {
+func echoModel(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 	last := ""
 	if n := len(req.Messages); n > 0 {
 		last = req.Messages[n-1].Text()
@@ -297,7 +297,7 @@ func (h *divergentHarness) Run(ctx context.Context, s *api.Start, sink api.Event
 	if n := len(s.Inputs); n > 0 {
 		text = s.Inputs[n-1].Text()
 	}
-	_, err := sink.Model(api.ModelRequest{Model: "echo", Messages: []api.Message{*api.TextMessage("user", text)}})
+	_, err := sink.Model(ctx, api.ModelRequest{Model: "echo", Messages: []api.Message{*api.TextMessage("user", text)}})
 	return err
 }
 
@@ -329,7 +329,7 @@ func (h *outputHarness) Describe(ctx context.Context) (api.Descriptor, error) {
 }
 
 func (h *outputHarness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error {
-	return sink.Output(h.text)
+	return sink.Output(ctx, h.text)
 }
 
 // TestReplayOutputDivergenceDetected: output emitted directly via Output (not the model) must match

@@ -26,7 +26,7 @@ func TestStreamSinkModelCorrelationMismatch(t *testing.T) {
 	results := make(chan *v1.ControllerFrame, 1)
 	s := &streamSink{stream: &fakeConnectServer{}, results: results}
 	results <- &v1.ControllerFrame{Frame: &v1.ControllerFrame_Model{Model: &v1.ModelResult{ModelCallId: "not-the-emitted-id"}}}
-	if _, err := s.Model(api.ModelRequest{Model: "m"}); err == nil || !strings.Contains(err.Error(), "correlation mismatch") {
+	if _, err := s.Model(t.Context(), api.ModelRequest{Model: "m"}); err == nil || !strings.Contains(err.Error(), "correlation mismatch") {
 		t.Fatalf("want a model correlation mismatch error, got %v", err)
 	}
 }
@@ -36,7 +36,7 @@ func TestStreamSinkToolCorrelationMismatch(t *testing.T) {
 	results := make(chan *v1.ControllerFrame, 1)
 	s := &streamSink{stream: &fakeConnectServer{}, results: results}
 	results <- &v1.ControllerFrame{Frame: &v1.ControllerFrame_Tool{Tool: &v1.ToolResult{Id: "wrong"}}}
-	if _, err := s.ToolCall(api.ToolCall{ID: "t1", Tool: "charge"}); err == nil || !strings.Contains(err.Error(), "correlation mismatch") {
+	if _, err := s.ToolCall(t.Context(), api.ToolCall{ID: "t1", Tool: "charge"}); err == nil || !strings.Contains(err.Error(), "correlation mismatch") {
 		t.Fatalf("want a tool correlation mismatch error, got %v", err)
 	}
 }
