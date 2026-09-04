@@ -3,8 +3,8 @@ package sqlitelog_test
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -441,34 +441,69 @@ func TestListSessionsSurvivesReopen(t *testing.T) {
 	}
 }
 
-// TestOpenRejectsObsoleteSchema covers a database written before `sessions` carried metadata
-// columns. CREATE TABLE IF NOT EXISTS cannot add a column to an existing table, so without the
-// check such a database opens and then fails every metadata query with a bare "no such column".
-func TestOpenRejectsObsoleteSchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "obsolete.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("open obsolete db: %v", err)
+// A fresh database must carry the schema stamp, so a later build can identify its shape without
+// inspecting columns.
+func TestOpenStampsSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stamp.db")
+	mustOpen(t, path).Close()
+
+	if got := readUserVersion(t, path); got != sqlitelog.SchemaVersion {
+		t.Fatalf("user_version = %d, want %d", got, sqlitelog.SchemaVersion)
 	}
-	for _, stmt := range []string{
-		`CREATE TABLE sessions (session TEXT PRIMARY KEY, fence INTEGER NOT NULL DEFAULT 0)`,
-		`INSERT INTO sessions(session, fence) VALUES('sess-ran', 1)`,
-	} {
-		if _, err := db.Exec(stmt); err != nil {
-			t.Fatalf("obsolete schema: %v", err)
-		}
+}
+
+// Reopening must not disturb the stamp: Open is called on every command, so a stamp that drifted
+// would be worse than no stamp at all.
+func TestOpenIsIdempotentOnStampedDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "restamp.db")
+	mustOpen(t, path).Close()
+	mustOpen(t, path).Close()
+
+	if got := readUserVersion(t, path); got != sqlitelog.SchemaVersion {
+		t.Fatalf("user_version = %d after reopen, want %d", got, sqlitelog.SchemaVersion)
 	}
-	db.Close()
+}
+
+// A database written by a NEWER build must be refused rather than opened. It may carry columns or
+// invariants this build does not know about, and appending to a hash-chained log under those
+// conditions risks corrupting the chain, so Open fails closed.
+func TestOpenRejectsNewerSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "newer.db")
+	mustOpen(t, path).Close()
+	setUserVersion(t, path, sqlitelog.SchemaVersion+1)
 
 	s, err := sqlitelog.Open(path)
 	if err == nil {
 		s.Close()
-		t.Fatal("Open accepted a database with the pre-metadata sessions table")
+		t.Fatal("Open accepted a database stamped newer than this build understands")
 	}
-	if !errors.Is(err, sqlitelog.ErrObsoleteSchema) {
-		t.Fatalf("error = %v, want ErrObsoleteSchema", err)
+	if !errors.Is(err, sqlitelog.ErrUnsupportedSchema) {
+		t.Fatalf("error = %v, want ErrUnsupportedSchema", err)
 	}
-	if !strings.Contains(err.Error(), "delete it") {
-		t.Fatalf("error %q does not tell the operator what to do", err)
+}
+
+func readUserVersion(t *testing.T, path string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer db.Close()
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	return v
+}
+
+func setUserVersion(t *testing.T, path string, v int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", v)); err != nil {
+		t.Fatalf("set user_version: %v", err)
 	}
 }
