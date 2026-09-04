@@ -1,0 +1,29 @@
+# Dependabot keeps the two Go modules and the workflow actions current.
+#
+# integrations/substrate is a SEPARATE module: the root gomod entry does not reach it, so it needs
+# its own directory entry or its dependencies would silently go stale.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: /integrations/substrate
+    schedule:
+      interval: weekly
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
