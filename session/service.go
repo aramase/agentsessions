@@ -34,10 +34,9 @@ import (
 type Service struct {
 	v1.UnimplementedSessionsServer
 	store          *sqlitelog.Store
-	placer         *placement.Placer
+	registry       *placement.Registry
 	logger         *slog.Logger
 	defaultProject string
-	defaultHarness string
 }
 
 // Option configures a Service.
@@ -59,26 +58,16 @@ func WithDefaultProject(project string) Option {
 	}
 }
 
-// WithDefaultHarness sets the harness recorded for sessions created without one. M0 hosts a single
-// harness, so this is the name reported for a session whose creator did not specify one.
-func WithDefaultHarness(harness string) Option {
-	return func(s *Service) {
-		if harness != "" {
-			s.defaultHarness = harness
-		}
-	}
-}
-
-// NewService builds the Sessions service over store, driving executions through placer (which owns
-// the Runtime backend and the M0 harness). The bare harness is no longer held here — it comes from
-// the backend via the Placer.
-func NewService(store *sqlitelog.Store, placer *placement.Placer, opts ...Option) *Service {
+// NewService builds the Sessions service over store, routing each session to a harness through
+// registry. There is no default-harness option: the registry already names its default, and a
+// service-level override could name a harness the host does not serve, which would record a
+// harness on every new session that no execution could ever resolve.
+func NewService(store *sqlitelog.Store, registry *placement.Registry, opts ...Option) *Service {
 	s := &Service{
 		store:          store,
-		placer:         placer,
+		registry:       registry,
 		logger:         slog.New(slog.DiscardHandler),
 		defaultProject: sqlitelog.DefaultProject,
-		defaultHarness: "echo",
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -143,7 +132,12 @@ func (s *Service) CreateSession(ctx context.Context, req *v1.CreateSessionReques
 		meta.Project = s.defaultProject
 	}
 	if meta.Harness == "" {
-		meta.Harness = s.defaultHarness
+		meta.Harness = s.registry.Default()
+	} else if _, err := s.registry.For(meta.Harness); err != nil {
+		// Reject at create rather than at first Exec. Storing an unservable harness would make
+		// the session listable but permanently unrunnable, and the failure would surface later
+		// somewhere that looks unrelated.
+		return nil, harnessError(err)
 	}
 	if err := s.store.PutSession(meta); err != nil {
 		return nil, status.Errorf(codes.Internal, "create session: %v", err)
@@ -215,6 +209,42 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 	return &v1.ListSessionsResponse{Sessions: out, NextPageToken: page.NextPageToken}, nil
 }
 
+// placerFor routes a session to the harness that runs it. override comes from
+// ExecRequest.harness, which the contract defines as "empty = session default"; anything else
+// falls back to the harness recorded on the session at create time.
+//
+// The lookup is by stored harness rather than by a single configured one, which is what makes
+// Session.harness mean something. A session that names a harness this host does not serve fails
+// here instead of silently running on whatever the host happens to have wired.
+func (s *Service) placerFor(uid, override string) (*placement.Placer, error) {
+	if uid == "" {
+		return nil, status.Error(codes.InvalidArgument, "session is required")
+	}
+	harness := override
+	if harness == "" {
+		info, err := s.store.SessionInfo(uid)
+		if err != nil {
+			return nil, sessionStoreError(err, uid)
+		}
+		harness = info.Harness
+	}
+	p, err := s.registry.For(harness)
+	if err != nil {
+		return nil, harnessError(err)
+	}
+	return p, nil
+}
+
+// harnessError reports an unservable harness as InvalidArgument. Naming a harness the host does
+// not run is a caller mistake, and the message lists what is registered so the caller can correct
+// it without reading the host's configuration.
+func harnessError(err error) error {
+	if errors.Is(err, placement.ErrUnknownHarness) {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	return status.Errorf(codes.Internal, "resolve harness: %v", err)
+}
+
 // sessionStoreError maps a store lookup failure to a gRPC code. An unknown UID is NotFound rather
 // than Internal so a caller can tell a bad reference from a broken host.
 func sessionStoreError(err error, uid string) error {
@@ -241,6 +271,10 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	if req.GetSession() == "" {
 		return status.Error(codes.InvalidArgument, "session is required")
 	}
+	placer, err := s.placerFor(req.GetSession(), req.GetHarness())
+	if err != nil {
+		return err
+	}
 	log := s.store.Session(req.GetSession())
 	headBefore, err := log.Head()
 	if err != nil {
@@ -254,7 +288,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	}
 	// Route the turn through the placement seam: Create the incarnation, mint+bind the fence, and
 	// drive the placed harness through the Runtime SPI instead of a co-located controller.
-	if _, err := s.placer.Exec(ctx, log, req.GetSession(), inputs, req.GetExpectedLastSeq()); err != nil {
+	if _, err := placer.Exec(ctx, log, req.GetSession(), inputs, req.GetExpectedLastSeq()); err != nil {
 		return execError(err)
 	}
 	recs, err := log.Read(headBefore + 1)
@@ -324,6 +358,10 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		finish(err, "error_kind", serviceErrorKind(err), "children_created", childrenCreated)
 	}()
 
+	placer, err := s.placerFor(req.GetSession(), "")
+	if err != nil {
+		return nil, err
+	}
 	parent := s.store.Session(req.GetSession())
 	atSeq := req.GetAtSeq()
 	if atSeq <= 0 {
@@ -353,7 +391,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	}
 	// The fan-out is all-or-nothing: Placer.Fork rolls back everything it provisioned on failure,
 	// so children_created stays 0 rather than reporting compute that no longer exists.
-	if err := s.placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
+	if err := placer.Fork(ctx, parent, req.GetSession(), children, atSeq); err != nil {
 		return nil, forkError(err)
 	}
 	childrenCreated = len(children)
@@ -417,8 +455,12 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	finish := observability.Start(ctx, s.logger, "session", "suspend", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 
+	placer, err := s.placerFor(req.GetSession(), "")
+	if err != nil {
+		return nil, err
+	}
 	log := s.store.Session(req.GetSession())
-	if _, err := s.placer.Suspend(ctx, log, req.GetSession()); err != nil {
+	if _, err := placer.Suspend(ctx, log, req.GetSession()); err != nil {
 		return nil, status.Errorf(codes.Internal, "suspend: %v", err)
 	}
 	// The SUSPEND append already moved the stored compute_state projection, so re-reading is
@@ -437,8 +479,12 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	finish := observability.Start(ctx, s.logger, "session", "resume", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 
+	placer, err := s.placerFor(req.GetSession(), "")
+	if err != nil {
+		return nil, err
+	}
 	log := s.store.Session(req.GetSession())
-	if err := s.placer.Resume(ctx, log, req.GetSession()); err != nil {
+	if err := placer.Resume(ctx, log, req.GetSession()); err != nil {
 		return nil, status.Errorf(codes.Internal, "resume: %v", err)
 	}
 	info, err := s.store.SessionInfo(req.GetSession())

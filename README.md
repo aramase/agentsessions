@@ -99,10 +99,11 @@ Full docs live in [`docs/`](docs/README.md):
 | `canon/` | Language-neutral canonical serialization (RFC 8785 JCS) for the hash chain. |
 | `observability/` | Structured operation logging and gRPC request-correlation helpers. |
 | `harnesswire/` | Bridges the in-process `api.Harness` SPI and the out-of-process `Harness.Connect` gRPC stream. |
-| `placement/` | The `Placer`: wires Sessions to the `Runtime` SPI, mints/binds fences, gates via `CanPlace`. |
+| `placement/` | The `Placer`: wires Sessions to the `Runtime` SPI, mints/binds fences, gates via `CanPlace`. The `Registry` routes a session to the harness it names. |
 | `runtime/local`, `runtime/substrate` | `Runtime` backends: a filesystem-only local backend, and agent-substrate. |
 | `harness/echoagent`, `harness/counteragent` | Reference harnesses: `STATELESS_REPLAY` echo, `REQUIRES_MEMORY_SNAPSHOT` counter. |
 | `session/` | The `Sessions` gRPC service: the client-facing seam over the log and the Placer. |
+| `cmd/agentsessionsd` | The Sessions server: a TCP entry point over the journal and the harness registry. |
 | `cmd/agentctl` | Client CLI (create / exec / replay / fork / suspend / resume). |
 | `conformance/` | The replay-conformance suite (the neutral determinism checks). |
 | `integrations/substrate/` | The substrate `ControlClient` adapter — a **separate module** so the core stays substrate-free. |
