@@ -30,8 +30,9 @@ The rest of this document is about the nouns those seams pass around.
 
 A session is the durable unit. It has a stable UID (for example `sess-6ff29e8d93d3a4c65f6f38bc`) and
 its entire truth lives in one event log. A session is not tied to a process: the same session can run
-on one incarnation now, be killed, and continue on a different one later. Its lifecycle is a single
-`Phase` enum (`api/types.go`) that flattens two axes, execution and compute, into one state:
+on one incarnation now, be killed, and continue on a different one later. Its lifecycle has two
+independent axes, execution and compute (`api/state.go`), which are reported separately because
+collapsing them loses which one actually moved. The diagram below reads them together:
 
 ```mermaid
 stateDiagram-v2

@@ -26,83 +26,9 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Phase flattens two axes — execution (the log) and compute (the incarnation) — into a
-// single lifecycle enum.
-type Phase int32
-
-const (
-	Phase_PHASE_UNSPECIFIED Phase = 0
-	Phase_PHASE_PENDING     Phase = 1
-	Phase_PHASE_RUNNING     Phase = 2
-	Phase_PHASE_PAUSING     Phase = 3
-	Phase_PHASE_PAUSED      Phase = 4 // warm: resident, worker held
-	Phase_PHASE_SUSPENDING  Phase = 5
-	Phase_PHASE_SUSPENDED   Phase = 6 // cold: snapshot in storage, worker freed
-	Phase_PHASE_RESUMING    Phase = 7
-	Phase_PHASE_FORKING     Phase = 8
-	Phase_PHASE_TERMINATED  Phase = 9 // log retained + replayable
-	Phase_PHASE_FAILED      Phase = 10
-)
-
-// Enum value maps for Phase.
-var (
-	Phase_name = map[int32]string{
-		0:  "PHASE_UNSPECIFIED",
-		1:  "PHASE_PENDING",
-		2:  "PHASE_RUNNING",
-		3:  "PHASE_PAUSING",
-		4:  "PHASE_PAUSED",
-		5:  "PHASE_SUSPENDING",
-		6:  "PHASE_SUSPENDED",
-		7:  "PHASE_RESUMING",
-		8:  "PHASE_FORKING",
-		9:  "PHASE_TERMINATED",
-		10: "PHASE_FAILED",
-	}
-	Phase_value = map[string]int32{
-		"PHASE_UNSPECIFIED": 0,
-		"PHASE_PENDING":     1,
-		"PHASE_RUNNING":     2,
-		"PHASE_PAUSING":     3,
-		"PHASE_PAUSED":      4,
-		"PHASE_SUSPENDING":  5,
-		"PHASE_SUSPENDED":   6,
-		"PHASE_RESUMING":    7,
-		"PHASE_FORKING":     8,
-		"PHASE_TERMINATED":  9,
-		"PHASE_FAILED":      10,
-	}
-)
-
-func (x Phase) Enum() *Phase {
-	p := new(Phase)
-	*p = x
-	return p
-}
-
-func (x Phase) String() string {
-	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
-}
-
-func (Phase) Descriptor() protoreflect.EnumDescriptor {
-	return file_session_proto_enumTypes[0].Descriptor()
-}
-
-func (Phase) Type() protoreflect.EnumType {
-	return &file_session_proto_enumTypes[0]
-}
-
-func (x Phase) Number() protoreflect.EnumNumber {
-	return protoreflect.EnumNumber(x)
-}
-
-// Deprecated: Use Phase.Descriptor instead.
-func (Phase) EnumDescriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{0}
-}
-
 // ExecState is the execution/turn axis; ComputeState is the incarnation axis. The two are
-// modeled explicitly (§6 of the replay contract); Phase above is a derived summary.
+// modeled explicitly (§6 of the replay contract) and reported independently: there is no
+// flattened lifecycle enum, because collapsing them loses which axis actually moved.
 type ExecState int32
 
 const (
@@ -148,11 +74,11 @@ func (x ExecState) String() string {
 }
 
 func (ExecState) Descriptor() protoreflect.EnumDescriptor {
-	return file_session_proto_enumTypes[1].Descriptor()
+	return file_session_proto_enumTypes[0].Descriptor()
 }
 
 func (ExecState) Type() protoreflect.EnumType {
-	return &file_session_proto_enumTypes[1]
+	return &file_session_proto_enumTypes[0]
 }
 
 func (x ExecState) Number() protoreflect.EnumNumber {
@@ -161,7 +87,7 @@ func (x ExecState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ExecState.Descriptor instead.
 func (ExecState) EnumDescriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{1}
+	return file_session_proto_rawDescGZIP(), []int{0}
 }
 
 type ComputeState int32
@@ -206,11 +132,11 @@ func (x ComputeState) String() string {
 }
 
 func (ComputeState) Descriptor() protoreflect.EnumDescriptor {
-	return file_session_proto_enumTypes[2].Descriptor()
+	return file_session_proto_enumTypes[1].Descriptor()
 }
 
 func (ComputeState) Type() protoreflect.EnumType {
-	return &file_session_proto_enumTypes[2]
+	return &file_session_proto_enumTypes[1]
 }
 
 func (x ComputeState) Number() protoreflect.EnumNumber {
@@ -219,7 +145,7 @@ func (x ComputeState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ComputeState.Descriptor instead.
 func (ComputeState) EnumDescriptor() ([]byte, []int) {
-	return file_session_proto_rawDescGZIP(), []int{2}
+	return file_session_proto_rawDescGZIP(), []int{1}
 }
 
 // SnapshotRef is the session-STATUS ref carried in ComputeRef below. Its shape mirrors the canonical
@@ -1559,20 +1485,7 @@ const file_session_proto_rawDesc = "" +
 	"\n" +
 	"part_index\x18\x02 \x01(\x05R\tpartIndex\x12\x14\n" +
 	"\x05chunk\x18\x03 \x01(\tR\x05chunk\x12\x12\n" +
-	"\x04done\x18\x04 \x01(\bR\x04done*\xe3\x01\n" +
-	"\x05Phase\x12\x15\n" +
-	"\x11PHASE_UNSPECIFIED\x10\x00\x12\x11\n" +
-	"\rPHASE_PENDING\x10\x01\x12\x11\n" +
-	"\rPHASE_RUNNING\x10\x02\x12\x11\n" +
-	"\rPHASE_PAUSING\x10\x03\x12\x10\n" +
-	"\fPHASE_PAUSED\x10\x04\x12\x14\n" +
-	"\x10PHASE_SUSPENDING\x10\x05\x12\x13\n" +
-	"\x0fPHASE_SUSPENDED\x10\x06\x12\x12\n" +
-	"\x0ePHASE_RESUMING\x10\a\x12\x11\n" +
-	"\rPHASE_FORKING\x10\b\x12\x14\n" +
-	"\x10PHASE_TERMINATED\x10\t\x12\x10\n" +
-	"\fPHASE_FAILED\x10\n" +
-	"*\x96\x01\n" +
+	"\x04done\x18\x04 \x01(\bR\x04done*\x96\x01\n" +
 	"\tExecState\x12\x1a\n" +
 	"\x16EXEC_STATE_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fEXEC_PENDING\x10\x01\x12\x10\n" +
@@ -1613,80 +1526,79 @@ func file_session_proto_rawDescGZIP() []byte {
 	return file_session_proto_rawDescData
 }
 
-var file_session_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_session_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_session_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_session_proto_goTypes = []any{
-	(Phase)(0),                   // 0: agentsessions.v1.Phase
-	(ExecState)(0),               // 1: agentsessions.v1.ExecState
-	(ComputeState)(0),            // 2: agentsessions.v1.ComputeState
-	(*SnapshotRef)(nil),          // 3: agentsessions.v1.SnapshotRef
-	(*RuntimeCapabilities)(nil),  // 4: agentsessions.v1.RuntimeCapabilities
-	(*ComputeRef)(nil),           // 5: agentsessions.v1.ComputeRef
-	(*Session)(nil),              // 6: agentsessions.v1.Session
-	(*CreateSessionRequest)(nil), // 7: agentsessions.v1.CreateSessionRequest
-	(*GetSessionRequest)(nil),    // 8: agentsessions.v1.GetSessionRequest
-	(*ListSessionsRequest)(nil),  // 9: agentsessions.v1.ListSessionsRequest
-	(*ListSessionsResponse)(nil), // 10: agentsessions.v1.ListSessionsResponse
-	(*DeleteSessionRequest)(nil), // 11: agentsessions.v1.DeleteSessionRequest
-	(*ExecRequest)(nil),          // 12: agentsessions.v1.ExecRequest
-	(*ReplayRequest)(nil),        // 13: agentsessions.v1.ReplayRequest
-	(*SuspendRequest)(nil),       // 14: agentsessions.v1.SuspendRequest
-	(*ResumeRequest)(nil),        // 15: agentsessions.v1.ResumeRequest
-	(*ForkRequest)(nil),          // 16: agentsessions.v1.ForkRequest
-	(*ForkResponse)(nil),         // 17: agentsessions.v1.ForkResponse
-	(*CancelRequest)(nil),        // 18: agentsessions.v1.CancelRequest
-	(*ExecUpdate)(nil),           // 19: agentsessions.v1.ExecUpdate
-	(*Delta)(nil),                // 20: agentsessions.v1.Delta
-	nil,                          // 21: agentsessions.v1.ComputeRef.AttributesEntry
-	nil,                          // 22: agentsessions.v1.Session.LabelsEntry
-	nil,                          // 23: agentsessions.v1.Session.AnnotationsEntry
-	nil,                          // 24: agentsessions.v1.ForkRequest.LabelsEntry
-	(*ResourceMetadata)(nil),     // 25: agentsessions.v1.ResourceMetadata
-	(*IdentityRef)(nil),          // 26: agentsessions.v1.IdentityRef
-	(*Origin)(nil),               // 27: agentsessions.v1.Origin
-	(*Message)(nil),              // 28: agentsessions.v1.Message
-	(*LogRecord)(nil),            // 29: agentsessions.v1.LogRecord
+	(ExecState)(0),               // 0: agentsessions.v1.ExecState
+	(ComputeState)(0),            // 1: agentsessions.v1.ComputeState
+	(*SnapshotRef)(nil),          // 2: agentsessions.v1.SnapshotRef
+	(*RuntimeCapabilities)(nil),  // 3: agentsessions.v1.RuntimeCapabilities
+	(*ComputeRef)(nil),           // 4: agentsessions.v1.ComputeRef
+	(*Session)(nil),              // 5: agentsessions.v1.Session
+	(*CreateSessionRequest)(nil), // 6: agentsessions.v1.CreateSessionRequest
+	(*GetSessionRequest)(nil),    // 7: agentsessions.v1.GetSessionRequest
+	(*ListSessionsRequest)(nil),  // 8: agentsessions.v1.ListSessionsRequest
+	(*ListSessionsResponse)(nil), // 9: agentsessions.v1.ListSessionsResponse
+	(*DeleteSessionRequest)(nil), // 10: agentsessions.v1.DeleteSessionRequest
+	(*ExecRequest)(nil),          // 11: agentsessions.v1.ExecRequest
+	(*ReplayRequest)(nil),        // 12: agentsessions.v1.ReplayRequest
+	(*SuspendRequest)(nil),       // 13: agentsessions.v1.SuspendRequest
+	(*ResumeRequest)(nil),        // 14: agentsessions.v1.ResumeRequest
+	(*ForkRequest)(nil),          // 15: agentsessions.v1.ForkRequest
+	(*ForkResponse)(nil),         // 16: agentsessions.v1.ForkResponse
+	(*CancelRequest)(nil),        // 17: agentsessions.v1.CancelRequest
+	(*ExecUpdate)(nil),           // 18: agentsessions.v1.ExecUpdate
+	(*Delta)(nil),                // 19: agentsessions.v1.Delta
+	nil,                          // 20: agentsessions.v1.ComputeRef.AttributesEntry
+	nil,                          // 21: agentsessions.v1.Session.LabelsEntry
+	nil,                          // 22: agentsessions.v1.Session.AnnotationsEntry
+	nil,                          // 23: agentsessions.v1.ForkRequest.LabelsEntry
+	(*ResourceMetadata)(nil),     // 24: agentsessions.v1.ResourceMetadata
+	(*IdentityRef)(nil),          // 25: agentsessions.v1.IdentityRef
+	(*Origin)(nil),               // 26: agentsessions.v1.Origin
+	(*Message)(nil),              // 27: agentsessions.v1.Message
+	(*LogRecord)(nil),            // 28: agentsessions.v1.LogRecord
 }
 var file_session_proto_depIdxs = []int32{
-	3,  // 0: agentsessions.v1.ComputeRef.snapshot:type_name -> agentsessions.v1.SnapshotRef
-	4,  // 1: agentsessions.v1.ComputeRef.capabilities:type_name -> agentsessions.v1.RuntimeCapabilities
-	21, // 2: agentsessions.v1.ComputeRef.attributes:type_name -> agentsessions.v1.ComputeRef.AttributesEntry
-	25, // 3: agentsessions.v1.Session.metadata:type_name -> agentsessions.v1.ResourceMetadata
-	1,  // 4: agentsessions.v1.Session.exec_state:type_name -> agentsessions.v1.ExecState
-	2,  // 5: agentsessions.v1.Session.compute_state:type_name -> agentsessions.v1.ComputeState
-	26, // 6: agentsessions.v1.Session.identity:type_name -> agentsessions.v1.IdentityRef
-	5,  // 7: agentsessions.v1.Session.compute:type_name -> agentsessions.v1.ComputeRef
-	27, // 8: agentsessions.v1.Session.origin:type_name -> agentsessions.v1.Origin
-	22, // 9: agentsessions.v1.Session.labels:type_name -> agentsessions.v1.Session.LabelsEntry
-	23, // 10: agentsessions.v1.Session.annotations:type_name -> agentsessions.v1.Session.AnnotationsEntry
-	6,  // 11: agentsessions.v1.CreateSessionRequest.session:type_name -> agentsessions.v1.Session
-	6,  // 12: agentsessions.v1.ListSessionsResponse.sessions:type_name -> agentsessions.v1.Session
-	28, // 13: agentsessions.v1.ExecRequest.inputs:type_name -> agentsessions.v1.Message
-	26, // 14: agentsessions.v1.ForkRequest.identity:type_name -> agentsessions.v1.IdentityRef
-	24, // 15: agentsessions.v1.ForkRequest.labels:type_name -> agentsessions.v1.ForkRequest.LabelsEntry
-	6,  // 16: agentsessions.v1.ForkResponse.children:type_name -> agentsessions.v1.Session
-	29, // 17: agentsessions.v1.ExecUpdate.record:type_name -> agentsessions.v1.LogRecord
-	20, // 18: agentsessions.v1.ExecUpdate.delta:type_name -> agentsessions.v1.Delta
-	7,  // 19: agentsessions.v1.Sessions.CreateSession:input_type -> agentsessions.v1.CreateSessionRequest
-	8,  // 20: agentsessions.v1.Sessions.GetSession:input_type -> agentsessions.v1.GetSessionRequest
-	9,  // 21: agentsessions.v1.Sessions.ListSessions:input_type -> agentsessions.v1.ListSessionsRequest
-	11, // 22: agentsessions.v1.Sessions.DeleteSession:input_type -> agentsessions.v1.DeleteSessionRequest
-	12, // 23: agentsessions.v1.Sessions.Exec:input_type -> agentsessions.v1.ExecRequest
-	13, // 24: agentsessions.v1.Sessions.Replay:input_type -> agentsessions.v1.ReplayRequest
-	18, // 25: agentsessions.v1.Sessions.Cancel:input_type -> agentsessions.v1.CancelRequest
-	14, // 26: agentsessions.v1.Sessions.Suspend:input_type -> agentsessions.v1.SuspendRequest
-	15, // 27: agentsessions.v1.Sessions.Resume:input_type -> agentsessions.v1.ResumeRequest
-	16, // 28: agentsessions.v1.Sessions.Fork:input_type -> agentsessions.v1.ForkRequest
-	6,  // 29: agentsessions.v1.Sessions.CreateSession:output_type -> agentsessions.v1.Session
-	6,  // 30: agentsessions.v1.Sessions.GetSession:output_type -> agentsessions.v1.Session
-	10, // 31: agentsessions.v1.Sessions.ListSessions:output_type -> agentsessions.v1.ListSessionsResponse
-	6,  // 32: agentsessions.v1.Sessions.DeleteSession:output_type -> agentsessions.v1.Session
-	19, // 33: agentsessions.v1.Sessions.Exec:output_type -> agentsessions.v1.ExecUpdate
-	29, // 34: agentsessions.v1.Sessions.Replay:output_type -> agentsessions.v1.LogRecord
-	6,  // 35: agentsessions.v1.Sessions.Cancel:output_type -> agentsessions.v1.Session
-	6,  // 36: agentsessions.v1.Sessions.Suspend:output_type -> agentsessions.v1.Session
-	6,  // 37: agentsessions.v1.Sessions.Resume:output_type -> agentsessions.v1.Session
-	17, // 38: agentsessions.v1.Sessions.Fork:output_type -> agentsessions.v1.ForkResponse
+	2,  // 0: agentsessions.v1.ComputeRef.snapshot:type_name -> agentsessions.v1.SnapshotRef
+	3,  // 1: agentsessions.v1.ComputeRef.capabilities:type_name -> agentsessions.v1.RuntimeCapabilities
+	20, // 2: agentsessions.v1.ComputeRef.attributes:type_name -> agentsessions.v1.ComputeRef.AttributesEntry
+	24, // 3: agentsessions.v1.Session.metadata:type_name -> agentsessions.v1.ResourceMetadata
+	0,  // 4: agentsessions.v1.Session.exec_state:type_name -> agentsessions.v1.ExecState
+	1,  // 5: agentsessions.v1.Session.compute_state:type_name -> agentsessions.v1.ComputeState
+	25, // 6: agentsessions.v1.Session.identity:type_name -> agentsessions.v1.IdentityRef
+	4,  // 7: agentsessions.v1.Session.compute:type_name -> agentsessions.v1.ComputeRef
+	26, // 8: agentsessions.v1.Session.origin:type_name -> agentsessions.v1.Origin
+	21, // 9: agentsessions.v1.Session.labels:type_name -> agentsessions.v1.Session.LabelsEntry
+	22, // 10: agentsessions.v1.Session.annotations:type_name -> agentsessions.v1.Session.AnnotationsEntry
+	5,  // 11: agentsessions.v1.CreateSessionRequest.session:type_name -> agentsessions.v1.Session
+	5,  // 12: agentsessions.v1.ListSessionsResponse.sessions:type_name -> agentsessions.v1.Session
+	27, // 13: agentsessions.v1.ExecRequest.inputs:type_name -> agentsessions.v1.Message
+	25, // 14: agentsessions.v1.ForkRequest.identity:type_name -> agentsessions.v1.IdentityRef
+	23, // 15: agentsessions.v1.ForkRequest.labels:type_name -> agentsessions.v1.ForkRequest.LabelsEntry
+	5,  // 16: agentsessions.v1.ForkResponse.children:type_name -> agentsessions.v1.Session
+	28, // 17: agentsessions.v1.ExecUpdate.record:type_name -> agentsessions.v1.LogRecord
+	19, // 18: agentsessions.v1.ExecUpdate.delta:type_name -> agentsessions.v1.Delta
+	6,  // 19: agentsessions.v1.Sessions.CreateSession:input_type -> agentsessions.v1.CreateSessionRequest
+	7,  // 20: agentsessions.v1.Sessions.GetSession:input_type -> agentsessions.v1.GetSessionRequest
+	8,  // 21: agentsessions.v1.Sessions.ListSessions:input_type -> agentsessions.v1.ListSessionsRequest
+	10, // 22: agentsessions.v1.Sessions.DeleteSession:input_type -> agentsessions.v1.DeleteSessionRequest
+	11, // 23: agentsessions.v1.Sessions.Exec:input_type -> agentsessions.v1.ExecRequest
+	12, // 24: agentsessions.v1.Sessions.Replay:input_type -> agentsessions.v1.ReplayRequest
+	17, // 25: agentsessions.v1.Sessions.Cancel:input_type -> agentsessions.v1.CancelRequest
+	13, // 26: agentsessions.v1.Sessions.Suspend:input_type -> agentsessions.v1.SuspendRequest
+	14, // 27: agentsessions.v1.Sessions.Resume:input_type -> agentsessions.v1.ResumeRequest
+	15, // 28: agentsessions.v1.Sessions.Fork:input_type -> agentsessions.v1.ForkRequest
+	5,  // 29: agentsessions.v1.Sessions.CreateSession:output_type -> agentsessions.v1.Session
+	5,  // 30: agentsessions.v1.Sessions.GetSession:output_type -> agentsessions.v1.Session
+	9,  // 31: agentsessions.v1.Sessions.ListSessions:output_type -> agentsessions.v1.ListSessionsResponse
+	5,  // 32: agentsessions.v1.Sessions.DeleteSession:output_type -> agentsessions.v1.Session
+	18, // 33: agentsessions.v1.Sessions.Exec:output_type -> agentsessions.v1.ExecUpdate
+	28, // 34: agentsessions.v1.Sessions.Replay:output_type -> agentsessions.v1.LogRecord
+	5,  // 35: agentsessions.v1.Sessions.Cancel:output_type -> agentsessions.v1.Session
+	5,  // 36: agentsessions.v1.Sessions.Suspend:output_type -> agentsessions.v1.Session
+	5,  // 37: agentsessions.v1.Sessions.Resume:output_type -> agentsessions.v1.Session
+	16, // 38: agentsessions.v1.Sessions.Fork:output_type -> agentsessions.v1.ForkResponse
 	29, // [29:39] is the sub-list for method output_type
 	19, // [19:29] is the sub-list for method input_type
 	19, // [19:19] is the sub-list for extension type_name
@@ -1709,7 +1621,7 @@ func file_session_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_session_proto_rawDesc), len(file_session_proto_rawDesc)),
-			NumEnums:      3,
+			NumEnums:      2,
 			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,

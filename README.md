@@ -102,7 +102,7 @@ Full docs live in [`docs/`](docs/README.md):
 | `placement/` | The `Placer`: wires Sessions to the `Runtime` SPI, mints/binds fences, gates via `CanPlace`. |
 | `runtime/local`, `runtime/substrate` | `Runtime` backends: a filesystem-only local backend, and agent-substrate. |
 | `harness/echoagent`, `harness/counteragent` | Reference harnesses: `STATELESS_REPLAY` echo, `REQUIRES_MEMORY_SNAPSHOT` counter. |
-| `session/`, `host/` | The `Sessions` gRPC service + the reference host. |
+| `session/` | The `Sessions` gRPC service: the client-facing seam over the log and the Placer. |
 | `cmd/agentctl` | Client CLI (create / exec / replay / fork / suspend / resume). |
 | `conformance/` | The replay-conformance suite (the neutral determinism checks). |
 | `integrations/substrate/` | The substrate `ControlClient` adapter — a **separate module** so the core stays substrate-free. |

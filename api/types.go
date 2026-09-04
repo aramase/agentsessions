@@ -12,24 +12,6 @@ package api
 
 import "time"
 
-// Phase is the session lifecycle state. It flattens two axes — execution (the event
-// log) and compute (the incarnation) — into a single enum.
-type Phase string
-
-const (
-	PhaseUnspecified Phase = "UNSPECIFIED"
-	PhasePending     Phase = "PENDING"
-	PhaseRunning     Phase = "RUNNING"
-	PhasePausing     Phase = "PAUSING"
-	PhasePaused      Phase = "PAUSED" // warm: resident on worker, instant resume
-	PhaseSuspending  Phase = "SUSPENDING"
-	PhaseSuspended   Phase = "SUSPENDED" // cold: snapshot in storage, worker freed
-	PhaseResuming    Phase = "RESUMING"
-	PhaseForking     Phase = "FORKING"
-	PhaseTerminated  Phase = "TERMINATED" // log retained + replayable
-	PhaseFailed      Phase = "FAILED"
-)
-
 // EventKind classifies an Event. Typed events (vs opaque messages) are what make
 // provenance, audit, cost, and tool-approval first-class.
 type EventKind string
