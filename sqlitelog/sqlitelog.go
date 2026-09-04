@@ -67,6 +67,43 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS sessions_project_created
   ON sessions(project, created_at DESC, session);`
 
+// SchemaVersion is the schema shape this build writes, stamped into PRAGMA user_version so a
+// later build can identify a database without inspecting its columns.
+//
+// There is no migration ladder. Migration runs BETWEEN releases, and this is the first one, so
+// there is no earlier shape to migrate from and a ladder would have no rungs. The first schema
+// change after release adds one, and the stamp is what lets it know where to start.
+const SchemaVersion = 1
+
+// ErrUnsupportedSchema reports a database written by a build with a newer schema.
+var ErrUnsupportedSchema = errors.New("sqlitelog: unsupported database schema")
+
+// stampSchemaVersion records SchemaVersion on a database that carries no stamp, and refuses one
+// stamped newer than this build understands.
+//
+// Refusing is the point of reading it back. A newer database may have columns or invariants this
+// build does not know about, and appending to a hash-chained log under those conditions risks
+// corrupting the chain. Failing closed at Open is cheap; a partially-understood journal is not.
+func stampSchemaVersion(db *sql.DB) error {
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return fmt.Errorf("sqlitelog: read schema version: %w", err)
+	}
+	switch {
+	case v == SchemaVersion:
+		return nil
+	case v > SchemaVersion:
+		return fmt.Errorf("%w: database is v%d, this build understands v%d", ErrUnsupportedSchema, v, SchemaVersion)
+	default:
+		// Zero means unstamped: a fresh database, or one written before the stamp existed. The
+		// schema above is applied unconditionally, so either way it now has the current shape.
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)); err != nil {
+			return fmt.Errorf("sqlitelog: stamp schema version: %w", err)
+		}
+		return nil
+	}
+}
+
 // DefaultProject is the tenant a session lands in when none is supplied. A session is never stored
 // with an empty project: a listing filters on an exact project, so a project-less row would be
 // invisible to every caller that asks for a real one.
@@ -129,13 +166,13 @@ func Open(path string, opts ...Option) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("sqlitelog: %q: %w", "PRAGMA synchronous=FULL", err)
 	}
-	if err := checkSchema(db); err != nil {
-		db.Close()
-		return nil, err
-	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("sqlitelog: schema: %w", err)
+	}
+	if err := stampSchemaVersion(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return &Store{db: db, defaultProject: cfg.defaultProject}, nil
 }
