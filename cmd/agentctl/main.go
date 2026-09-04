@@ -103,11 +103,16 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 	}
 	logger := slog.Default()
 	backend := local.New(echoagent.Harness{}, local.WithLogger(logger))
-	svc := session.NewService(store, placement.New(
-		backend,
-		echoagent.Model,
-		placement.WithLogger(logger),
-	), session.WithLogger(logger), session.WithDefaultProject(cfg.project))
+	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{
+		"echo": placement.New(backend, echoagent.Model, placement.WithLogger(logger)),
+	})
+	if err != nil {
+		backend.Close()
+		store.Close()
+		return nil, nil, err
+	}
+	svc := session.NewService(store, registry,
+		session.WithLogger(logger), session.WithDefaultProject(cfg.project))
 	sock := fmt.Sprintf("%s/agentctl-%d.sock", os.TempDir(), os.Getpid())
 	_ = os.Remove(sock)
 	lis, err := net.Listen("unix", sock)

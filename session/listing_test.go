@@ -36,7 +36,7 @@ func serveWith(t *testing.T, store *sqlitelog.Store, backend placement.Backend, 
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	v1.RegisterSessionsServer(srv, session.NewService(store, placement.New(backend, echoagent.Model), opts...))
+	v1.RegisterSessionsServer(srv, session.NewService(store, echoRegistry(t, backend), opts...))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 
@@ -518,4 +518,17 @@ func TestForkRejectsChildNameCountMismatch(t *testing.T) {
 	if got := len(resp.GetSessions()); got != 1 {
 		t.Fatalf("list returned %d sessions, want only the parent", got)
 	}
+}
+
+// echoRegistry wraps a backend as the single-harness registry the tests drive. Harness routing has
+// its own tests in package placement; these exercise the service through it.
+func echoRegistry(t *testing.T, b placement.Backend, opts ...placement.Option) *placement.Registry {
+	t.Helper()
+	r, err := placement.NewRegistry("echo", map[string]*placement.Placer{
+		"echo": placement.New(b, echoagent.Model, opts...),
+	})
+	if err != nil {
+		t.Fatalf("build registry: %v", err)
+	}
+	return r
 }

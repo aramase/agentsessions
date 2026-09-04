@@ -45,7 +45,7 @@ func newClientWith(t *testing.T, backend placement.Backend) v1.SessionsClient {
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	v1.RegisterSessionsServer(srv, session.NewService(store, placement.New(backend, echoagent.Model)))
+	v1.RegisterSessionsServer(srv, session.NewService(store, echoRegistry(t, backend)))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 
@@ -80,7 +80,7 @@ func TestRequestFlowLogsAreCorrelated(t *testing.T) {
 	)
 	v1.RegisterSessionsServer(srv, session.NewService(
 		store,
-		placement.New(backend, echoagent.Model, placement.WithLogger(logger)),
+		echoRegistry(t, backend, placement.WithLogger(logger)),
 		session.WithLogger(logger),
 	))
 	go srv.Serve(lis)
@@ -99,8 +99,12 @@ func TestRequestFlowLogsAreCorrelated(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	client := v1.NewSessionsClient(conn)
+	uid := mustCreate(t, client)
+	// Creating the session is its own request with its own id. Drop those records so the
+	// assertions below describe the Exec flow alone.
+	output.Reset()
 	stream, err := client.Exec(context.Background(), &v1.ExecRequest{
-		Session: "observed-session",
+		Session: uid,
 		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "do-not-log-this"))},
 	})
 	if err != nil {
@@ -142,7 +146,7 @@ func TestRequestFlowLogsAreCorrelated(t *testing.T) {
 				required[key] = true
 			}
 		}
-		if component == "controller" && record["session_uid"] != "observed-session" {
+		if component == "controller" && record["session_uid"] != uid {
 			t.Fatalf("controller record missing session correlation: %v", record)
 		}
 		if requestID, _ := record["request_id"].(string); requestID != "" {
@@ -188,7 +192,7 @@ func TestRequestFlowLogsAreCorrelated(t *testing.T) {
 
 	output.Reset()
 	stream, err = client.Exec(context.Background(), &v1.ExecRequest{
-		Session:         "observed-session",
+		Session:         uid,
 		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", "retry"))},
 		ExpectedLastSeq: 0,
 	})
@@ -229,7 +233,7 @@ func TestServiceCreatesRequestIDWithoutInterceptors(t *testing.T) {
 	srv := grpc.NewServer()
 	v1.RegisterSessionsServer(srv, session.NewService(
 		store,
-		placement.New(backend, echoagent.Model, placement.WithLogger(logger)),
+		echoRegistry(t, backend, placement.WithLogger(logger)),
 		session.WithLogger(logger),
 	))
 	go srv.Serve(lis)
@@ -245,7 +249,8 @@ func TestServiceCreatesRequestIDWithoutInterceptors(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	stream, err := v1.NewSessionsClient(conn).Exec(context.Background(), &v1.ExecRequest{Session: "direct-service"})
+	client := v1.NewSessionsClient(conn)
+	stream, err := client.Exec(context.Background(), &v1.ExecRequest{Session: mustCreate(t, client)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +315,7 @@ func (memHarness) Run(context.Context, *api.Start, api.EventSink) error { return
 func TestExecUnplaceableIsFailedPrecondition(t *testing.T) {
 	c := newClientWith(t, local.New(memHarness{}))
 	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
-		Session: "s",
+		Session: mustCreate(t, c),
 		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
 	})
 	if err != nil {
@@ -453,5 +458,62 @@ func TestForkRejectsUnboundedChildCount(t *testing.T) {
 	// The boundary itself stays valid: the guard must not be off by one.
 	if _, err := c.Fork(ctx, &v1.ForkRequest{Session: sess, Count: session.MaxForkChildren}); err != nil {
 		t.Fatalf("fork at the documented maximum must be accepted: %v", err)
+	}
+}
+
+// mustCreate registers a session and returns its uid. Exec resolves the harness from the session's
+// metadata row, so a session has to exist before it can be executed.
+func mustCreate(t *testing.T, c v1.SessionsClient) string {
+	t.Helper()
+	sess, err := c.CreateSession(context.Background(), &v1.CreateSessionRequest{})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	return sess.GetMetadata().GetUid()
+}
+
+// A session records the harness it was created with, and Exec routes on that rather than on a
+// single configured backend. Naming one the host does not serve is a caller mistake, so it is
+// rejected instead of quietly running on whatever happens to be wired.
+func TestCreateSessionRejectsUnknownHarness(t *testing.T) {
+	c := newClient(t)
+	_, err := c.CreateSession(context.Background(), &v1.CreateSessionRequest{
+		Session: &v1.Session{Harness: "nope"},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("unknown harness at create: want InvalidArgument, got %v", err)
+	}
+}
+
+// ExecRequest.harness is defined as "empty = session default", so a name the host does not serve
+// must fail rather than fall back to the default.
+func TestExecRejectsUnknownHarnessOverride(t *testing.T) {
+	c := newClient(t)
+	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+		Session: mustCreate(t, c),
+		Harness: "nope",
+		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("unknown harness override: want InvalidArgument, got %v", err)
+	}
+}
+
+// Routing resolves the harness from the session's metadata row, so a session that was never
+// created has nothing to route on and is reported as missing rather than run on a default.
+func TestExecUnknownSessionIsNotFound(t *testing.T) {
+	c := newClient(t)
+	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+		Session: "sess-does-not-exist",
+		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); status.Code(err) != codes.NotFound {
+		t.Fatalf("unknown session: want NotFound, got %v", err)
 	}
 }
