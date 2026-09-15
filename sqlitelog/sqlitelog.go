@@ -53,7 +53,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   fork_seq      INTEGER NOT NULL DEFAULT 0,
   compute_state TEXT    NOT NULL DEFAULT '',
   created_at    INTEGER NOT NULL DEFAULT 0,
-  updated_at    INTEGER NOT NULL DEFAULT 0
+  updated_at    INTEGER NOT NULL DEFAULT 0,
+  -- Caller-supplied metadata, stored as proto3-JSON. These are opaque to the store: it round-trips
+  -- them so a session reports what its creator attached, and nothing here is interpreted or
+  -- enforced. identity in particular is provenance, not authorization -- see docs/security.md.
+  labels        TEXT    NOT NULL DEFAULT '',
+  annotations   TEXT    NOT NULL DEFAULT '',
+  origin        TEXT    NOT NULL DEFAULT '',
+  identity      TEXT    NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS events (
   session   TEXT    NOT NULL,
@@ -69,6 +76,10 @@ CREATE INDEX IF NOT EXISTS sessions_project_created
 
 // SchemaVersion is the schema shape this build writes, stamped into PRAGMA user_version so a
 // later build can identify a database without inspecting its columns.
+//
+// It stays at 1 through the first release: version 1 is whatever v0.1.0 ships with. A database
+// written by an earlier development build is not migrated, because none exists outside a scratch
+// directory; delete it and start again.
 //
 // There is no migration ladder. Migration runs BETWEEN releases, and this is the first one, so
 // there is no earlier shape to migrate from and a ladder would have no rungs. The first schema

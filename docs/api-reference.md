@@ -906,9 +906,9 @@ reasoning) part. No seq; never hash-chained (§8, A2A TaskArtifactUpdateEvent).
 | ----- | ---- | ----- | ----------- |
 | session | [string](#string) |  | The session to run against. Empty creates one first, using the server defaults and the harness below, and returns it as the stream&#39;s first frame. A caller that wants to set a project, name, or model still calls CreateSession; this exists so the common case is one call rather than three (create, read the cursor, exec). |
 | inputs | [Message](#agentsessions-v1-Message) | repeated | Input messages for this turn. Empty = resume/re-drive the last non-terminal execution with no new input (recovery after a crash/interruption). |
-| resume_from_seq | [int64](#int64) |  | client replay cursor after a disconnect (was: last_seq) |
+| resume_from_seq | [int64](#int64) |  | Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a harness knows what resuming from a sequence means for its own state. To re-read committed records after a disconnect, use Replay, which is the read path for exactly that. |
 | harness | [string](#string) |  | empty = session default |
-| config | [bytes](#bytes) |  |  |
+| config | [bytes](#bytes) |  | opaque per-execution config, passed through to Start.config |
 | expected_last_seq | [int64](#int64) | optional | Single-writer CAS: the host commits this execution&#39;s first event only if the log head equals expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log.
 
 It is optional because the guarantee should be opt-in rather than the price of a simple call. Unset means &#34;append at whatever the head is now&#34;, which is what a caller with a single writer wants. Set means the strict check, and 0 is a real value there: it asserts the session has no events yet. That distinction is why this carries explicit presence instead of treating 0 as &#34;unset&#34; -- a caller could not otherwise say &#34;this must be the first turn&#34;. |
@@ -1109,7 +1109,7 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | last_seq | [int64](#int64) |  | event-log cursor |
 | parent_uid | [string](#string) |  | fork lineage |
 | fork_seq | [int64](#int64) |  |  |
-| identity | [IdentityRef](#agentsessions-v1-IdentityRef) |  |  |
+| identity | [IdentityRef](#agentsessions-v1-IdentityRef) |  | Recorded provenance, never enforced: it says on whose behalf a session was created, and the hash chain makes that record tamper-evident. Nothing in this implementation treats it as authorization. See docs/security.md. |
 | compute | [ComputeRef](#agentsessions-v1-ComputeRef) |  | empty when SUSPENDED/TERMINATED |
 | origin | [Origin](#agentsessions-v1-Origin) |  | neutral external context; filled by a producer adapter |
 | labels | [Session.LabelsEntry](#agentsessions-v1-Session-LabelsEntry) | repeated |  |

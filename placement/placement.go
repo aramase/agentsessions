@@ -65,12 +65,32 @@ func WithDialer(d Dialer) Option { return func(p *Placer) { p.dial = d } }
 // ExecOption configures a single execution.
 type ExecOption func(*execConfig)
 
-type execConfig struct{ observer controller.Observer }
+type execConfig struct {
+	observer      controller.Observer
+	config        []byte
+	resumeFromSeq int64
+	deadline      time.Time
+}
 
 // WithObserver relays a turn's records and streaming chunks as they happen, instead of leaving the
 // caller to re-read the log once the turn is over.
 func WithObserver(o controller.Observer) ExecOption {
 	return func(c *execConfig) { c.observer = o }
+}
+
+// WithStart carries the caller's opaque per-execution config and resume cursor to the harness.
+func WithStart(config []byte, resumeFromSeq int64) ExecOption {
+	return func(c *execConfig) {
+		c.config = config
+		c.resumeFromSeq = resumeFromSeq
+	}
+}
+
+// WithDeadline bounds the execution. It applies to the whole turn, including the model call, which
+// is what makes it enforceable at all: the host owns that call, so cancelling the turn cancels the
+// request in flight rather than leaving it to finish unobserved.
+func WithDeadline(t time.Time) ExecOption {
+	return func(c *execConfig) { c.deadline = t }
 }
 
 // controllerOpts is the shared controller configuration, so the exec and resume paths cannot drift
@@ -119,6 +139,11 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	var cfg execConfig
 	for _, o := range opts {
 		o(&cfg)
+	}
+	if !cfg.deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, cfg.deadline)
+		defer cancel()
 	}
 	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.StartDebug(ctx, p.logger, "placement", "exec",
@@ -188,7 +213,9 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	fenceFinished(nil)
 	inc.FenceToken = fence // Placer-owned: the incarnation carries the token Suspend/Resume will need
-	c, err := controller.New(log, p.model, p.controllerOpts(fence, sessionUID, cfg.observer)...)
+	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer),
+		controller.WithStart(cfg.config, cfg.resumeFromSeq))
+	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return inc, err
 	}

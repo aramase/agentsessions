@@ -78,6 +78,9 @@ message Session {
   string parent_uid = 6; // fork lineage
   int64 fork_seq = 7;
 
+  // Recorded provenance, never enforced: it says on whose behalf a session was created, and the
+  // hash chain makes that record tamper-evident. Nothing in this implementation treats it as
+  // authorization. See docs/security.md.
   IdentityRef identity = 8;
   ComputeRef compute = 9; // empty when SUSPENDED/TERMINATED
   Origin origin = 10;     // neutral external context; filled by a producer adapter
@@ -116,9 +119,12 @@ message ExecRequest {
   // Input messages for this turn. Empty = resume/re-drive the last non-terminal
   // execution with no new input (recovery after a crash/interruption).
   repeated Message inputs = 2;
-  int64 resume_from_seq = 3; // client replay cursor after a disconnect (was: last_seq)
+  // Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a
+  // harness knows what resuming from a sequence means for its own state. To re-read committed
+  // records after a disconnect, use Replay, which is the read path for exactly that.
+  int64 resume_from_seq = 3;
   string harness = 4;        // empty = session default
-  bytes config = 5;
+  bytes config = 5; // opaque per-execution config, passed through to Start.config
   // Single-writer CAS: the host commits this execution's first event only if the log head equals
   // expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log.
   //
