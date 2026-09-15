@@ -105,6 +105,7 @@ Full docs live in [`docs/`](docs/README.md):
 | `harness/echoagent`, `harness/counteragent` | Reference harnesses: `STATELESS_REPLAY` echo, `REQUIRES_MEMORY_SNAPSHOT` counter. |
 | `model/openai` | Model provider for OpenAI-compatible endpoints; no vendor SDK, so any compatible service works. |
 | `session/` | The `Sessions` gRPC service: the client-facing seam over the log and the Placer. |
+| `client/` | Go client SDK: dialing, the session frame, pagination, and stream draining. |
 | `cmd/agentsessionsd` | The Sessions server: a TCP entry point over the journal and the harness registry. |
 | `cmd/agentctl` | Client CLI (create / exec / replay / fork / suspend / resume). |
 | `conformance/` | The replay-conformance suite (the neutral determinism checks). |

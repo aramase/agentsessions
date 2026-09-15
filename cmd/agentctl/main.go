@@ -17,24 +17,21 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"os"
 	"strings"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/client"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/session"
 	"github.com/aramase/agentsessions/sqlitelog"
-	"github.com/aramase/agentsessions/wire"
 )
 
 func main() {
@@ -83,18 +80,13 @@ func commonFlags(fs *flag.FlagSet) *config {
 
 // dial returns a Sessions client. With --server it dials the remote; otherwise it starts an
 // embedded Sessions server over a unix socket, backed by the local sqlite journal, and dials that.
-func dial(cfg *config) (v1.SessionsClient, func(), error) {
+func dial(cfg *config) (*client.Client, func(), error) {
 	if cfg.server != "" {
-		conn, err := grpc.NewClient(
-			cfg.server,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
-			grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
-		)
+		c, err := client.Dial(cfg.server, client.WithProject(cfg.project))
 		if err != nil {
 			return nil, nil, err
 		}
-		return v1.NewSessionsClient(conn), func() { conn.Close() }, nil
+		return c, func() { _ = c.Close() }, nil
 	}
 
 	store, err := sqlitelog.Open(cfg.journal, sqlitelog.WithDefaultProject(cfg.project))
@@ -128,14 +120,11 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 	v1.RegisterSessionsServer(srv, svc)
 	go srv.Serve(lis)
 
-	conn, err := grpc.NewClient(
-		"passthrough:///embedded",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
-		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+	c, err := client.Dial("passthrough:///embedded",
+		client.WithProject(cfg.project),
+		client.WithDialOptions(grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
-		}),
+		})),
 	)
 	if err != nil {
 		srv.Stop()
@@ -145,13 +134,13 @@ func dial(cfg *config) (v1.SessionsClient, func(), error) {
 		return nil, nil, err
 	}
 	cleanup := func() {
-		conn.Close()
+		_ = c.Close()
 		srv.Stop()
 		os.Remove(sock)
 		backend.Close()
 		store.Close()
 	}
-	return v1.NewSessionsClient(conn), cleanup, nil
+	return c, cleanup, nil
 }
 
 func cmdCreate(args []string) error {
@@ -162,17 +151,15 @@ func cmdCreate(args []string) error {
 	fs.StringVar(&harness, "harness", "", "harness to run the session on (default: the host's)")
 	fs.StringVar(&model, "model", "", "model id")
 	_ = fs.Parse(args)
-	client, cleanup, err := dial(cfg)
+	c, cleanup, err := dial(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	sess, err := client.CreateSession(context.Background(), &v1.CreateSessionRequest{
-		Session: &v1.Session{
-			Metadata: &v1.ResourceMetadata{Project: cfg.project, Name: name},
-			Harness:  harness,
-			Model:    model,
-		},
+	sess, err := c.CreateSession(context.Background(), &v1.Session{
+		Metadata: &v1.ResourceMetadata{Project: cfg.project, Name: name},
+		Harness:  harness,
+		Model:    model,
 	})
 	if err != nil {
 		return err
@@ -189,37 +176,26 @@ func cmdList(args []string) error {
 	var pageSize int
 	fs.IntVar(&pageSize, "page-size", 0, "sessions per request; 0 uses the server default")
 	_ = fs.Parse(args)
-	client, cleanup, err := dial(cfg)
+	c, cleanup, err := dial(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	ctx := context.Background()
-	token := ""
-	for {
-		resp, err := client.ListSessions(ctx, &v1.ListSessionsRequest{
-			Project:   cfg.project,
-			PageSize:  int32(pageSize),
-			PageToken: token,
-		})
-		if err != nil {
-			return err
-		}
-		for _, s := range resp.GetSessions() {
-			fmt.Printf("%s\tlast_seq=%d\tcompute=%s\tharness=%s\tname=%s\n",
-				s.GetMetadata().GetUid(),
-				s.GetLastSeq(),
-				strings.TrimPrefix(s.GetComputeState().String(), "COMPUTE_"),
-				s.GetHarness(),
-				s.GetMetadata().GetName(),
-			)
-		}
-		token = resp.GetNextPageToken()
-		if token == "" {
-			return nil
-		}
+	sessions, err := c.ListSessions(context.Background(), cfg.project)
+	if err != nil {
+		return err
 	}
+	for _, s := range sessions {
+		fmt.Printf("%s\tlast_seq=%d\tcompute=%s\tharness=%s\tname=%s\n",
+			s.GetMetadata().GetUid(),
+			s.GetLastSeq(),
+			strings.TrimPrefix(s.GetComputeState().String(), "COMPUTE_"),
+			s.GetHarness(),
+			s.GetMetadata().GetName(),
+		)
+	}
+	return nil
 }
 
 func cmdGet(args []string) error {
@@ -228,12 +204,12 @@ func cmdGet(args []string) error {
 	var uid string
 	fs.StringVar(&uid, "session", "", "session UID")
 	_ = fs.Parse(args)
-	client, cleanup, err := dial(cfg)
+	c, cleanup, err := dial(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	sess, err := client.GetSession(context.Background(), &v1.GetSessionRequest{Uid: uid})
+	sess, err := c.GetSession(context.Background(), uid)
 	if err != nil {
 		return err
 	}
@@ -255,36 +231,25 @@ func cmdExec(args []string) error {
 	fs.StringVar(&sess, "session", "", "session UID (created if empty)")
 	fs.StringVar(&input, "input", "", "user input for this turn")
 	_ = fs.Parse(args)
-	client, cleanup, err := dial(cfg)
+	c, cleanup, err := dial(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	// One call: an empty session is created by the server, and leaving expected_last_seq unset
-	// appends at the head. The session arrives as the stream's first frame.
-	stream, err := client.Exec(context.Background(), &v1.ExecRequest{
+	// One call: an empty session is created by the server, and leaving ExpectedLastSeq nil appends
+	// at the head. Records print as they commit rather than after the turn.
+	_, err = c.Exec(context.Background(), client.ExecOptions{
 		Session: sess,
-		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", input))},
+		Inputs:  []string{input},
+		OnSession: func(s *v1.Session) {
+			if sess == "" {
+				fmt.Printf("session %s\n", s.GetMetadata().GetUid())
+			}
+		},
+		OnRecord: printRecord,
 	})
-	if err != nil {
-		return err
-	}
-	for {
-		up, err := stream.Recv()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if s := up.GetSession(); s != nil && sess == "" {
-			fmt.Printf("session %s\n", s.GetMetadata().GetUid())
-		}
-		if r := up.GetRecord(); r != nil {
-			printRecord(r)
-		}
-	}
+	return err
 }
 
 func cmdReplay(args []string) error {
@@ -295,25 +260,19 @@ func cmdReplay(args []string) error {
 	fs.StringVar(&sess, "session", "", "session UID")
 	fs.Int64Var(&from, "from", 1, "replay from this seq")
 	_ = fs.Parse(args)
-	client, cleanup, err := dial(cfg)
+	c, cleanup, err := dial(cfg)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	stream, err := client.Replay(context.Background(), &v1.ReplayRequest{Session: sess, FromSeq: from})
+	records, err := c.Replay(context.Background(), sess, from, 0)
 	if err != nil {
 		return err
 	}
-	for {
-		r, err := stream.Recv()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
+	for _, r := range records {
 		printRecord(r)
 	}
+	return nil
 }
 
 func cmdFork(args []string) error {
@@ -328,7 +287,7 @@ func cmdFork(args []string) error {
 	fs.IntVar(&count, "count", 1, "number of children")
 	fs.StringVar(&names, "names", "", "comma-separated display names for the children, in order; must match -count")
 	_ = fs.Parse(args)
-	client, cleanup, err := dial(cfg)
+	c, cleanup, err := dial(cfg)
 	if err != nil {
 		return err
 	}
@@ -337,11 +296,13 @@ func cmdFork(args []string) error {
 	if names != "" {
 		childNames = strings.Split(names, ",")
 	}
-	resp, err := client.Fork(context.Background(), &v1.ForkRequest{Session: sess, AtSeq: at, Count: int32(count), ChildNames: childNames})
+	children, err := c.Fork(context.Background(), sess, client.ForkOptions{
+		AtSeq: at, Count: int32(count), Names: childNames,
+	})
 	if err != nil {
 		return err
 	}
-	for _, ch := range resp.GetChildren() {
+	for _, ch := range children {
 		fmt.Printf("child %s parent=%s fork_seq=%d name=%s\n", ch.GetMetadata().GetUid(), ch.GetParentUid(), ch.GetForkSeq(), ch.GetMetadata().GetName())
 	}
 	return nil
@@ -356,7 +317,7 @@ func lifecycle(args []string, which string) error {
 	var sess string
 	fs.StringVar(&sess, "session", "", "session UID")
 	_ = fs.Parse(args)
-	client, cleanup, err := dial(cfg)
+	c, cleanup, err := dial(cfg)
 	if err != nil {
 		return err
 	}
@@ -364,9 +325,9 @@ func lifecycle(args []string, which string) error {
 	ctx := context.Background()
 	var out *v1.Session
 	if which == "suspend" {
-		out, err = client.Suspend(ctx, &v1.SuspendRequest{Session: sess})
+		out, err = c.Suspend(ctx, sess)
 	} else {
-		out, err = client.Resume(ctx, &v1.ResumeRequest{Session: sess})
+		out, err = c.Resume(ctx, sess, false)
 	}
 	if err != nil {
 		return err
