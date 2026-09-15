@@ -80,6 +80,8 @@ determinism guarantees are exercised by a replay-conformance suite (`conformance
 Full docs live in [`docs/`](docs/README.md):
 
 - [**Concepts**](docs/concepts.md): the mental model: sessions, typed events, the log, fences, resumability.
+- [**How you use it**](docs/interaction-model.md): what you implement, what you call, and what it
+  deliberately does not provide.
 - [**Quickstart**](docs/quickstart.md): exec / replay / fork / suspend / resume and verify the chain, locally.
 - [**Writing a harness**](docs/harness-authoring.md): plug your agent into the `api.Harness` SPI.
 - [**Architecture**](docs/architecture.md): how the neutral core is built.
