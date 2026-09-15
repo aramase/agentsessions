@@ -255,7 +255,8 @@ func unixDial(sock string) (api.Harness, func() error, error) {
 
 // tcpDial connects to a harnesswire server at a TCP host:port over h2c (cleartext HTTP/2). Substrate
 // exposes the actor's harness on PodIP:80; an in-cluster caller dials it directly, bypassing the
-// HTTP/1.1-only atenet router. No TLS: the harness terminates plaintext gRPC, matching google/ax.
+// HTTP/1.1-only atenet router. No TLS: the harness terminates plaintext gRPC, which is why this
+// path belongs on a trusted network only (see docs/security.md).
 func tcpDial(address string) (api.Harness, func() error, error) {
 	conn, err := grpc.NewClient(
 		address,

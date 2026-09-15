@@ -4,8 +4,8 @@
 // pod, resume on another" real. content_hash is computed once at append via package canon
 // (RFC 8785 JCS over proto3-JSON) and stored; reads return it verbatim and never re-canonicalize.
 // A single database holds many sessions (a parent plus its forked children). It uses the pure-Go
-// modernc.org/sqlite driver (no cgo), so it runs in a plain container image. ax's own event log
-// is likewise sqlite/postgres-backed. See determinism contract §1, §5, §7.
+// modernc.org/sqlite driver (no cgo), so it runs in a plain container image. See determinism
+// contract §1, §5, §7.
 package sqlitelog
 
 import (

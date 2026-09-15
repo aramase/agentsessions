@@ -467,9 +467,9 @@ func (s *Service) Replay(req *v1.ReplayRequest, stream v1.Sessions_ReplayServer)
 // a statement about how wide forking can scale.
 const MaxForkChildren = 128
 
-// Fork branches the session at at_seq into count children (each a new session sharing the parent
-// prefix chain), the differentiator ax lacks. The whole fan-out branches from one parent checkpoint,
-// so every child starts from identical state.
+// Fork branches the session at at_seq into count children, each a new session sharing the parent's
+// prefix chain. The whole fan-out branches from one parent checkpoint, so every child starts from
+// identical state rather than from N separate re-derivations that can drift.
 func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.ForkResponse, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var childrenCreated int
