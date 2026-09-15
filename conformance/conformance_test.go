@@ -5,10 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -17,6 +21,7 @@ import (
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/model/openai"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
@@ -446,5 +451,66 @@ func TestUnmediatedToolCallRejected(t *testing.T) {
 	}
 	if err := log.Verify(); err != nil {
 		t.Fatalf("verify: %v", err)
+	}
+}
+
+// 13. A real provider client on the replay path must never be reached. The other replay checks use
+// an in-process function, which proves the controller does not CALL the model but cannot prove no
+// provider request escapes. This wires the actual HTTP client at an endpoint that fails the test if
+// it is ever contacted, so "replay costs nothing" is verified at the transport rather than assumed.
+func TestReplayNeverReachesTheProvider(t *testing.T) {
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"live answer"}}],
+		  "usage":{"prompt_tokens":1,"completion_tokens":2}}`)
+	}))
+	defer srv.Close()
+
+	client, err := openai.New(
+		openai.WithBaseURL(srv.URL),
+		openai.WithModel("test-model"),
+		openai.WithHTTPClient(srv.Client()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("provider")
+
+	c, err := controller.New(log, client.Model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	live, _ := c.Outputs()
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("live turn made %d provider requests, want exactly 1", got)
+	}
+	if len(live) != 1 || live[0] != "live answer" {
+		t.Fatalf("live outputs = %v, want the provider completion", live)
+	}
+
+	// A fresh incarnation replays the journal. The provider must not be contacted at all.
+	c2, err := controller.New(log, client.Model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := c2.Replay(context.Background(), echoagent.Harness{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(live, replay) {
+		t.Fatalf("replay = %v, want the recorded %v", replay, live)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("replay reached the provider: %d total requests, want 1 (the live turn only)", got)
+	}
+	if c2.ModelInvocations() != 0 {
+		t.Fatalf("replay invoked the model %d times (I1)", c2.ModelInvocations())
 	}
 }

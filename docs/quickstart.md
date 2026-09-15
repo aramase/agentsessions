@@ -3,7 +3,7 @@
 Run a durable agent session end to end in a few minutes: exec a turn, reconstruct it by replay with
 zero model calls, fork it, suspend and resume it, and verify its provenance chain with a non-Go
 verifier. Everything here uses the built-in `echoagent` harness and a local sqlite journal, so no
-Kubernetes, no cloud, and no model key are required.
+Kubernetes, no cloud, and no model key are required. Section 8 points it at a real model.
 
 The command output below is real, captured from a live run.
 
@@ -210,6 +210,63 @@ closed.
 It reproduces a golden hash with no dependencies, audits a real chain from raw proto bytes (must pass),
 and tampers one record and re-audits (must fail). This is the "any auditor can verify the chain"
 property, demonstrated.
+
+## 8. Point it at a real model
+
+Everything above uses the built-in echo model, so it runs with no key. To drive a real one, serve
+the Sessions API with `agentsessionsd` and give it an OpenAI-compatible endpoint.
+
+```bash
+go build -o /tmp/agentsessionsd ./cmd/agentsessionsd
+
+export OPENAI_API_KEY=sk-...
+/tmp/agentsessionsd \
+  --addr 127.0.0.1:8080 \
+  --journal /tmp/real.db \
+  --model gpt-4o-mini
+```
+
+The key is read from the environment, never a flag, so it stays out of your shell history and the
+process list. `MODEL_API_KEY` works too, and an endpoint that needs no credential works with both
+unset.
+
+`--model-base-url` points at any endpoint that accepts the chat-completions request body: a
+gateway, a self-hosted server, or a proxy fronting another provider. Endpoints that differ only in
+the envelope are reached with two more flags, rather than by rebuilding the server:
+
+```bash
+/tmp/agentsessionsd \
+  --model gpt-4o \
+  --model-base-url https://example.com/openai/deployments/gpt-4o \
+  --model-path '/chat/completions?api-version=2024-10-21' \
+  --model-auth-header api-key
+```
+
+`--model-path` covers an endpoint that scopes the model into its path or pins an API version;
+`--model-auth-header` covers one that authenticates with something other than `Authorization`. An
+endpoint with its own request body or signing scheme is a different protocol: implement
+`controller.ModelFunc` for those, and every guarantee below still holds, because the host still
+owns the call.
+
+Then drive it with the same CLI, using `--server` instead of a local journal:
+
+```bash
+/tmp/agentctl exec --server 127.0.0.1:8080 --input "name three prime numbers"
+```
+
+The interesting part is what happens next. Replay the session and watch your provider dashboard:
+
+```bash
+/tmp/agentctl replay --server 127.0.0.1:8080 --session "$SID"
+```
+
+The turn comes back byte for byte, and the provider is not called. Same for `fork`: branching a
+session costs nothing at the model, because the children inherit the recorded completions. You pay
+the model once, for the live turn, and every later reconstruction is free.
+
+That is the whole point of host-mediated model calls. Because the completion flows through the host
+and lands in the journal, the log is a replayable record of the run rather than a description of
+one.
 
 ## Where next
 
