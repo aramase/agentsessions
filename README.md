@@ -85,6 +85,7 @@ Full docs live in [`docs/`](docs/README.md):
 - [**Architecture**](docs/architecture.md): how the neutral core is built.
 - [**Running on agent-substrate**](docs/substrate-conformance.md): both capability tiers, green in CI.
 - [**Observability**](docs/observability.md): structured request-flow logs and correlation.
+- [**Security posture**](docs/security.md): what is protected, what is not, and how to deploy it.
 - [**FAQ**](docs/faq.md): what this is, what it is not, and how it behaves.
 - [**API reference**](docs/api-reference.md): every message, field, enum, and RPC in
   `agentsessions.v1`, generated from the `.proto` comments.
@@ -136,6 +137,29 @@ The real-substrate conformance (both tiers) runs in the `substrate-conformance` 
 - **Telemetry:** OpenTelemetry GenAI
 - **Compute backends:** agent-substrate, agent-sandbox, Kata, Cloud Hypervisor, pods
 - **Harnesses:** any agent framework via the `Harness` SPI, or a custom agent
+
+## API stability
+
+**`agentsessions.v1` is a proto namespace, not a stability promise.** The `v1` names the schema, the
+way `k8s.io/api/core/v1` does; it does not mean the schema is finished.
+
+The Go module is pre-1.0 and makes **no backward-compatibility guarantee**. Both the wire contract and
+the Go SPI may change, and both have changed recently: the harness SPI gained a `context.Context`, two
+RPCs were removed, and `ExecRequest.expected_last_seq` became optional. Pin a commit if you need
+stability today.
+
+What CI does enforce:
+
+- `buf lint` on every change.
+- `buf breaking` against the **most recent release tag**. There is no tag yet, so it currently reports
+  that it is inactive and passes. It arms itself at the first release, which is when compatibility
+  starts being a promise to anyone.
+- The checked-in generated code and the API reference must match the protos, so the published contract
+  cannot drift from the schema.
+
+At v0.1.0 that becomes: breaking changes are called out in the changelog, and the gate fails the build
+when the schema breaks against the last release. Until then, treat the contract as being designed
+rather than maintained.
 
 ## Status
 
