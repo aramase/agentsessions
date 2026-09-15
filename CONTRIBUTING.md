@@ -60,6 +60,27 @@ Decisions rest with the maintainer, [@aramase](https://github.com/aramase). Ther
 governance structure yet because there is not yet a wider group of contributors; that will change if
 and when it needs to.
 
+## Releasing
+
+A release is cut by pushing a tag. The tag is the trigger, so the artifacts and the git history
+cannot disagree about what shipped.
+
+```bash
+git tag -s v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+The `release` workflow re-runs the full suite against the tagged commit before publishing anything,
+then builds `agentctl` and `agentsessionsd` for linux and darwin on amd64 and arm64, attaches an
+SBOM per archive, and signs a build-provenance attestation. Release notes are generated from the
+commits since the previous tag, which is what conventional commit messages buy.
+
+Add anything a commit list cannot convey, especially compatibility notes, to `CHANGELOG.md` before
+tagging.
+
+Note that the first tag also arms `buf breaking`, which compares the schema against the most recent
+release and is inactive until one exists.
+
 ## Reporting security issues
 
 Do not open a public issue. See [SECURITY.md](SECURITY.md).

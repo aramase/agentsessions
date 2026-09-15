@@ -1,0 +1,95 @@
+name: release
+
+# Releases are cut by pushing a tag. The tag is the trigger rather than a manual dispatch so the
+# artifacts and the git history can never disagree about what was released.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # The full suite runs again against the tagged commit. CI already ran it on the pull request, but
+  # a tag can point at any commit, and publishing something that was never verified at that exact
+  # revision is the failure this prevents.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: codegen is reproducible
+        run: |
+          buf generate
+          git add -N api/genpb
+          git diff --exit-code -- api/genpb
+
+      - name: api reference is current
+        run: |
+          ./hack/gen-api-reference.sh
+          git add -N docs/api-reference.md
+          git diff --exit-code -- docs/api-reference.md
+
+      - run: buf lint
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+
+      - name: core links no backend vendor
+        run: test "$(go list -deps ./... | grep -c agent-substrate)" = "0"
+
+      - name: integrity golden self-check
+        run: python3 hack/verify_chain.py --golden
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload artifacts
+      id-token: write # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # goreleaser builds the changelog from the commit range since the previous tag, so it
+          # needs the full history rather than a shallow clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Generates the per-archive SBOMs the goreleaser config asks for.
+      - uses: anchore/sbom-action/download-syft@v0
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      # Provenance ties each artifact to this workflow, this commit, and this runner, so a consumer
+      # can verify where a binary came from instead of trusting the release page.
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz

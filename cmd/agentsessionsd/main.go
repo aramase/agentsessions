@@ -35,6 +35,7 @@ import (
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/internal/version"
 	"github.com/aramase/agentsessions/model/openai"
 	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/placement"
@@ -58,7 +59,13 @@ func run() error {
 	modelBaseURL := flag.String("model-base-url", openai.DefaultBaseURL, "base URL of the OpenAI-compatible endpoint")
 	modelPath := flag.String("model-path", openai.DefaultPath, "completions path under the base URL; may carry a query string")
 	modelAuthHeader := flag.String("model-auth-header", "Authorization", "header carrying the credential from MODEL_API_KEY")
+	showVersion := flag.Bool("version", false, "print the build version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("agentsessionsd", version.Get())
+		return nil
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -105,6 +112,7 @@ func run() error {
 	go func() { serveErr <- srv.Serve(lis) }()
 
 	logger.Info("agentsessionsd listening",
+		"version", version.Get().Version,
 		"addr", lis.Addr().String(),
 		"journal", *journal,
 		"project", *project,
