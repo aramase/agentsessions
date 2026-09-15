@@ -1,0 +1,96 @@
+# Release build for the two user-facing binaries.
+#
+# agentnode and harnessnode are deliberately absent: they are demo and conformance scaffolding, and
+# shipping them as release artifacts would present them as products people should run.
+version: 2
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: agentctl
+    main: ./cmd/agentctl
+    binary: agentctl
+    env:
+      # The sqlite driver is pure Go (modernc), so a static build needs no cgo and the artifacts
+      # cross-compile without a toolchain per target.
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/aramase/agentsessions/internal/version.version={{.Version}}
+      - -X github.com/aramase/agentsessions/internal/version.commit={{.FullCommit}}
+      - -X github.com/aramase/agentsessions/internal/version.date={{.Date}}
+
+  - id: agentsessionsd
+    main: ./cmd/agentsessionsd
+    binary: agentsessionsd
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/aramase/agentsessions/internal/version.version={{.Version}}
+      - -X github.com/aramase/agentsessions/internal/version.commit={{.FullCommit}}
+      - -X github.com/aramase/agentsessions/internal/version.date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+# One SBOM per archive, so a consumer can inventory exactly what they downloaded rather than infer
+# it from the source tree.
+sboms:
+  - artifacts: archive
+
+changelog:
+  use: github
+  sort: asc
+  # Conventional Commits are enforced by convention in CONTRIBUTING, so the notes group by type
+  # rather than dumping a flat list.
+  groups:
+    - title: Features
+      regexp: '^feat(\(.+\))?!?:'
+      order: 0
+    - title: Fixes
+      regexp: '^fix(\(.+\))?!?:'
+      order: 1
+    - title: Documentation
+      regexp: '^docs(\(.+\))?!?:'
+      order: 2
+    - title: Build and CI
+      regexp: '^(build|ci)(\(.+\))?!?:'
+      order: 3
+    - title: Other
+      order: 99
+  filters:
+    exclude:
+      - '^test(\(.+\))?:'
+      - '^chore\(deps\):'
+
+release:
+  # v0.x is pre-1.0 and makes no compatibility promise, which the release notes should say rather
+  # than leaving a reader to infer it from the version number.
+  header: |
+    ## agentsessions {{ .Tag }}
+
+    Pre-1.0: the wire contract and the Go SPI may both change. `agentsessions.v1` is a proto
+    namespace, not a stability promise.
+
+    There is no authentication, authorization, or transport security. Do not expose a host to an
+    untrusted network or treat it as multi-tenant. See `docs/security.md`.
+  footer: |
+    **Verify an artifact**
+
+    ```
+    gh attestation verify <file> --repo {{ .Env.GITHUB_REPOSITORY }}
+    ```

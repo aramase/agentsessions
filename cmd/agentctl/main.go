@@ -27,6 +27,7 @@ import (
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/client"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/internal/version"
 	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
@@ -48,6 +49,7 @@ func main() {
 		"fork":    cmdFork,
 		"suspend": cmdSuspend,
 		"resume":  cmdResume,
+		"version": cmdVersion,
 	}
 	run, ok := cmds[os.Args[1]]
 	if !ok {
@@ -61,7 +63,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|exec|replay|fork|suspend|resume> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|exec|replay|fork|suspend|resume|version> [flags]")
 }
 
 type config struct {
@@ -141,6 +143,11 @@ func dial(cfg *config) (*client.Client, func(), error) {
 		store.Close()
 	}
 	return c, cleanup, nil
+}
+
+func cmdVersion([]string) error {
+	fmt.Println("agentctl", version.Get())
+	return nil
 }
 
 func cmdCreate(args []string) error {

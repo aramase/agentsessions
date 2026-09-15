@@ -38,3 +38,6 @@ go.work.sum
 
 # substrate-e2e clone (cloned by the workflow / local repro)
 /_substrate/
+
+# goreleaser build output
+/dist/

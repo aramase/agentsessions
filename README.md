@@ -160,8 +160,8 @@ What CI does enforce:
 - The checked-in generated code and the API reference must match the protos, so the published contract
   cannot drift from the schema.
 
-At v0.1.0 that becomes: breaking changes are called out in the changelog, and the gate fails the build
-when the schema breaks against the last release. Until then, treat the contract as being designed
+At v0.1.0 that becomes: breaking changes are called out in [`CHANGELOG.md`](CHANGELOG.md), and the
+gate fails the build when the schema breaks against the last release. Until then, treat the contract as being designed
 rather than maintained.
 
 ## Status
