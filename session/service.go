@@ -121,13 +121,19 @@ func (s *Service) CreateSession(ctx context.Context, req *v1.CreateSessionReques
 	defer func() { finish(err, "error_kind", serviceErrorKind(err), "session_uid", uid) }()
 
 	spec := req.GetSession()
-	meta := sqlitelog.SessionMeta{
+	return s.createSession(uid, sqlitelog.SessionMeta{
 		UID:     uid,
 		Project: spec.GetMetadata().GetProject(),
 		Name:    spec.GetMetadata().GetName(),
 		Harness: spec.GetHarness(),
 		Model:   spec.GetModel(),
-	}
+	})
+}
+
+// createSession applies the server defaults and persists the metadata row. Exec's auto-create goes
+// through here too, so a session it makes is indistinguishable from one CreateSession made and the
+// two cannot drift apart.
+func (s *Service) createSession(uid string, meta sqlitelog.SessionMeta) (*v1.Session, error) {
 	if meta.Project == "" {
 		meta.Project = s.defaultProject
 	}
@@ -261,25 +267,58 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	var recordsSent int
 	finish := observability.Start(ctx, s.logger, "session", "exec",
 		"session_uid", req.GetSession(),
-		"expected_last_seq", req.GetExpectedLastSeq(),
+		"cas_requested", req.ExpectedLastSeq != nil,
 		"input_count", len(req.GetInputs()),
 	)
 	defer func() {
 		finish(err, "error_kind", serviceErrorKind(err), "records_sent", recordsSent)
 	}()
 
-	if req.GetSession() == "" {
-		return status.Error(codes.InvalidArgument, "session is required")
+	// An empty session is created here rather than rejected, so a caller that just wants to run a
+	// turn makes one call instead of three. Anything that needs a project, name, or model still
+	// goes through CreateSession.
+	uid := req.GetSession()
+	var sess *v1.Session
+	if uid == "" {
+		uid = newUID()
+		created, err := s.createSession(uid, sqlitelog.SessionMeta{UID: uid, Harness: req.GetHarness()})
+		if err != nil {
+			return err
+		}
+		sess = created
 	}
-	placer, err := s.placerFor(req.GetSession(), req.GetHarness())
+
+	placer, err := s.placerFor(uid, req.GetHarness())
 	if err != nil {
 		return err
 	}
-	log := s.store.Session(req.GetSession())
+	log := s.store.Session(uid)
 	headBefore, err := log.Head()
 	if err != nil {
 		return status.Errorf(codes.Internal, "head: %v", err)
 	}
+
+	// Unset expected_last_seq means "append at the current head": the single-writer check is opt-in,
+	// so a caller with one writer is not forced to read the cursor first. An explicit value keeps
+	// the strict check, including 0, which asserts the session has no events yet.
+	expected := headBefore
+	if req.ExpectedLastSeq != nil {
+		expected = req.GetExpectedLastSeq()
+	}
+
+	if sess == nil {
+		info, err := s.store.SessionInfo(uid)
+		if err != nil {
+			return sessionStoreError(err, uid)
+		}
+		sess = sessionProto(info)
+	}
+	// The session goes out before the turn runs, so a caller learns the uid of a session created
+	// for it even if the execution then fails.
+	if err := stream.Send(&v1.ExecUpdate{Update: &v1.ExecUpdate_Session{Session: sess}}); err != nil {
+		return err
+	}
+
 	inputs := make([]api.Message, 0, len(req.GetInputs()))
 	for _, m := range req.GetInputs() {
 		if dm := wire.MessageFromProto(m); dm != nil {
@@ -288,7 +327,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	}
 	// Route the turn through the placement seam: Create the incarnation, mint+bind the fence, and
 	// drive the placed harness through the Runtime SPI instead of a co-located controller.
-	if _, err := placer.Exec(ctx, log, req.GetSession(), inputs, req.GetExpectedLastSeq()); err != nil {
+	if _, err := placer.Exec(ctx, log, uid, inputs, expected); err != nil {
 		return execError(err)
 	}
 	recs, err := log.Read(headBefore + 1)

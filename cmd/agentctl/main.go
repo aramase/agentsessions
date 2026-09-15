@@ -260,24 +260,12 @@ func cmdExec(args []string) error {
 		return err
 	}
 	defer cleanup()
-	ctx := context.Background()
 
-	if sess == "" {
-		s, err := client.CreateSession(ctx, &v1.CreateSessionRequest{})
-		if err != nil {
-			return err
-		}
-		sess = s.GetMetadata().GetUid()
-		fmt.Printf("session %s\n", sess)
-	}
-	cur, err := client.GetSession(ctx, &v1.GetSessionRequest{Uid: sess})
-	if err != nil {
-		return err
-	}
-	stream, err := client.Exec(ctx, &v1.ExecRequest{
-		Session:         sess,
-		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", input))},
-		ExpectedLastSeq: cur.GetLastSeq(),
+	// One call: an empty session is created by the server, and leaving expected_last_seq unset
+	// appends at the head. The session arrives as the stream's first frame.
+	stream, err := client.Exec(context.Background(), &v1.ExecRequest{
+		Session: sess,
+		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", input))},
 	})
 	if err != nil {
 		return err
@@ -289,6 +277,9 @@ func cmdExec(args []string) error {
 		}
 		if err != nil {
 			return err
+		}
+		if s := up.GetSession(); s != nil && sess == "" {
+			fmt.Printf("session %s\n", s.GetMetadata().GetUid())
 		}
 		if r := up.GetRecord(); r != nil {
 			printRecord(r)

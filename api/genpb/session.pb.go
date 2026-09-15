@@ -770,18 +770,28 @@ func (x *DeleteSessionRequest) GetUid() string {
 }
 
 type ExecRequest struct {
-	state   protoimpl.MessageState `protogen:"open.v1"`
-	Session string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The session to run against. Empty creates one first, using the server defaults and the harness
+	// below, and returns it as the stream's first frame. A caller that wants to set a project, name,
+	// or model still calls CreateSession; this exists so the common case is one call rather than
+	// three (create, read the cursor, exec).
+	Session string `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
 	// Input messages for this turn. Empty = resume/re-drive the last non-terminal
 	// execution with no new input (recovery after a crash/interruption).
 	Inputs        []*Message `protobuf:"bytes,2,rep,name=inputs,proto3" json:"inputs,omitempty"`
 	ResumeFromSeq int64      `protobuf:"varint,3,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"` // client replay cursor after a disconnect (was: last_seq)
 	Harness       string     `protobuf:"bytes,4,opt,name=harness,proto3" json:"harness,omitempty"`                                     // empty = session default
 	Config        []byte     `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`
-	// Single-writer CAS: the host commits this execution's first event only if the log
-	// head equals expected_last_seq. Mismatch is rejected (another writer advanced the log).
-	ExpectedLastSeq int64 `protobuf:"varint,6,opt,name=expected_last_seq,json=expectedLastSeq,proto3" json:"expected_last_seq,omitempty"`
-	DeadlineUnix    int64 `protobuf:"varint,7,opt,name=deadline_unix,json=deadlineUnix,proto3" json:"deadline_unix,omitempty"` // optional execution deadline (unix seconds); host cancels past it
+	// Single-writer CAS: the host commits this execution's first event only if the log head equals
+	// expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log.
+	//
+	// It is optional because the guarantee should be opt-in rather than the price of a simple call.
+	// Unset means "append at whatever the head is now", which is what a caller with a single writer
+	// wants. Set means the strict check, and 0 is a real value there: it asserts the session has no
+	// events yet. That distinction is why this carries explicit presence instead of treating 0 as
+	// "unset" -- a caller could not otherwise say "this must be the first turn".
+	ExpectedLastSeq *int64 `protobuf:"varint,6,opt,name=expected_last_seq,json=expectedLastSeq,proto3,oneof" json:"expected_last_seq,omitempty"`
+	DeadlineUnix    int64  `protobuf:"varint,7,opt,name=deadline_unix,json=deadlineUnix,proto3" json:"deadline_unix,omitempty"` // optional execution deadline (unix seconds); host cancels past it
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -852,8 +862,8 @@ func (x *ExecRequest) GetConfig() []byte {
 }
 
 func (x *ExecRequest) GetExpectedLastSeq() int64 {
-	if x != nil {
-		return x.ExpectedLastSeq
+	if x != nil && x.ExpectedLastSeq != nil {
+		return *x.ExpectedLastSeq
 	}
 	return 0
 }
@@ -1221,14 +1231,15 @@ func (x *CancelRequest) GetReason() string {
 	return ""
 }
 
-// ExecUpdate is what the live Exec stream carries: a committed LogRecord, or an ephemeral
-// streaming Delta (transport only — not logged, not hash-chained).
+// ExecUpdate is what the live Exec stream carries: the session, a committed LogRecord, or an
+// ephemeral streaming Delta (transport only — not logged, not hash-chained).
 type ExecUpdate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Update:
 	//
 	//	*ExecUpdate_Record
 	//	*ExecUpdate_Delta
+	//	*ExecUpdate_Session
 	Update        isExecUpdate_Update `protobuf_oneof:"update"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1289,6 +1300,15 @@ func (x *ExecUpdate) GetDelta() *Delta {
 	return nil
 }
 
+func (x *ExecUpdate) GetSession() *Session {
+	if x != nil {
+		if x, ok := x.Update.(*ExecUpdate_Session); ok {
+			return x.Session
+		}
+	}
+	return nil
+}
+
 type isExecUpdate_Update interface {
 	isExecUpdate_Update()
 }
@@ -1301,9 +1321,23 @@ type ExecUpdate_Delta struct {
 	Delta *Delta `protobuf:"bytes,2,opt,name=delta,proto3,oneof"`
 }
 
+type ExecUpdate_Session struct {
+	// The session this execution runs against, sent as the FIRST frame of every Exec stream. It is
+	// how a caller learns the uid of a session Exec created for it, and it reports the cursor the
+	// turn started from, so a caller that wants the strict CAS on its next turn has the value
+	// without a separate GetSession.
+	//
+	// It is sent before the turn runs, so a failed execution still tells the caller which session
+	// it was against. A caller therefore sees this frame BEFORE any error, and must read the
+	// stream to completion rather than treating the first receive as the result.
+	Session *Session `protobuf:"bytes,3,opt,name=session,proto3,oneof"`
+}
+
 func (*ExecUpdate_Record) isExecUpdate_Update() {}
 
 func (*ExecUpdate_Delta) isExecUpdate_Update() {}
+
+func (*ExecUpdate_Session) isExecUpdate_Update() {}
 
 // Delta is an ephemeral streaming chunk that coalesces into a finalized EVENT_OUTPUT (or
 // reasoning) part. No seq; never hash-chained (§8, A2A TaskArtifactUpdateEvent).
@@ -1440,15 +1474,16 @@ const file_session_proto_rawDesc = "" +
 	"\bsessions\x18\x01 \x03(\v2\x19.agentsessions.v1.SessionR\bsessions\x12&\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"(\n" +
 	"\x14DeleteSessionRequest\x12\x10\n" +
-	"\x03uid\x18\x01 \x01(\tR\x03uid\"\x85\x02\n" +
+	"\x03uid\x18\x01 \x01(\tR\x03uid\"\xa0\x02\n" +
 	"\vExecRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x121\n" +
 	"\x06inputs\x18\x02 \x03(\v2\x19.agentsessions.v1.MessageR\x06inputs\x12&\n" +
 	"\x0fresume_from_seq\x18\x03 \x01(\x03R\rresumeFromSeq\x12\x18\n" +
 	"\aharness\x18\x04 \x01(\tR\aharness\x12\x16\n" +
-	"\x06config\x18\x05 \x01(\fR\x06config\x12*\n" +
-	"\x11expected_last_seq\x18\x06 \x01(\x03R\x0fexpectedLastSeq\x12#\n" +
-	"\rdeadline_unix\x18\a \x01(\x03R\fdeadlineUnix\"[\n" +
+	"\x06config\x18\x05 \x01(\fR\x06config\x12/\n" +
+	"\x11expected_last_seq\x18\x06 \x01(\x03H\x00R\x0fexpectedLastSeq\x88\x01\x01\x12#\n" +
+	"\rdeadline_unix\x18\a \x01(\x03R\fdeadlineUnixB\x14\n" +
+	"\x12_expected_last_seq\"[\n" +
 	"\rReplayRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12\x19\n" +
 	"\bfrom_seq\x18\x02 \x01(\x03R\afromSeq\x12\x15\n" +
@@ -1474,11 +1509,12 @@ const file_session_proto_rawDesc = "" +
 	"\rCancelRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"~\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xb5\x01\n" +
 	"\n" +
 	"ExecUpdate\x125\n" +
 	"\x06record\x18\x01 \x01(\v2\x1b.agentsessions.v1.LogRecordH\x00R\x06record\x12/\n" +
-	"\x05delta\x18\x02 \x01(\v2\x17.agentsessions.v1.DeltaH\x00R\x05deltaB\b\n" +
+	"\x05delta\x18\x02 \x01(\v2\x17.agentsessions.v1.DeltaH\x00R\x05delta\x125\n" +
+	"\asession\x18\x03 \x01(\v2\x19.agentsessions.v1.SessionH\x00R\asessionB\b\n" +
 	"\x06update\"s\n" +
 	"\x05Delta\x12!\n" +
 	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12\x1d\n" +
@@ -1579,31 +1615,32 @@ var file_session_proto_depIdxs = []int32{
 	5,  // 16: agentsessions.v1.ForkResponse.children:type_name -> agentsessions.v1.Session
 	28, // 17: agentsessions.v1.ExecUpdate.record:type_name -> agentsessions.v1.LogRecord
 	19, // 18: agentsessions.v1.ExecUpdate.delta:type_name -> agentsessions.v1.Delta
-	6,  // 19: agentsessions.v1.Sessions.CreateSession:input_type -> agentsessions.v1.CreateSessionRequest
-	7,  // 20: agentsessions.v1.Sessions.GetSession:input_type -> agentsessions.v1.GetSessionRequest
-	8,  // 21: agentsessions.v1.Sessions.ListSessions:input_type -> agentsessions.v1.ListSessionsRequest
-	10, // 22: agentsessions.v1.Sessions.DeleteSession:input_type -> agentsessions.v1.DeleteSessionRequest
-	11, // 23: agentsessions.v1.Sessions.Exec:input_type -> agentsessions.v1.ExecRequest
-	12, // 24: agentsessions.v1.Sessions.Replay:input_type -> agentsessions.v1.ReplayRequest
-	17, // 25: agentsessions.v1.Sessions.Cancel:input_type -> agentsessions.v1.CancelRequest
-	13, // 26: agentsessions.v1.Sessions.Suspend:input_type -> agentsessions.v1.SuspendRequest
-	14, // 27: agentsessions.v1.Sessions.Resume:input_type -> agentsessions.v1.ResumeRequest
-	15, // 28: agentsessions.v1.Sessions.Fork:input_type -> agentsessions.v1.ForkRequest
-	5,  // 29: agentsessions.v1.Sessions.CreateSession:output_type -> agentsessions.v1.Session
-	5,  // 30: agentsessions.v1.Sessions.GetSession:output_type -> agentsessions.v1.Session
-	9,  // 31: agentsessions.v1.Sessions.ListSessions:output_type -> agentsessions.v1.ListSessionsResponse
-	5,  // 32: agentsessions.v1.Sessions.DeleteSession:output_type -> agentsessions.v1.Session
-	18, // 33: agentsessions.v1.Sessions.Exec:output_type -> agentsessions.v1.ExecUpdate
-	28, // 34: agentsessions.v1.Sessions.Replay:output_type -> agentsessions.v1.LogRecord
-	5,  // 35: agentsessions.v1.Sessions.Cancel:output_type -> agentsessions.v1.Session
-	5,  // 36: agentsessions.v1.Sessions.Suspend:output_type -> agentsessions.v1.Session
-	5,  // 37: agentsessions.v1.Sessions.Resume:output_type -> agentsessions.v1.Session
-	16, // 38: agentsessions.v1.Sessions.Fork:output_type -> agentsessions.v1.ForkResponse
-	29, // [29:39] is the sub-list for method output_type
-	19, // [19:29] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	5,  // 19: agentsessions.v1.ExecUpdate.session:type_name -> agentsessions.v1.Session
+	6,  // 20: agentsessions.v1.Sessions.CreateSession:input_type -> agentsessions.v1.CreateSessionRequest
+	7,  // 21: agentsessions.v1.Sessions.GetSession:input_type -> agentsessions.v1.GetSessionRequest
+	8,  // 22: agentsessions.v1.Sessions.ListSessions:input_type -> agentsessions.v1.ListSessionsRequest
+	10, // 23: agentsessions.v1.Sessions.DeleteSession:input_type -> agentsessions.v1.DeleteSessionRequest
+	11, // 24: agentsessions.v1.Sessions.Exec:input_type -> agentsessions.v1.ExecRequest
+	12, // 25: agentsessions.v1.Sessions.Replay:input_type -> agentsessions.v1.ReplayRequest
+	17, // 26: agentsessions.v1.Sessions.Cancel:input_type -> agentsessions.v1.CancelRequest
+	13, // 27: agentsessions.v1.Sessions.Suspend:input_type -> agentsessions.v1.SuspendRequest
+	14, // 28: agentsessions.v1.Sessions.Resume:input_type -> agentsessions.v1.ResumeRequest
+	15, // 29: agentsessions.v1.Sessions.Fork:input_type -> agentsessions.v1.ForkRequest
+	5,  // 30: agentsessions.v1.Sessions.CreateSession:output_type -> agentsessions.v1.Session
+	5,  // 31: agentsessions.v1.Sessions.GetSession:output_type -> agentsessions.v1.Session
+	9,  // 32: agentsessions.v1.Sessions.ListSessions:output_type -> agentsessions.v1.ListSessionsResponse
+	5,  // 33: agentsessions.v1.Sessions.DeleteSession:output_type -> agentsessions.v1.Session
+	18, // 34: agentsessions.v1.Sessions.Exec:output_type -> agentsessions.v1.ExecUpdate
+	28, // 35: agentsessions.v1.Sessions.Replay:output_type -> agentsessions.v1.LogRecord
+	5,  // 36: agentsessions.v1.Sessions.Cancel:output_type -> agentsessions.v1.Session
+	5,  // 37: agentsessions.v1.Sessions.Suspend:output_type -> agentsessions.v1.Session
+	5,  // 38: agentsessions.v1.Sessions.Resume:output_type -> agentsessions.v1.Session
+	16, // 39: agentsessions.v1.Sessions.Fork:output_type -> agentsessions.v1.ForkResponse
+	30, // [30:40] is the sub-list for method output_type
+	20, // [20:30] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_session_proto_init() }
@@ -1612,9 +1649,11 @@ func file_session_proto_init() {
 		return
 	}
 	file_common_proto_init()
+	file_session_proto_msgTypes[9].OneofWrappers = []any{}
 	file_session_proto_msgTypes[16].OneofWrappers = []any{
 		(*ExecUpdate_Record)(nil),
 		(*ExecUpdate_Delta)(nil),
+		(*ExecUpdate_Session)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -173,8 +175,8 @@ func TestRequestFlowLogsAreCorrelated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stream.Recv(); status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("empty session: want InvalidArgument, got %v", err)
+	if err := drainExec(stream); err != nil {
+		t.Fatalf("exec with no session: %v", err)
 	}
 	scanner = bufio.NewScanner(bytes.NewReader(output.Bytes()))
 	for scanner.Scan() {
@@ -194,12 +196,12 @@ func TestRequestFlowLogsAreCorrelated(t *testing.T) {
 	stream, err = client.Exec(context.Background(), &v1.ExecRequest{
 		Session:         uid,
 		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", "retry"))},
-		ExpectedLastSeq: 0,
+		ExpectedLastSeq: proto.Int64(0),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stream.Recv(); status.Code(err) != codes.Aborted {
+	if err := drainExec(stream); status.Code(err) != codes.Aborted {
 		t.Fatalf("stale cursor: want Aborted, got %v", err)
 	}
 	scanner = bufio.NewScanner(bytes.NewReader(output.Bytes()))
@@ -321,7 +323,7 @@ func TestExecUnplaceableIsFailedPrecondition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stream.Recv(); status.Code(err) != codes.FailedPrecondition {
+	if err := drainExec(stream); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("unplaceable harness: want FailedPrecondition, got %v", err)
 	}
 }
@@ -331,7 +333,7 @@ func execOutputs(t *testing.T, c v1.SessionsClient, sess, input string, expected
 	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
 		Session:         sess,
 		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", input))},
-		ExpectedLastSeq: expected,
+		ExpectedLastSeq: proto.Int64(expected),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -428,13 +430,12 @@ func TestSessionsServiceEndToEnd(t *testing.T) {
 	stream, err := c.Exec(ctx, &v1.ExecRequest{
 		Session:         sess,
 		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", "stale"))},
-		ExpectedLastSeq: 0,
+		ExpectedLastSeq: proto.Int64(0),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = stream.Recv()
-	if status.Code(err) != codes.Aborted {
+	if err := drainExec(stream); status.Code(err) != codes.Aborted {
 		t.Fatalf("stale exec: want Aborted, got %v", err)
 	}
 }
@@ -515,5 +516,141 @@ func TestExecUnknownSessionIsNotFound(t *testing.T) {
 	}
 	if _, err := stream.Recv(); status.Code(err) != codes.NotFound {
 		t.Fatalf("unknown session: want NotFound, got %v", err)
+	}
+}
+
+// drainExec reads an Exec stream to completion and returns its terminal error, or nil on a clean
+// EOF. Every Exec stream opens with a session frame, so an execution error arrives after it; a
+// caller that reads a single frame would see the session rather than the failure. Real clients loop
+// until EOF, which is what this mirrors.
+func drainExec(stream v1.Sessions_ExecClient) error {
+	for {
+		_, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// Exec with no session creates one, so the common case is a single call rather than create, read
+// the cursor, exec. The uid arrives on the stream.
+func TestExecWithoutSessionCreatesOne(t *testing.T) {
+	c := newClient(t)
+	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+		Inputs: []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uid string
+	var outputs int
+	for {
+		up, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := up.GetSession(); s != nil {
+			uid = s.GetMetadata().GetUid()
+		}
+		if r := up.GetRecord(); r != nil && r.GetEvent().GetKind() == v1.EventKind_EVENT_OUTPUT {
+			outputs++
+		}
+	}
+	if uid == "" {
+		t.Fatal("no session frame: the caller cannot learn the uid of the session created for it")
+	}
+	if outputs != 1 {
+		t.Fatalf("outputs = %d, want 1", outputs)
+	}
+	// The created session must be a real, listable one, not an implicit log with no metadata row.
+	got, err := c.GetSession(context.Background(), &v1.GetSessionRequest{Uid: uid})
+	if err != nil {
+		t.Fatalf("session created by Exec is not retrievable: %v", err)
+	}
+	if got.GetHarness() == "" {
+		t.Fatal("session created by Exec has no harness recorded")
+	}
+}
+
+// Every Exec stream opens with the session, including one that names an existing session, so a
+// client can rely on the frame rather than branching on whether it supplied a uid.
+func TestExecAlwaysSendsSessionFrameFirst(t *testing.T) {
+	c := newClient(t)
+	uid := mustCreate(t, c)
+	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+		Session: uid,
+		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := stream.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.GetSession().GetMetadata().GetUid() != uid {
+		t.Fatalf("first frame = %v, want the session %s", first, uid)
+	}
+}
+
+// Leaving expected_last_seq unset appends at the head, so consecutive turns need no cursor
+// bookkeeping. Setting it keeps the strict check, which TestSessionsServiceEndToEnd covers.
+func TestExecWithoutCASAppendsAtHead(t *testing.T) {
+	c := newClient(t)
+	uid := mustCreate(t, c)
+	for i := 0; i < 3; i++ {
+		stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+			Session: uid,
+			Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "turn"))},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := drainExec(stream); err != nil {
+			t.Fatalf("turn %d without a cursor: %v", i+1, err)
+		}
+	}
+	got, err := c.GetSession(context.Background(), &v1.GetSessionRequest{Uid: uid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetLastSeq() != 12 { // 3 turns x (INPUT, MODEL_CALL, OUTPUT, END)
+		t.Fatalf("last_seq = %d after 3 turns, want 12", got.GetLastSeq())
+	}
+}
+
+// expected_last_seq = 0 is a real assertion ("this session has no events"), not an absent value.
+// Treating 0 as unset would make that unsayable.
+func TestExecExplicitZeroCASIsEnforced(t *testing.T) {
+	c := newClient(t)
+	uid := mustCreate(t, c)
+	first, err := c.Exec(context.Background(), &v1.ExecRequest{
+		Session:         uid,
+		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", "one"))},
+		ExpectedLastSeq: proto.Int64(0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := drainExec(first); err != nil {
+		t.Fatalf("first turn with expected_last_seq=0: %v", err)
+	}
+	// The session now has events, so the same assertion must be refused.
+	second, err := c.Exec(context.Background(), &v1.ExecRequest{
+		Session:         uid,
+		Inputs:          []*v1.Message{wire.MessageToProto(api.TextMessage("user", "two"))},
+		ExpectedLastSeq: proto.Int64(0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := drainExec(second); status.Code(err) != codes.Aborted {
+		t.Fatalf("expected_last_seq=0 on a non-empty session: want Aborted, got %v", err)
 	}
 }
