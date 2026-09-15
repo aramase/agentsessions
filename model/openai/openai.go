@@ -22,6 +22,7 @@
 package openai
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -155,31 +156,11 @@ func New(opts ...Option) (*Client, error) {
 // ctx carries the turn's cancellation and deadline through to the HTTP request, so a cancelled
 // execution abandons an in-flight completion rather than leaving it to finish unobserved.
 func (c *Client) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
-	model := req.Model
-	if model == "" || model == "echo" {
-		// "echo" is the reference harness's placeholder id. Treating it as "unset" lets the sample
-		// harnesses run against a real endpoint without every one of them hard-coding a model.
-		model = c.model
-	}
-	msgs, err := toChatMessages(req.Messages)
+	model, body, err := c.buildRequest(req, false)
 	if err != nil {
 		return api.ModelResponse{}, err
 	}
-	body, err := json.Marshal(chatRequest{Model: model, Messages: msgs})
-	if err != nil {
-		return api.ModelResponse{}, fmt.Errorf("openai: encode request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.path, bytes.NewReader(body))
-	if err != nil {
-		return api.ModelResponse{}, fmt.Errorf("openai: build request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	for name, value := range c.headers {
-		httpReq.Header.Set(name, value)
-	}
-
-	resp, err := c.http.Do(httpReq)
+	resp, err := c.post(ctx, body)
 	if err != nil {
 		return api.ModelResponse{}, fmt.Errorf("openai: %s: %w", model, err)
 	}
@@ -203,6 +184,120 @@ func (c *Client) Model(ctx context.Context, req api.ModelRequest) (api.ModelResp
 		return api.ModelResponse{}, fmt.Errorf("openai: %s returned no choices", model)
 	}
 	return toModelResponse(model, out), nil
+}
+
+// StreamModel performs one live completion, reporting text as it arrives. It satisfies
+// controller.StreamFunc.
+//
+// onChunk sees partial output; the returned response is the complete message, which is what the
+// host records. That split is deliberate: the chunks are a view of the call in progress, and the
+// journal must not depend on whether anyone was watching.
+func (c *Client) StreamModel(ctx context.Context, req api.ModelRequest, onChunk func(string)) (api.ModelResponse, error) {
+	model, body, err := c.buildRequest(req, true)
+	if err != nil {
+		return api.ModelResponse{}, err
+	}
+	resp, err := c.post(ctx, body)
+	if err != nil {
+		return api.ModelResponse{}, fmt.Errorf("openai: %s: %w", model, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return api.ModelResponse{}, statusError(model, resp.StatusCode, raw)
+	}
+
+	var text, reasoning strings.Builder
+	usage := api.Usage{Model: model}
+
+	scanner := bufio.NewScanner(resp.Body)
+	// A single event can exceed the default 64KB line budget on a long completion, which would
+	// otherwise fail the turn partway with a misleading "token too long".
+	scanner.Buffer(make([]byte, 0, 64*1024), 8<<20)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		payload, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue // comments, blank separators, and any event: lines
+		}
+		payload = strings.TrimSpace(payload)
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk chatChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return api.ModelResponse{}, fmt.Errorf("openai: decode stream chunk: %w", err)
+		}
+		if u := chunk.Usage; u != nil {
+			usage.InputTokens = u.PromptTokens
+			usage.OutputTokens = u.CompletionTokens
+			usage.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+		}
+		if len(chunk.Choices) == 0 {
+			continue // usage-only frames carry no choice
+		}
+		d := chunk.Choices[0].Delta
+		if d.ReasoningContent != "" {
+			reasoning.WriteString(d.ReasoningContent)
+		}
+		if d.Content != "" {
+			text.WriteString(d.Content)
+			if onChunk != nil {
+				onChunk(d.Content)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return api.ModelResponse{}, fmt.Errorf("openai: read stream: %w", err)
+	}
+
+	parts := make([]api.Part, 0, 2)
+	if r := reasoning.String(); r != "" {
+		parts = append(parts, api.Part{Reasoning: &api.ReasoningPart{Provider: "openai", ModelID: model, Opaque: []byte(r)}})
+	}
+	if t := text.String(); t != "" {
+		parts = append(parts, api.Part{Text: &api.TextPart{Text: t}})
+	}
+	return api.ModelResponse{Message: api.Message{Role: "assistant", Parts: parts}, Usage: usage}, nil
+}
+
+// buildRequest resolves the model and encodes the body. Both call paths share it so a streamed turn
+// and a non-streamed one cannot disagree about what was sent.
+func (c *Client) buildRequest(req api.ModelRequest, stream bool) (string, []byte, error) {
+	model := req.Model
+	if model == "" || model == "echo" {
+		// "echo" is the reference harness's placeholder id. Treating it as "unset" lets the sample
+		// harnesses run against a real endpoint without every one of them hard-coding a model.
+		model = c.model
+	}
+	msgs, err := toChatMessages(req.Messages)
+	if err != nil {
+		return model, nil, err
+	}
+	body := chatRequest{Model: model, Messages: msgs}
+	if stream {
+		body.Stream = true
+		body.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return model, nil, fmt.Errorf("openai: encode request: %w", err)
+	}
+	return model, raw, nil
+}
+
+// post sends the encoded body with the configured path and headers.
+func (c *Client) post(ctx context.Context, body []byte) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+c.path, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("openai: build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	for name, value := range c.headers {
+		httpReq.Header.Set(name, value)
+	}
+	return c.http.Do(httpReq)
 }
 
 // statusError turns a non-200 into an error carrying the provider's own message, which is usually
@@ -287,6 +382,32 @@ func toModelResponse(model string, out chatResponse) api.ModelResponse {
 type chatRequest struct {
 	Model    string        `json:"model"`
 	Messages []chatMessage `json:"messages"`
+	Stream   bool          `json:"stream,omitempty"`
+	// Ask a streaming response to carry usage too. Without it the stream ends with no accounting,
+	// and a streamed turn would silently record zero tokens.
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+// chatChunk is one server-sent event from a streaming response. The fields mirror chatResponse but
+// carry deltas rather than a whole message.
+type chatChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"delta"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens            int64 `json:"prompt_tokens"`
+		CompletionTokens        int64 `json:"completion_tokens"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int64 `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
+	} `json:"usage"`
 }
 
 type chatMessage struct {

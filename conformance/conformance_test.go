@@ -514,3 +514,122 @@ func TestReplayNeverReachesTheProvider(t *testing.T) {
 		t.Fatalf("replay invoked the model %d times (I1)", c2.ModelInvocations())
 	}
 }
+
+// streamingModel is a controller.StreamFunc that emits its answer one rune at a time, so a test can
+// tell chunk delivery apart from the finalized message.
+type streamingModel struct{ n int }
+
+func (m *streamingModel) call(_ context.Context, req api.ModelRequest, onChunk func(string)) (api.ModelResponse, error) {
+	m.n++
+	last := ""
+	if k := len(req.Messages); k > 0 {
+		last = req.Messages[k-1].Text()
+	}
+	answer := fmt.Sprintf("resp#%d:%s", m.n, last)
+	for _, r := range answer {
+		if onChunk != nil {
+			onChunk(string(r))
+		}
+	}
+	return api.ModelResponse{Message: *api.TextMessage("assistant", answer)}, nil
+}
+
+// 14. Streaming must not change what is recorded. Deltas are transport, so a streamed turn must
+// journal the same events, with the same finalized output, as an unstreamed one: a chunk must never
+// become an event, and the chain must still verify.
+//
+// The comparison is on kinds and content, not on hashes, because each MODEL_CALL carries a fresh id
+// and two independent runs therefore never share a hash.
+func TestStreamingDoesNotChangeTheJournal(t *testing.T) {
+	run := func(t *testing.T, streaming bool) ([]eventlog.Record, *sqlitelog.Log) {
+		t.Helper()
+		s, _ := openFile(t)
+		t.Cleanup(func() { s.Close() })
+		log := s.Session("s")
+
+		opts := []controller.Option{}
+		if streaming {
+			opts = append(opts, controller.WithStreamingModel((&streamingModel{}).call))
+		}
+		c, err := controller.New(log, (&countModel{}).call, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+			t.Fatal(err)
+		}
+		recs, err := log.Read(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return recs, log
+	}
+
+	plain, _ := run(t, false)
+	streamed, streamedLog := run(t, true)
+
+	if len(plain) != len(streamed) {
+		t.Fatalf("streaming changed the event count: %d vs %d (a delta became an event?)", len(streamed), len(plain))
+	}
+	for i := range plain {
+		if plain[i].Event.Kind != streamed[i].Event.Kind {
+			t.Fatalf("event %d kind differs: %s vs %s", i, streamed[i].Event.Kind, plain[i].Event.Kind)
+		}
+	}
+
+	// Both models answer "resp#1:hi", so the finalized output must be identical and whole: the
+	// streamed run must not have written one OUTPUT per chunk.
+	if got, want := outputsOf(streamed), outputsOf(plain); !reflect.DeepEqual(got, want) {
+		t.Fatalf("streamed outputs %v, unstreamed %v", got, want)
+	}
+	if outs := outputsOf(streamed); len(outs) != 1 {
+		t.Fatalf("streamed turn recorded %d outputs, want exactly 1 finalized message", len(outs))
+	}
+	if err := streamedLog.Verify(); err != nil {
+		t.Fatalf("streamed journal fails chain verification: %v", err)
+	}
+}
+
+// 15. Replay must emit no deltas. They are transport-only, and a replay that produced them would be
+// claiming to have watched a call it never made.
+func TestReplayEmitsNoDeltas(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+
+	var liveDeltas, replayDeltas int
+	observer := func(count *int) controller.Observer {
+		return controller.Observer{OnDelta: func(api.Delta) { *count++ }}
+	}
+
+	c, err := controller.New(log, (&countModel{}).call,
+		controller.WithStreamingModel((&streamingModel{}).call),
+		controller.WithObserver(observer(&liveDeltas)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if liveDeltas == 0 {
+		t.Fatal("the live turn produced no deltas, so this cannot prove replay suppresses them")
+	}
+
+	c2, err := controller.New(log, (&countModel{}).call,
+		controller.WithStreamingModel((&streamingModel{}).call),
+		controller.WithObserver(observer(&replayDeltas)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.Replay(context.Background(), echoagent.Harness{}); err != nil {
+		t.Fatal(err)
+	}
+	if replayDeltas != 0 {
+		t.Fatalf("replay emitted %d deltas; they are transport only and must not be reproduced", replayDeltas)
+	}
+	if c2.ModelInvocations() != 0 {
+		t.Fatalf("replay invoked the model %d times (I1)", c2.ModelInvocations())
+	}
+}

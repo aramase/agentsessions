@@ -287,6 +287,21 @@ if err != nil {
 fmt.Println(turn.Session.GetMetadata().GetUid(), turn.Output)
 ```
 
+Output streams as the model produces it. `OnDelta` receives ephemeral chunks; `OnRecord` receives
+committed records:
+
+```go
+_, err = c.Exec(ctx, client.ExecOptions{
+    Inputs:  []string{"write a haiku"},
+    OnDelta: func(d *v1.Delta) { fmt.Print(d.GetChunk()) },
+})
+```
+
+Deltas are transport only. They are never logged, never hash-chained, and never produced on replay,
+so the journal is the same whether or not anyone watched the turn. Streaming works because the
+*host* mediates the model call: the harness blocks on one `sink.Model` and never learns that
+anything streamed.
+
 `turn.LastSeq` is the cursor for the next turn, so opting into the single-writer check costs no
 extra round trip:
 

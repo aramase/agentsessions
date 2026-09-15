@@ -27,7 +27,7 @@ func (s *liveSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelRe
 	}); err != nil {
 		return api.ModelResponse{}, err
 	}
-	resp, err := s.c.model(ctx, req)
+	resp, err := s.c.invokeModel(ctx, req)
 	if err != nil {
 		return api.ModelResponse{}, err
 	}

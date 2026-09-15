@@ -347,6 +347,17 @@ func approvalResFromProto(a *v1.ApprovalResult) *api.ApprovalResult {
 	return &api.ApprovalResult{ToolCallID: a.GetToolCallId(), Approved: a.GetApproved(), Reason: a.GetReason()}
 }
 
+// DeltaToProto converts an ephemeral streaming chunk. Deltas are transport only, so unlike Event
+// this has no canonical form and never reaches the hash chain.
+func DeltaToProto(d api.Delta) *v1.Delta {
+	return &v1.Delta{
+		ExecutionId: d.ExecutionID,
+		PartIndex:   d.PartIndex,
+		Chunk:       d.Chunk,
+		Done:        d.Done,
+	}
+}
+
 func usageToProto(u *api.Usage) *v1.Usage {
 	if u == nil {
 		return nil

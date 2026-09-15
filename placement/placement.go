@@ -44,6 +44,7 @@ type Backend interface {
 type Placer struct {
 	backend Backend
 	model   controller.ModelFunc
+	stream  controller.StreamFunc
 	dial    Dialer
 	logger  *slog.Logger
 }
@@ -60,6 +61,36 @@ type Option func(*Placer)
 
 // WithDialer overrides how the Placer reaches a harness (default: unix-socket dial for runtime/local).
 func WithDialer(d Dialer) Option { return func(p *Placer) { p.dial = d } }
+
+// ExecOption configures a single execution.
+type ExecOption func(*execConfig)
+
+type execConfig struct{ observer controller.Observer }
+
+// WithObserver relays a turn's records and streaming chunks as they happen, instead of leaving the
+// caller to re-read the log once the turn is over.
+func WithObserver(o controller.Observer) ExecOption {
+	return func(c *execConfig) { c.observer = o }
+}
+
+// controllerOpts is the shared controller configuration, so the exec and resume paths cannot drift
+// apart on fencing, logging, or which model they drive.
+func (p *Placer) controllerOpts(fence int64, sessionUID string, observer controller.Observer) []controller.Option {
+	opts := []controller.Option{
+		controller.WithFence(fence),
+		controller.WithLogger(p.logger),
+		controller.WithSessionUID(sessionUID),
+		controller.WithObserver(observer),
+	}
+	if p.stream != nil {
+		opts = append(opts, controller.WithStreamingModel(p.stream))
+	}
+	return opts
+}
+
+// WithStreamingModel supplies a model that reports partial output, which the controller relays as
+// ephemeral deltas. Without it a turn still runs; the caller just sees the finalized output only.
+func WithStreamingModel(fn controller.StreamFunc) Option { return func(p *Placer) { p.stream = fn } }
 
 // WithLogger enables structured operational logs. Message contents and fence tokens are never logged.
 func WithLogger(logger *slog.Logger) Option { return func(p *Placer) { p.logger = logger } }
@@ -84,7 +115,11 @@ func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 // Exec places one turn: Create the incarnation, mint the fence from the log and stamp it on the
 // incarnation, bind a controller to that same token, and drive the (placed) harness. The log stays the
 // single fence authority; the returned incarnation carries the fence for Suspend/Resume (step 5).
-func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string, inputs []api.Message, expectedLastSeq int64) (inc api.Incarnation, err error) {
+func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string, inputs []api.Message, expectedLastSeq int64, opts ...ExecOption) (inc api.Incarnation, err error) {
+	var cfg execConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.StartDebug(ctx, p.logger, "placement", "exec",
 		"session_uid", sessionUID,
@@ -153,13 +188,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	fenceFinished(nil)
 	inc.FenceToken = fence // Placer-owned: the incarnation carries the token Suspend/Resume will need
-	c, err := controller.New(
-		log,
-		p.model,
-		controller.WithFence(fence),
-		controller.WithLogger(p.logger),
-		controller.WithSessionUID(sessionUID),
-	)
+	c, err := controller.New(log, p.model, p.controllerOpts(fence, sessionUID, cfg.observer)...)
 	if err != nil {
 		return inc, err
 	}
@@ -282,13 +311,7 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	fenceFinished(nil)
 	inc.FenceToken = fence
-	c, err := controller.New(
-		log,
-		p.model,
-		controller.WithFence(fence),
-		controller.WithLogger(p.logger),
-		controller.WithSessionUID(sessionUID),
-	)
+	c, err := controller.New(log, p.model, p.controllerOpts(fence, sessionUID, controller.Observer{})...)
 	if err != nil {
 		return err
 	}
