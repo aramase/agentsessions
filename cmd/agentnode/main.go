@@ -80,8 +80,8 @@ func main() {
 		h2, _ := log.Head()
 		fmt.Printf("[agentnode %s] MODE=exec   input=%q -> outputs=%v (journal head=%d)\n", host, input, out, h2)
 	} else {
-		// Existing session on a FRESH pod: resume by replaying the durable journal. This is the
-		// capability ax marks TODO — deterministic replay-resume on a plain pod, no substrate.
+		// Existing session on a FRESH pod: resume by replaying the durable journal. No substrate and
+		// no memory snapshot: deterministic replay is what makes a plain pod enough.
 		recs, err := log.Read(1)
 		if err != nil {
 			fatalf(host, "read journal: %v", err)

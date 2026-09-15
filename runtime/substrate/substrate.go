@@ -495,8 +495,8 @@ func (b *Backend) Capabilities() api.RuntimeCapabilities {
 
 // HarnessPort is the TCP port the in-sandbox harness (cmd/harnessnode) serves harnesswire on, and the
 // port an in-cluster driver dials directly on the actor's pod IP. The atenet mesh is HTTP/1.1-only to
-// actors, so gRPC bypasses the router and reaches PodIP:HarnessPort over h2c (matching google/ax's
-// direct-dial path). Keep in sync with cmd/harnessnode's HARNESS_ADDR default.
+// actors, so gRPC bypasses the router and reaches PodIP:HarnessPort over h2c. Keep in sync with
+// cmd/harnessnode's HARNESS_ADDR default.
 const HarnessPort = "80"
 
 // incarnation maps a resumed actor onto the compute handle the Placer drives. Address is the actor's

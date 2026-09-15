@@ -2,8 +2,8 @@
 // tamper-evident hash-chain. content_hash is defined over RFC 8785 (JCS) applied to the
 // proto3-JSON mapping of the event, so ANY implementation — not only this Go host — can
 // recompute and independently verify the chain. That independent verifiability is the
-// "provenance anyone can audit" property (google/ax has no log hash-chain at all). See the
-// determinism contract §7.
+// "provenance anyone can audit" property: an auditor does not have to trust the binary that wrote
+// the journal. See the determinism contract §7.
 //
 //	content_hash = lc-hex( SHA-256( JCS({
 //	    "event":     proto3-JSON(Event),
@@ -32,7 +32,7 @@ import (
 // marshalOpts pins the proto3-JSON emission so the canonical form is identical across
 // implementations *before* JCS runs. proto3-JSON field presence and naming are not normalized by
 // JCS, so they must be fixed here: proto field names (snake_case — the stable contract names,
-// matching google/ax's own protojson usage), enums as names, and unpopulated fields omitted
+// which survive a language binding renaming its accessors), enums as names, and unpopulated fields omitted
 // (standard proto3-JSON). JCS then normalizes key order, number/string forms, and whitespace.
 var marshalOpts = protojson.MarshalOptions{
 	UseProtoNames:   true,

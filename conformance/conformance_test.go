@@ -267,7 +267,7 @@ func truncateFrom(t *testing.T, path, session string, fromSeq int64) {
 
 // 6. Language-neutral integrity: an INDEPENDENT, non-Go implementation must reproduce the chain's
 // content_hash from the same proto3-JSON + RFC 8785 JCS spec. This is the "any auditor can verify
-// the log" provenance wedge — the thing ax (protojson rows, no hash) cannot offer.
+// the log" property: a durable log that only its own writer can check is not provenance.
 func TestIntegrityGoldenVectorCrossImpl(t *testing.T) {
 	py, err := exec.LookPath("python3")
 	if err != nil {

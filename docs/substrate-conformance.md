@@ -160,8 +160,8 @@ The harness is a `harnesswire` gRPC server. The key finding (verified empiricall
   cluster sets no HTTP/2 option — so a **gRPC** harness gets an Envoy `protocol error` through the router.
   All substrate demo actors are HTTP/1.1; there is no gRPC-actor path through the mesh.
 - But the gVisor/micro-VM sandbox exposes the harness on the **worker pod's IP**. An **in-cluster** dial
-  straight to `ActorInfo.PodIp:80` speaks h2c/gRPC cleanly, bypassing the router entirely — the same
-  approach Google's `ax` uses (`internal/harness/substrate`). The harnesswire transport is unchanged.
+  straight to `ActorInfo.PodIp:80` speaks h2c/gRPC cleanly, bypassing the router entirely. The
+  harnesswire transport is unchanged.
 
 ```mermaid
 flowchart LR

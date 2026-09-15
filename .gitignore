@@ -41,3 +41,6 @@ go.work.sum
 
 # goreleaser build output
 /dist/
+
+# local scratch: notes, spikes, and anything not meant for this repository
+/_local/
