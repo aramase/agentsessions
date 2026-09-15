@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -652,5 +653,200 @@ func TestExecExplicitZeroCASIsEnforced(t *testing.T) {
 	}
 	if err := drainExec(second); status.Code(err) != codes.Aborted {
 		t.Fatalf("expected_last_seq=0 on a non-empty session: want Aborted, got %v", err)
+	}
+}
+
+// Metadata a caller attaches must survive the round trip. Accepting it and dropping it is worse
+// than rejecting it, because the caller cannot tell the difference.
+func TestCreateSessionPersistsMetadata(t *testing.T) {
+	c := newClient(t)
+	created, err := c.CreateSession(context.Background(), &v1.CreateSessionRequest{
+		Session: &v1.Session{
+			Metadata:    &v1.ResourceMetadata{Name: "triage"},
+			Labels:      map[string]string{"team": "platform", "tier": "gold"},
+			Annotations: map[string]string{"note": "from the issue tracker"},
+			Origin:      &v1.Origin{Source: "github", Subject: "issue/42", Uri: "https://example.invalid/42"},
+			Identity:    &v1.IdentityRef{Principal: "user:alice", Issuer: "https://issuer.invalid", Subject: "alice"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.GetSession(context.Background(), &v1.GetSessionRequest{Uid: created.GetMetadata().GetUid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetLabels()["team"] != "platform" || got.GetLabels()["tier"] != "gold" {
+		t.Fatalf("labels = %v", got.GetLabels())
+	}
+	if got.GetAnnotations()["note"] != "from the issue tracker" {
+		t.Fatalf("annotations = %v", got.GetAnnotations())
+	}
+	if got.GetOrigin().GetSource() != "github" || got.GetOrigin().GetSubject() != "issue/42" {
+		t.Fatalf("origin = %v", got.GetOrigin())
+	}
+	// Identity is recorded as provenance, never enforced. Storing it is what makes a session say
+	// who it was created for; see docs/security.md.
+	if got.GetIdentity().GetPrincipal() != "user:alice" || got.GetIdentity().GetIssuer() != "https://issuer.invalid" {
+		t.Fatalf("identity = %v", got.GetIdentity())
+	}
+}
+
+// A session with no metadata must report none rather than empty maps, so "nothing was attached"
+// stays distinguishable from "an empty map was attached".
+func TestSessionWithoutMetadataReportsNone(t *testing.T) {
+	c := newClient(t)
+	created, err := c.CreateSession(context.Background(), &v1.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.GetSession(context.Background(), &v1.GetSessionRequest{Uid: created.GetMetadata().GetUid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.GetLabels()) != 0 || len(got.GetAnnotations()) != 0 {
+		t.Fatalf("labels %v annotations %v, want both empty", got.GetLabels(), got.GetAnnotations())
+	}
+	if got.GetOrigin() != nil || got.GetIdentity() != nil {
+		t.Fatalf("origin %v identity %v, want both unset", got.GetOrigin(), got.GetIdentity())
+	}
+}
+
+// Metadata must survive a listing too, not just a direct read: a caller that lists sessions to find
+// one by label needs the label to be there.
+func TestListSessionsCarriesMetadata(t *testing.T) {
+	c := newClient(t)
+	if _, err := c.CreateSession(context.Background(), &v1.CreateSessionRequest{
+		Session: &v1.Session{Labels: map[string]string{"team": "platform"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := c.ListSessions(context.Background(), &v1.ListSessionsRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.GetSessions()) != 1 {
+		t.Fatalf("listed %d sessions, want 1", len(list.GetSessions()))
+	}
+	if list.GetSessions()[0].GetLabels()["team"] != "platform" {
+		t.Fatalf("listing dropped labels: %v", list.GetSessions()[0].GetLabels())
+	}
+}
+
+// A fork inherits the context it shares with its parent and takes the rest from the request: labels
+// are how a caller tells branches apart, so inheriting them would make a fan-out indistinguishable.
+func TestForkMetadataInheritance(t *testing.T) {
+	c := newClient(t)
+	parent, err := c.CreateSession(context.Background(), &v1.CreateSessionRequest{
+		Session: &v1.Session{
+			Labels:      map[string]string{"branch": "parent"},
+			Annotations: map[string]string{"note": "shared"},
+			Origin:      &v1.Origin{Source: "github"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := parent.GetMetadata().GetUid()
+	execOutputs(t, c, uid, "hi", 0)
+
+	resp, err := c.Fork(context.Background(), &v1.ForkRequest{
+		Session: uid,
+		Count:   1,
+		Labels:  map[string]string{"branch": "child"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := resp.GetChildren()[0]
+	if child.GetLabels()["branch"] != "child" {
+		t.Fatalf("child labels = %v, want the request's", child.GetLabels())
+	}
+	if child.GetAnnotations()["note"] != "shared" {
+		t.Fatalf("child annotations = %v, want the parent's", child.GetAnnotations())
+	}
+	if child.GetOrigin().GetSource() != "github" {
+		t.Fatalf("child origin = %v, want the parent's", child.GetOrigin())
+	}
+}
+
+// exec_state reports the execution axis. A session that has never run is PENDING; running a turn
+// moves it off that.
+func TestExecStateReflectsWhetherTheSessionHasRun(t *testing.T) {
+	c := newClient(t)
+	created, err := c.CreateSession(context.Background(), &v1.CreateSessionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := created.GetMetadata().GetUid()
+	if created.GetExecState() != v1.ExecState_EXEC_PENDING {
+		t.Fatalf("new session exec_state = %v, want EXEC_PENDING", created.GetExecState())
+	}
+
+	execOutputs(t, c, uid, "hi", 0)
+	got, err := c.GetSession(context.Background(), &v1.GetSessionRequest{Uid: uid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetExecState() != v1.ExecState_EXEC_COMPLETED {
+		t.Fatalf("after a turn exec_state = %v, want EXEC_COMPLETED", got.GetExecState())
+	}
+}
+
+// A deadline in the past must cancel the turn rather than be ignored. This is what the ctx threaded
+// through the harness SPI is for.
+func TestExecHonoursDeadline(t *testing.T) {
+	c := newClient(t)
+	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+		Session:      mustCreate(t, c),
+		Inputs:       []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
+		DeadlineUnix: time.Now().Add(-time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := drainExec(stream); err == nil {
+		t.Fatal("an expired deadline was ignored")
+	}
+}
+
+// configHarness records the Start it was handed, so a test can prove the per-execution values a
+// caller supplied actually reach the harness instead of stopping at the service.
+type configHarness struct{ got *api.Start }
+
+func (configHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "echo", Models: []string{"echo"}}, nil
+}
+
+func (h *configHarness) Run(ctx context.Context, s *api.Start, sink api.EventSink) error {
+	*h.got = *s
+	_, err := sink.Model(ctx, api.ModelRequest{Model: "echo", Messages: []api.Message{*api.TextMessage("user", "x")}})
+	return err
+}
+
+// config and resume_from_seq are opaque to the host and meaningful only to the harness, so the test
+// that they are honored is that they arrive there.
+func TestExecPassesConfigAndCursorToHarness(t *testing.T) {
+	var got api.Start
+	c := newClientWith(t, local.New(&configHarness{got: &got}))
+
+	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+		Session:       mustCreate(t, c),
+		Inputs:        []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
+		Config:        []byte(`{"temperature":0}`),
+		ResumeFromSeq: 7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := drainExec(stream); err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Config) != `{"temperature":0}` {
+		t.Fatalf("harness saw config %q, want the request's", got.Config)
+	}
+	if got.ResumeFromSeq != 7 {
+		t.Fatalf("harness saw resume_from_seq %d, want 7", got.ResumeFromSeq)
 	}
 }

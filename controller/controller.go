@@ -104,6 +104,16 @@ func WithStreamingModel(fn StreamFunc) Option { return func(c *Controller) { c.s
 // them instead of waiting for the turn to finish and re-reading the log.
 func WithObserver(o Observer) Option { return func(c *Controller) { c.observer = o } }
 
+// WithStart carries per-execution values the caller supplied straight through to the harness: the
+// opaque config and the resume cursor. They are passed rather than interpreted, since only the
+// harness knows what they mean.
+func WithStart(config []byte, resumeFromSeq int64) Option {
+	return func(c *Controller) {
+		c.startConfig = config
+		c.startResumeFromSeq = resumeFromSeq
+	}
+}
+
 // WithSessionUID adds session correlation to controller logs.
 func WithSessionUID(sessionUID string) Option {
 	return func(c *Controller) { c.sessionUID = sessionUID }
@@ -114,17 +124,19 @@ func WithSessionUID(sessionUID string) Option {
 // (liveModelCalls is unsynchronized). Concurrency BETWEEN controllers/processes is safe — the log's
 // CAS + fencing reject a superseded writer.
 type Controller struct {
-	log            eventlog.Store
-	model          ModelFunc
-	stream         StreamFunc
-	observer       Observer
-	executionID    string
-	tool           ToolFunc
-	fence          int64
-	liveModelCalls int
-	liveToolCalls  int
-	logger         *slog.Logger
-	sessionUID     string
+	log                eventlog.Store
+	model              ModelFunc
+	stream             StreamFunc
+	observer           Observer
+	startConfig        []byte
+	startResumeFromSeq int64
+	executionID        string
+	tool               ToolFunc
+	fence              int64
+	liveModelCalls     int
+	liveToolCalls      int
+	logger             *slog.Logger
+	sessionUID         string
 }
 
 // New starts an incarnation over log. Unless the caller supplies a fence via WithFence, it advances
@@ -204,7 +216,13 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		"history_event_count", historyEvents,
 		"input_count", len(inputs),
 	)
-	if err := har.Run(ctx, &api.Start{History: history, Inputs: inputs}, &liveSink{c: c}); err != nil {
+	start := &api.Start{
+		History:       history,
+		Inputs:        inputs,
+		Config:        c.startConfig,
+		ResumeFromSeq: c.startResumeFromSeq,
+	}
+	if err := har.Run(ctx, start, &liveSink{c: c}); err != nil {
 		runFinished(err, "error_kind", "harness_run_failed")
 		// Best-effort: record the failure. If this append itself fails we still surface the
 		// original harness error to the caller.

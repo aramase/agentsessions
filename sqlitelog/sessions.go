@@ -41,6 +41,14 @@ type SessionMeta struct {
 	ForkSeq   int64  // parent event seq forked at
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// Caller-supplied metadata, carried as proto3-JSON. The store round-trips these without
+	// interpreting them: they describe a session, they do not control it. Identity especially is
+	// provenance and not authorization; nothing checks it. See docs/security.md.
+	Labels      string
+	Annotations string
+	Origin      string
+	Identity    string
 }
 
 // SessionInfo is the stored metadata plus the two fields the store derives: the log cursor, and the
@@ -122,20 +130,26 @@ func (s *Store) PutSession(m SessionMeta) error {
 	}
 	_, err := s.db.Exec(
 		`INSERT INTO sessions(session, fence, project, name, harness, model,
-		                      parent_uid, fork_seq, compute_state, created_at, updated_at)
-		 VALUES(?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      parent_uid, fork_seq, compute_state, created_at, updated_at,
+		                      labels, annotations, origin, identity)
+		 VALUES(?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(session) DO UPDATE SET
-		   project    = excluded.project,
-		   name       = excluded.name,
-		   harness    = excluded.harness,
-		   model      = excluded.model,
-		   parent_uid = excluded.parent_uid,
-		   fork_seq   = excluded.fork_seq,
-		   created_at = CASE WHEN ? OR sessions.created_at = 0
+		   project     = excluded.project,
+		   name        = excluded.name,
+		   harness     = excluded.harness,
+		   model       = excluded.model,
+		   parent_uid  = excluded.parent_uid,
+		   fork_seq    = excluded.fork_seq,
+		   labels      = excluded.labels,
+		   annotations = excluded.annotations,
+		   origin      = excluded.origin,
+		   identity    = excluded.identity,
+		   created_at  = CASE WHEN ? OR sessions.created_at = 0
 		                     THEN excluded.created_at ELSE sessions.created_at END,
-		   updated_at = excluded.updated_at`,
+		   updated_at  = excluded.updated_at`,
 		m.UID, m.Project, m.Name, m.Harness, m.Model,
 		m.ParentUID, m.ForkSeq, string(api.ComputeNone), created.UnixNano(), now.UnixNano(),
+		m.Labels, m.Annotations, m.Origin, m.Identity,
 		explicitCreated,
 	)
 	if err != nil {
@@ -149,7 +163,9 @@ func (s *Store) PutSession(m SessionMeta) error {
 // event table alone would drop.
 const sessionSelect = `
 SELECT s.session, s.project, s.name, s.harness, s.model, s.parent_uid, s.fork_seq,
-       s.compute_state, s.created_at, s.updated_at, COALESCE(MAX(e.seq), 0)
+       s.compute_state, s.created_at, s.updated_at,
+       s.labels, s.annotations, s.origin, s.identity,
+       COALESCE(MAX(e.seq), 0)
 FROM sessions s LEFT JOIN events e ON e.session = s.session`
 
 // SessionInfo returns one session's metadata together with its derived log cursor and compute
@@ -243,7 +259,9 @@ func scanSession(row scanner) (SessionInfo, error) {
 	)
 	if err := row.Scan(
 		&info.UID, &info.Project, &info.Name, &info.Harness, &info.Model,
-		&info.ParentUID, &info.ForkSeq, &state, &createdAt, &updatedAt, &info.LastSeq,
+		&info.ParentUID, &info.ForkSeq, &state, &createdAt, &updatedAt,
+		&info.Labels, &info.Annotations, &info.Origin, &info.Identity,
+		&info.LastSeq,
 	); err != nil {
 		return SessionInfo{}, err
 	}

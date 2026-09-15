@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log/slog"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -89,7 +90,7 @@ func newUID() string {
 // the store maintains inside the append transaction, so it reflects the last recorded lifecycle
 // transition rather than a live probe of the backend — see sqlitelog for what that does and does
 // not guarantee.
-func sessionProto(info sqlitelog.SessionInfo) *v1.Session {
+func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 	md := &v1.ResourceMetadata{
 		Project: info.Project,
 		Name:    info.Name,
@@ -101,15 +102,38 @@ func sessionProto(info sqlitelog.SessionInfo) *v1.Session {
 	if !info.UpdatedAt.IsZero() {
 		md.UpdateTime = timestamppb.New(info.UpdatedAt)
 	}
-	return &v1.Session{
+	out := &v1.Session{
 		Metadata:     md,
 		Harness:      info.Harness,
 		Model:        info.Model,
+		ExecState:    execStateOf(info),
 		ComputeState: wire.ComputeStateToProto(info.ComputeState),
 		LastSeq:      info.LastSeq,
 		ParentUid:    info.ParentUID,
 		ForkSeq:      info.ForkSeq,
 	}
+	if err := applyMetadata(out, info); err != nil {
+		return nil, status.Errorf(codes.Internal, "session %q: %v", info.UID, err)
+	}
+	return out, nil
+}
+
+// execStateOf reports the execution axis from the metadata row.
+//
+// It is a projection, with the same caveat as compute_state: it says what the log implies, not what
+// is happening right now. A session with no events has never run, so it is PENDING. Anything else
+// is reported COMPLETED, because Exec is synchronous and returns only after the turn reaches END.
+//
+// The case it cannot see is a turn interrupted mid-flight, which stays COMPLETED here until Resume
+// re-drives it. Distinguishing that needs the kind of the log's last event, and an event body is an
+// opaque blob no query can filter on, so answering it for a whole listing would mean decoding one
+// record per session. That is worth doing when something depends on the distinction; today nothing
+// does, and the recovery path keys off the log rather than off this field.
+func execStateOf(info sqlitelog.SessionInfo) v1.ExecState {
+	if info.LastSeq == 0 {
+		return v1.ExecState_EXEC_PENDING
+	}
+	return v1.ExecState_EXEC_COMPLETED
 }
 
 // CreateSession persists the session's metadata and returns it. The metadata row is written before
@@ -122,12 +146,20 @@ func (s *Service) CreateSession(ctx context.Context, req *v1.CreateSessionReques
 	defer func() { finish(err, "error_kind", serviceErrorKind(err), "session_uid", uid) }()
 
 	spec := req.GetSession()
+	labels, annotations, origin, identity, err := metadataFromSpec(spec)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "session metadata: %v", err)
+	}
 	return s.createSession(uid, sqlitelog.SessionMeta{
-		UID:     uid,
-		Project: spec.GetMetadata().GetProject(),
-		Name:    spec.GetMetadata().GetName(),
-		Harness: spec.GetHarness(),
-		Model:   spec.GetModel(),
+		UID:         uid,
+		Project:     spec.GetMetadata().GetProject(),
+		Name:        spec.GetMetadata().GetName(),
+		Harness:     spec.GetHarness(),
+		Model:       spec.GetModel(),
+		Labels:      labels,
+		Annotations: annotations,
+		Origin:      origin,
+		Identity:    identity,
 	})
 }
 
@@ -153,7 +185,7 @@ func (s *Service) createSession(uid string, meta sqlitelog.SessionMeta) (*v1.Ses
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "create session: %v", err)
 	}
-	return sessionProto(info), nil
+	return sessionProto(info)
 }
 
 // GetSession returns the session's stored metadata and current log cursor.
@@ -171,7 +203,7 @@ func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (se
 	if err != nil {
 		return nil, sessionStoreError(err, req.GetUid())
 	}
-	return sessionProto(info), nil
+	return sessionProto(info)
 }
 
 // ListSessions enumerates sessions in a project, newest first, from the store rather than from any
@@ -210,7 +242,11 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 	}
 	out := make([]*v1.Session, 0, len(page.Sessions))
 	for _, info := range page.Sessions {
-		out = append(out, sessionProto(info))
+		sess, err := sessionProto(info)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
 	}
 	returned = len(out)
 	return &v1.ListSessionsResponse{Sessions: out, NextPageToken: page.NextPageToken}, nil
@@ -312,7 +348,10 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		if err != nil {
 			return sessionStoreError(err, uid)
 		}
-		sess = sessionProto(info)
+		sess, err = sessionProto(info)
+		if err != nil {
+			return err
+		}
 	}
 	// The session goes out before the turn runs, so a caller learns the uid of a session created
 	// for it even if the execution then fails.
@@ -359,7 +398,14 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 
 	// Route the turn through the placement seam: Create the incarnation, mint+bind the fence, and
 	// drive the placed harness through the Runtime SPI instead of a co-located controller.
-	if _, err := placer.Exec(ctx, log, uid, inputs, expected, placement.WithObserver(observer)); err != nil {
+	execOpts := []placement.ExecOption{
+		placement.WithObserver(observer),
+		placement.WithStart(req.GetConfig(), req.GetResumeFromSeq()),
+	}
+	if d := req.GetDeadlineUnix(); d > 0 {
+		execOpts = append(execOpts, placement.WithDeadline(time.Unix(d, 0)))
+	}
+	if _, err := placer.Exec(ctx, log, uid, inputs, expected, execOpts...); err != nil {
 		return execError(err)
 	}
 	if sendErr != nil {
@@ -484,6 +530,14 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if err != nil {
 		return nil, sessionStoreError(err, req.GetSession())
 	}
+	childLabels, err := encodeMap(req.GetLabels())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "fork labels: %v", err)
+	}
+	childIdentity, err := encodeMessage(req.GetIdentity())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "fork identity: %v", err)
+	}
 	out := make([]*v1.Session, 0, len(children))
 	for i, child := range children {
 		var name string
@@ -498,6 +552,15 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 			Model:     parentInfo.Model,
 			ParentUID: req.GetSession(),
 			ForkSeq:   atSeq,
+			// A child inherits the parent's annotations and origin, because it is the same
+			// workload branched and its external context did not change. Labels and identity come
+			// from the request instead: labels are how a caller tells branches apart, so copying
+			// them would make a fan-out indistinguishable, and identity names who the child runs
+			// for, which a fork is entitled to change.
+			Annotations: parentInfo.Annotations,
+			Origin:      parentInfo.Origin,
+			Labels:      childLabels,
+			Identity:    childIdentity,
 		}); err != nil {
 			return nil, status.Errorf(codes.Internal, "fork: record child %q: %v", child.UID, err)
 		}
@@ -505,7 +568,11 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		if err != nil {
 			return nil, sessionStoreError(err, child.UID)
 		}
-		out = append(out, sessionProto(info))
+		childProto, err := sessionProto(info)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, childProto)
 	}
 	return &v1.ForkResponse{Children: out}, nil
 }
@@ -547,7 +614,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	if err != nil {
 		return nil, sessionStoreError(err, req.GetSession())
 	}
-	return sessionProto(info), nil
+	return sessionProto(info)
 }
 
 // Resume restores the incarnation via the Runtime SPI, re-drives any interrupted turn, and records a
@@ -569,7 +636,7 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	if err != nil {
 		return nil, sessionStoreError(err, req.GetSession())
 	}
-	return sessionProto(info), nil
+	return sessionProto(info)
 }
 
 func execError(err error) error {

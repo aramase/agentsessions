@@ -379,20 +379,23 @@ func (x *ComputeRef) GetFenceToken() int64 {
 }
 
 type Session struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Metadata      *ResourceMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	Harness       string                 `protobuf:"bytes,2,opt,name=harness,proto3" json:"harness,omitempty"`
-	Model         string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`                                                                        // model-agnostic id
-	ExecState     ExecState              `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`             // execution/turn axis
-	ComputeState  ComputeState           `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
-	LastSeq       int64                  `protobuf:"varint,5,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`                                                    // event-log cursor
-	ParentUid     string                 `protobuf:"bytes,6,opt,name=parent_uid,json=parentUid,proto3" json:"parent_uid,omitempty"`                                               // fork lineage
-	ForkSeq       int64                  `protobuf:"varint,7,opt,name=fork_seq,json=forkSeq,proto3" json:"fork_seq,omitempty"`
-	Identity      *IdentityRef           `protobuf:"bytes,8,opt,name=identity,proto3" json:"identity,omitempty"`
-	Compute       *ComputeRef            `protobuf:"bytes,9,opt,name=compute,proto3" json:"compute,omitempty"` // empty when SUSPENDED/TERMINATED
-	Origin        *Origin                `protobuf:"bytes,10,opt,name=origin,proto3" json:"origin,omitempty"`  // neutral external context; filled by a producer adapter
-	Labels        map[string]string      `protobuf:"bytes,11,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Annotations   map[string]string      `protobuf:"bytes,12,rep,name=annotations,proto3" json:"annotations,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // free-form adapter metadata (K8s-style)
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Metadata     *ResourceMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	Harness      string                 `protobuf:"bytes,2,opt,name=harness,proto3" json:"harness,omitempty"`
+	Model        string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`                                                                        // model-agnostic id
+	ExecState    ExecState              `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`             // execution/turn axis
+	ComputeState ComputeState           `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
+	LastSeq      int64                  `protobuf:"varint,5,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`                                                    // event-log cursor
+	ParentUid    string                 `protobuf:"bytes,6,opt,name=parent_uid,json=parentUid,proto3" json:"parent_uid,omitempty"`                                               // fork lineage
+	ForkSeq      int64                  `protobuf:"varint,7,opt,name=fork_seq,json=forkSeq,proto3" json:"fork_seq,omitempty"`
+	// Recorded provenance, never enforced: it says on whose behalf a session was created, and the
+	// hash chain makes that record tamper-evident. Nothing in this implementation treats it as
+	// authorization. See docs/security.md.
+	Identity      *IdentityRef      `protobuf:"bytes,8,opt,name=identity,proto3" json:"identity,omitempty"`
+	Compute       *ComputeRef       `protobuf:"bytes,9,opt,name=compute,proto3" json:"compute,omitempty"` // empty when SUSPENDED/TERMINATED
+	Origin        *Origin           `protobuf:"bytes,10,opt,name=origin,proto3" json:"origin,omitempty"`  // neutral external context; filled by a producer adapter
+	Labels        map[string]string `protobuf:"bytes,11,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Annotations   map[string]string `protobuf:"bytes,12,rep,name=annotations,proto3" json:"annotations,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // free-form adapter metadata (K8s-style)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -778,10 +781,13 @@ type ExecRequest struct {
 	Session string `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
 	// Input messages for this turn. Empty = resume/re-drive the last non-terminal
 	// execution with no new input (recovery after a crash/interruption).
-	Inputs        []*Message `protobuf:"bytes,2,rep,name=inputs,proto3" json:"inputs,omitempty"`
-	ResumeFromSeq int64      `protobuf:"varint,3,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"` // client replay cursor after a disconnect (was: last_seq)
-	Harness       string     `protobuf:"bytes,4,opt,name=harness,proto3" json:"harness,omitempty"`                                     // empty = session default
-	Config        []byte     `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`
+	Inputs []*Message `protobuf:"bytes,2,rep,name=inputs,proto3" json:"inputs,omitempty"`
+	// Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a
+	// harness knows what resuming from a sequence means for its own state. To re-read committed
+	// records after a disconnect, use Replay, which is the read path for exactly that.
+	ResumeFromSeq int64  `protobuf:"varint,3,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"`
+	Harness       string `protobuf:"bytes,4,opt,name=harness,proto3" json:"harness,omitempty"` // empty = session default
+	Config        []byte `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`   // opaque per-execution config, passed through to Start.config
 	// Single-writer CAS: the host commits this execution's first event only if the log head equals
 	// expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log.
 	//
