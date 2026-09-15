@@ -6,20 +6,22 @@ Start here. Each document is small and problem-scoped; this page is the index.
 
 1. **[concepts.md](concepts.md)**: the mental model. The nouns (session, event, log, incarnation,
    fence, resumability, capabilities) and why each exists. Read this first.
-2. **[quickstart.md](quickstart.md)**: hands on in a few minutes. Exec a turn, replay it with zero
+2. **[interaction-model.md](interaction-model.md)**: how you actually use this. What you implement,
+   what you call, and what it deliberately does not provide.
+3. **[quickstart.md](quickstart.md)**: hands on in a few minutes. Exec a turn, replay it with zero
    model calls, fork it, suspend and resume it, list sessions, verify the provenance chain. No
    Kubernetes or model key required.
-3. **[harness-authoring.md](harness-authoring.md)**: write your own agent against the `api.Harness`
+4. **[harness-authoring.md](harness-authoring.md)**: write your own agent against the `api.Harness`
    SPI. The contract, the rules that keep replay exact, and two reference harnesses walked through.
-4. **[architecture.md](architecture.md)**: how the core is built. The three contracts, the durable
+5. **[architecture.md](architecture.md)**: how the core is built. The three contracts, the durable
    event log, the controller and its determinism invariants, transport, placement, and runtime backends.
-5. **[substrate-conformance.md](substrate-conformance.md)**: running the neutral core on real
+6. **[substrate-conformance.md](substrate-conformance.md)**: running the neutral core on real
    agent-substrate across both capability tiers, proven end to end in CI.
-6. **[observability.md](observability.md)**: structured operation logs, request correlation, and the
+7. **[observability.md](observability.md)**: structured operation logs, request correlation, and the
    data-safety contract.
-7. **[security.md](security.md)**: what the project protects, what it does not, and how to deploy it
+8. **[security.md](security.md)**: what the project protects, what it does not, and how to deploy it
    accordingly. Read this before exposing a host to anything.
-8. **[faq.md](faq.md)**: common questions about what this is, what it is not, and how it behaves.
+9. **[faq.md](faq.md)**: common questions about what this is, what it is not, and how it behaves.
 
 ## Reference
 
@@ -32,6 +34,7 @@ Start here. Each document is small and problem-scoped; this page is the index.
 | I want to... | Read |
 |---|---|
 | Understand what this is and why | [concepts.md](concepts.md), [faq.md](faq.md) |
+| Know what I have to implement | [interaction-model.md](interaction-model.md) |
 | Try it on my machine | [quickstart.md](quickstart.md) |
 | Plug in my agent | [harness-authoring.md](harness-authoring.md) |
 | Understand the internals | [architecture.md](architecture.md) |
