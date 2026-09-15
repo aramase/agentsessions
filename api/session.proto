@@ -108,6 +108,10 @@ message ListSessionsResponse {
 message DeleteSessionRequest { string uid = 1; }
 
 message ExecRequest {
+  // The session to run against. Empty creates one first, using the server defaults and the harness
+  // below, and returns it as the stream's first frame. A caller that wants to set a project, name,
+  // or model still calls CreateSession; this exists so the common case is one call rather than
+  // three (create, read the cursor, exec).
   string session = 1;
   // Input messages for this turn. Empty = resume/re-drive the last non-terminal
   // execution with no new input (recovery after a crash/interruption).
@@ -115,9 +119,15 @@ message ExecRequest {
   int64 resume_from_seq = 3; // client replay cursor after a disconnect (was: last_seq)
   string harness = 4;        // empty = session default
   bytes config = 5;
-  // Single-writer CAS: the host commits this execution's first event only if the log
-  // head equals expected_last_seq. Mismatch is rejected (another writer advanced the log).
-  int64 expected_last_seq = 6;
+  // Single-writer CAS: the host commits this execution's first event only if the log head equals
+  // expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log.
+  //
+  // It is optional because the guarantee should be opt-in rather than the price of a simple call.
+  // Unset means "append at whatever the head is now", which is what a caller with a single writer
+  // wants. Set means the strict check, and 0 is a real value there: it asserts the session has no
+  // events yet. That distinction is why this carries explicit presence instead of treating 0 as
+  // "unset" -- a caller could not otherwise say "this must be the first turn".
+  optional int64 expected_last_seq = 6;
   int64 deadline_unix = 7;   // optional execution deadline (unix seconds); host cancels past it
 }
 
@@ -162,12 +172,21 @@ message CancelRequest {
   string reason = 3; // USER | TIMEOUT | INTERNAL
 }
 
-// ExecUpdate is what the live Exec stream carries: a committed LogRecord, or an ephemeral
-// streaming Delta (transport only — not logged, not hash-chained).
+// ExecUpdate is what the live Exec stream carries: the session, a committed LogRecord, or an
+// ephemeral streaming Delta (transport only — not logged, not hash-chained).
 message ExecUpdate {
   oneof update {
     LogRecord record = 1;
     Delta delta = 2;
+    // The session this execution runs against, sent as the FIRST frame of every Exec stream. It is
+    // how a caller learns the uid of a session Exec created for it, and it reports the cursor the
+    // turn started from, so a caller that wants the strict CAS on its next turn has the value
+    // without a separate GetSession.
+    //
+    // It is sent before the turn runs, so a failed execution still tells the caller which session
+    // it was against. A caller therefore sees this frame BEFORE any error, and must read the
+    // stream to completion rather than treating the first receive as the result.
+    Session session = 3;
   }
 }
 

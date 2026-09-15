@@ -904,12 +904,14 @@ reasoning) part. No seq; never hash-chained (§8, A2A TaskArtifactUpdateEvent).
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| session | [string](#string) |  |  |
+| session | [string](#string) |  | The session to run against. Empty creates one first, using the server defaults and the harness below, and returns it as the stream&#39;s first frame. A caller that wants to set a project, name, or model still calls CreateSession; this exists so the common case is one call rather than three (create, read the cursor, exec). |
 | inputs | [Message](#agentsessions-v1-Message) | repeated | Input messages for this turn. Empty = resume/re-drive the last non-terminal execution with no new input (recovery after a crash/interruption). |
 | resume_from_seq | [int64](#int64) |  | client replay cursor after a disconnect (was: last_seq) |
 | harness | [string](#string) |  | empty = session default |
 | config | [bytes](#bytes) |  |  |
-| expected_last_seq | [int64](#int64) |  | Single-writer CAS: the host commits this execution&#39;s first event only if the log head equals expected_last_seq. Mismatch is rejected (another writer advanced the log). |
+| expected_last_seq | [int64](#int64) | optional | Single-writer CAS: the host commits this execution&#39;s first event only if the log head equals expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log.
+
+It is optional because the guarantee should be opt-in rather than the price of a simple call. Unset means &#34;append at whatever the head is now&#34;, which is what a caller with a single writer wants. Set means the strict check, and 0 is a real value there: it asserts the session has no events yet. That distinction is why this carries explicit presence instead of treating 0 as &#34;unset&#34; -- a caller could not otherwise say &#34;this must be the first turn&#34;. |
 | deadline_unix | [int64](#int64) |  | optional execution deadline (unix seconds); host cancels past it |
 
 
@@ -920,14 +922,17 @@ reasoning) part. No seq; never hash-chained (§8, A2A TaskArtifactUpdateEvent).
 <a name="agentsessions-v1-ExecUpdate"></a>
 
 ### ExecUpdate
-ExecUpdate is what the live Exec stream carries: a committed LogRecord, or an ephemeral
-streaming Delta (transport only — not logged, not hash-chained).
+ExecUpdate is what the live Exec stream carries: the session, a committed LogRecord, or an
+ephemeral streaming Delta (transport only — not logged, not hash-chained).
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | record | [LogRecord](#agentsessions-v1-LogRecord) |  |  |
 | delta | [Delta](#agentsessions-v1-Delta) |  |  |
+| session | [Session](#agentsessions-v1-Session) |  | The session this execution runs against, sent as the FIRST frame of every Exec stream. It is how a caller learns the uid of a session Exec created for it, and it reports the cursor the turn started from, so a caller that wants the strict CAS on its next turn has the value without a separate GetSession.
+
+It is sent before the turn runs, so a failed execution still tells the caller which session it was against. A caller therefore sees this frame BEFORE any error, and must read the stream to completion rather than treating the first receive as the result. |
 
 
 
