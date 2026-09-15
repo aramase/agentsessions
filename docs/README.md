@@ -17,7 +17,9 @@ Start here. Each document is small and problem-scoped; this page is the index.
    agent-substrate across both capability tiers, proven end to end in CI.
 6. **[observability.md](observability.md)**: structured operation logs, request correlation, and the
    data-safety contract.
-7. **[faq.md](faq.md)**: common questions about what this is, what it is not, and how it behaves.
+7. **[security.md](security.md)**: what the project protects, what it does not, and how to deploy it
+   accordingly. Read this before exposing a host to anything.
+8. **[faq.md](faq.md)**: common questions about what this is, what it is not, and how it behaves.
 
 ## Reference
 
@@ -35,6 +37,7 @@ Start here. Each document is small and problem-scoped; this page is the index.
 | Understand the internals | [architecture.md](architecture.md) |
 | Run it on agent-substrate | [substrate-conformance.md](substrate-conformance.md) |
 | Operate and debug it | [observability.md](observability.md) |
+| Know what is safe to expose | [security.md](security.md) |
 | Look up a message, field, or RPC | [api-reference.md](api-reference.md) |
 
 For the project overview and status, see the [root README](../README.md).
