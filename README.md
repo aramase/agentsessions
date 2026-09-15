@@ -102,6 +102,7 @@ Full docs live in [`docs/`](docs/README.md):
 | `placement/` | The `Placer`: wires Sessions to the `Runtime` SPI, mints/binds fences, gates via `CanPlace`. The `Registry` routes a session to the harness it names. |
 | `runtime/local`, `runtime/substrate` | `Runtime` backends: a filesystem-only local backend, and agent-substrate. |
 | `harness/echoagent`, `harness/counteragent` | Reference harnesses: `STATELESS_REPLAY` echo, `REQUIRES_MEMORY_SNAPSHOT` counter. |
+| `model/openai` | Model provider for OpenAI-compatible endpoints; no vendor SDK, so any compatible service works. |
 | `session/` | The `Sessions` gRPC service: the client-facing seam over the log and the Placer. |
 | `cmd/agentsessionsd` | The Sessions server: a TCP entry point over the journal and the harness registry. |
 | `cmd/agentctl` | Client CLI (create / exec / replay / fork / suspend / resume). |
