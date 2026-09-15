@@ -268,6 +268,39 @@ That is the whole point of host-mediated model calls. Because the completion flo
 and lands in the journal, the log is a replayable record of the run rather than a description of
 one.
 
+## 9. Drive it from Go
+
+`agentctl` is a thin shell over the same client package your code can use. One call runs a turn,
+creating the session if you did not name one:
+
+```go
+c, err := client.Dial("127.0.0.1:8080", client.WithProject("acme"))
+if err != nil {
+    return err
+}
+defer c.Close()
+
+turn, err := c.Exec(ctx, client.ExecOptions{Inputs: []string{"name three primes"}})
+if err != nil {
+    return err
+}
+fmt.Println(turn.Session.GetMetadata().GetUid(), turn.Output)
+```
+
+`turn.LastSeq` is the cursor for the next turn, so opting into the single-writer check costs no
+extra round trip:
+
+```go
+next, err := c.Exec(ctx, client.ExecOptions{
+    Session:         turn.Session.GetMetadata().GetUid(),
+    Inputs:          []string{"and three more"},
+    ExpectedLastSeq: &turn.LastSeq, // stale cursor -> codes.Aborted
+})
+```
+
+`ListSessions` walks pagination for you, `Replay` and `Fork` return slices, and `c.Sessions()`
+returns the generated stub for anything the SDK does not model.
+
 ## Where next
 
 - [`concepts.md`](concepts.md): the nouns and why each exists.
