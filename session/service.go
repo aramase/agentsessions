@@ -23,6 +23,7 @@ import (
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/placement"
@@ -264,14 +265,14 @@ func sessionStoreError(err error, uid string) error {
 // streams the committed LogRecords produced by the turn.
 func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err error) {
 	ctx := observability.EnsureRequestID(stream.Context())
-	var recordsSent int
+	var recordsSent, deltasSent int
 	finish := observability.Start(ctx, s.logger, "session", "exec",
 		"session_uid", req.GetSession(),
 		"cas_requested", req.ExpectedLastSeq != nil,
 		"input_count", len(req.GetInputs()),
 	)
 	defer func() {
-		finish(err, "error_kind", serviceErrorKind(err), "records_sent", recordsSent)
+		finish(err, "error_kind", serviceErrorKind(err), "records_sent", recordsSent, "deltas_sent", deltasSent)
 	}()
 
 	// An empty session is created here rather than rejected, so a caller that just wants to run a
@@ -325,20 +326,58 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 			inputs = append(inputs, *dm)
 		}
 	}
+	// Relay the turn as it happens rather than re-reading the log afterwards. Both callbacks run on
+	// this goroutine, in order, so sending directly needs no synchronization; a send failure is
+	// captured and surfaced after the turn unwinds, because the observer cannot abort it.
+	var sendErr error
+	observer := controller.Observer{
+		OnRecord: func(rec eventlog.Record) {
+			if sendErr != nil {
+				return
+			}
+			if err := stream.Send(&v1.ExecUpdate{
+				Update: &v1.ExecUpdate_Record{Record: eventlog.RecordToProto(rec)},
+			}); err != nil {
+				sendErr = err
+				return
+			}
+			recordsSent++
+		},
+		OnDelta: func(d api.Delta) {
+			if sendErr != nil {
+				return
+			}
+			if err := stream.Send(&v1.ExecUpdate{
+				Update: &v1.ExecUpdate_Delta{Delta: wire.DeltaToProto(d)},
+			}); err != nil {
+				sendErr = err
+				return
+			}
+			deltasSent++
+		},
+	}
+
 	// Route the turn through the placement seam: Create the incarnation, mint+bind the fence, and
 	// drive the placed harness through the Runtime SPI instead of a co-located controller.
-	if _, err := placer.Exec(ctx, log, uid, inputs, expected); err != nil {
+	if _, err := placer.Exec(ctx, log, uid, inputs, expected, placement.WithObserver(observer)); err != nil {
 		return execError(err)
 	}
-	recs, err := log.Read(headBefore + 1)
-	if err != nil {
-		return status.Errorf(codes.Internal, "read: %v", err)
+	if sendErr != nil {
+		return sendErr
 	}
-	for _, r := range recs {
-		if err := stream.Send(&v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: eventlog.RecordToProto(r)}}); err != nil {
-			return err
+	// A turn that committed records the observer never saw would leave the caller with a partial
+	// view, so the log stays the authority on what the stream owed.
+	if recordsSent == 0 {
+		recs, err := log.Read(headBefore + 1)
+		if err != nil {
+			return status.Errorf(codes.Internal, "read: %v", err)
 		}
-		recordsSent++
+		for _, r := range recs {
+			if err := stream.Send(&v1.ExecUpdate{Update: &v1.ExecUpdate_Record{Record: eventlog.RecordToProto(r)}}); err != nil {
+				return err
+			}
+			recordsSent++
+		}
 	}
 	return nil
 }

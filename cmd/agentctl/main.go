@@ -248,6 +248,14 @@ func cmdExec(args []string) error {
 			}
 		},
 		OnRecord: printRecord,
+		OnDelta: func(d *v1.Delta) {
+			// Deltas are transport: print them raw so output appears as the model produces it,
+			// then the finalized EVENT_OUTPUT record prints normally when it commits.
+			fmt.Print(d.GetChunk())
+			if d.GetDone() {
+				fmt.Println()
+			}
+		},
 	})
 	return err
 }

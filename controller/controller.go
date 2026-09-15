@@ -52,6 +52,26 @@ var ErrUnmediatedToolCall = errors.New("controller: ToolCall requires a host-med
 // cancelled rather than running to completion against a caller that has gone away.
 type ModelFunc func(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error)
 
+// StreamFunc is a model invocation that reports partial output as it arrives. onChunk is called
+// zero or more times before the final response, which must still be the complete message: the log
+// records that, not the chunks, so a caller watching the stream and a caller replaying it later see
+// the same finalized output.
+//
+// It exists because the host mediates the model call. The harness blocks on one sink.Model and is
+// unaware anything streamed, so live output needs no harness cooperation and no change to the
+// harness wire protocol.
+type StreamFunc func(ctx context.Context, req api.ModelRequest, onChunk func(string)) (api.ModelResponse, error)
+
+// Observer receives a turn's events as they happen. Both callbacks fire on the goroutine driving
+// the turn, in order, so an implementation that writes to a stream needs no synchronization of its
+// own but must not block for long.
+type Observer struct {
+	// OnRecord fires once per committed record, after it is durable.
+	OnRecord func(eventlog.Record)
+	// OnDelta fires for each ephemeral chunk. Nothing is logged, and replay never calls it.
+	OnDelta func(api.Delta)
+}
+
 // ToolFunc executes a CONTROLLER_MEDIATED tool. The host calls it between appending the TOOL_CALL
 // intent and appending the TOOL_RESULT (the two-phase write-ahead of §3/I3). It receives the call's
 // IdempotencyKey and owns tool-side deduplication: on crash-recovery the host re-executes the same
@@ -75,6 +95,15 @@ func WithFence(token int64) Option { return func(c *Controller) { c.fence = toke
 // WithLogger enables structured operational logs. Event payloads and fence values are never logged.
 func WithLogger(logger *slog.Logger) Option { return func(c *Controller) { c.logger = logger } }
 
+// WithStreamingModel supplies a model that reports partial output. When set it is used for live
+// invocations instead of the plain ModelFunc; replay ignores it entirely, since replay serves
+// recorded completions and must not reach a provider.
+func WithStreamingModel(fn StreamFunc) Option { return func(c *Controller) { c.stream = fn } }
+
+// WithObserver reports a turn's records and streaming chunks as they happen, so a caller can relay
+// them instead of waiting for the turn to finish and re-reading the log.
+func WithObserver(o Observer) Option { return func(c *Controller) { c.observer = o } }
+
 // WithSessionUID adds session correlation to controller logs.
 func WithSessionUID(sessionUID string) Option {
 	return func(c *Controller) { c.sessionUID = sessionUID }
@@ -87,6 +116,9 @@ func WithSessionUID(sessionUID string) Option {
 type Controller struct {
 	log            eventlog.Store
 	model          ModelFunc
+	stream         StreamFunc
+	observer       Observer
+	executionID    string
 	tool           ToolFunc
 	fence          int64
 	liveModelCalls int
@@ -157,10 +189,14 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 	last := expectedLastSeq
 	for i := range inputs {
 		in := inputs[i]
+		// This is the CAS-guarded append, so it cannot go through appendSeq (which reads the head
+		// itself). It still has to be observed, or a caller watching the turn would never see the
+		// input that started it.
 		rec, err := c.log.Append(last, c.fence, api.Event{Kind: api.EventInput, Message: &in})
 		if err != nil {
 			return err
 		}
+		c.observe(rec)
 		last = rec.Seq
 	}
 	runFinished := observability.StartDebug(ctx, c.logger, "controller", "run_harness",
@@ -263,7 +299,53 @@ func (c *Controller) appendSeq(ev api.Event) (eventlog.Record, error) {
 	if err != nil {
 		return eventlog.Record{}, err
 	}
-	return c.log.Append(head, c.fence, ev)
+	rec, err := c.log.Append(head, c.fence, ev)
+	if err != nil {
+		return rec, err
+	}
+	c.observe(rec)
+	return rec, nil
+}
+
+// observe reports a committed record. It runs after the append succeeds, so an observer only ever
+// sees what is durable: a record it was told about cannot later turn out not to exist.
+func (c *Controller) observe(rec eventlog.Record) {
+	if c.observer.OnRecord != nil {
+		c.observer.OnRecord(rec)
+	}
+}
+
+// emitDelta reports an ephemeral chunk. Nothing is logged and no sequence is assigned, so a delta
+// has no effect on the hash chain and a turn produces the same journal whether or not anyone was
+// watching it.
+func (c *Controller) emitDelta(partIndex int32, chunk string, done bool) {
+	if c.observer.OnDelta == nil || chunk == "" && !done {
+		return
+	}
+	c.observer.OnDelta(api.Delta{
+		ExecutionID: c.executionID,
+		PartIndex:   partIndex,
+		Chunk:       chunk,
+		Done:        done,
+	})
+}
+
+// invokeModel performs the live model call, streaming partial output when a streaming model is
+// configured. Either way it returns the complete response, which is what gets recorded: the chunks
+// are a view of the call in progress, not the record of it.
+func (c *Controller) invokeModel(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	if c.stream == nil {
+		return c.model(ctx, req)
+	}
+	var index int32
+	resp, err := c.stream(ctx, req, func(chunk string) {
+		c.emitDelta(index, chunk, false)
+	})
+	if err != nil {
+		return resp, err
+	}
+	c.emitDelta(index, "", true)
+	return resp, nil
 }
 
 // Fork branches parent's log at atSeq into child: it copies the prefix [1..atSeq] verbatim (the

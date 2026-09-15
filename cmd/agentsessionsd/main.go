@@ -68,7 +68,7 @@ func run() error {
 	}
 	defer store.Close()
 
-	modelFn, modelDesc, err := modelFunc(*model, *modelBaseURL, *modelPath, *modelAuthHeader)
+	modelFn, streamFn, modelDesc, err := modelFunc(*model, *modelBaseURL, *modelPath, *modelAuthHeader)
 	if err != nil {
 		return err
 	}
@@ -77,7 +77,10 @@ func run() error {
 	defer backend.Close()
 
 	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{
-		"echo": placement.New(backend, modelFn, placement.WithLogger(logger)),
+		"echo": placement.New(backend, modelFn,
+			placement.WithLogger(logger),
+			placement.WithStreamingModel(streamFn),
+		),
 	})
 	if err != nil {
 		return fmt.Errorf("build harness registry: %w", err)
@@ -135,9 +138,10 @@ func run() error {
 // the same request body: some scope the model into the path or pin an API version, and some
 // authenticate with a header other than Authorization. Without these, reaching one of those would
 // mean recompiling the server for a difference that is pure configuration.
-func modelFunc(model, baseURL, path, authHeader string) (controller.ModelFunc, string, error) {
+func modelFunc(model, baseURL, path, authHeader string) (controller.ModelFunc, controller.StreamFunc, string, error) {
 	if model == "" {
-		return echoagent.Model, "echo (built-in)", nil
+		// The built-in model answers instantly, so there is nothing to stream.
+		return echoagent.Model, nil, "echo (built-in)", nil
 	}
 	opts := []openai.Option{
 		openai.WithModel(model),
@@ -156,9 +160,9 @@ func modelFunc(model, baseURL, path, authHeader string) (controller.ModelFunc, s
 	}
 	client, err := openai.New(opts...)
 	if err != nil {
-		return nil, "", fmt.Errorf("configure model: %w", err)
+		return nil, nil, "", fmt.Errorf("configure model: %w", err)
 	}
-	return client.Model, model + " @ " + baseURL + path, nil
+	return client.Model, client.StreamModel, model + " @ " + baseURL + path, nil
 }
 
 // modelAPIKey reads the credential, preferring the endpoint-neutral name. OPENAI_API_KEY is

@@ -152,6 +152,16 @@ type Usage struct {
 	ReasoningTokens int64
 }
 
+// Delta is an ephemeral streaming chunk. It is transport only: never appended to the log, never
+// hash-chained, and never produced on replay. Chunks coalesce into the finalized EVENT_OUTPUT the
+// log does record, so the journal is identical whether or not anyone was watching the turn.
+type Delta struct {
+	ExecutionID string
+	PartIndex   int32
+	Chunk       string
+	Done        bool
+}
+
 // Mediation controls how a tool call is executed.
 type Mediation string
 

@@ -474,3 +474,108 @@ func TestWithHeaderLastWins(t *testing.T) {
 		t.Fatalf("authorization = %q, want the later value", got)
 	}
 }
+
+// sseCompletion renders a streaming response: content chunks, then a usage-only frame, then the
+// terminator. That is the shape the real endpoint sends when stream_options.include_usage is set.
+func sseCompletion(chunks ...string) string {
+	var b strings.Builder
+	for _, c := range chunks {
+		b.WriteString(`data: {"choices":[{"delta":{"content":"` + c + `"}}]}` + "\n\n")
+	}
+	b.WriteString(`data: {"choices":[],"usage":{"prompt_tokens":6,"completion_tokens":4}}` + "\n\n")
+	b.WriteString("data: [DONE]\n\n")
+	return b.String()
+}
+
+// Streaming must report each chunk as it arrives AND return the complete message, because the host
+// records the latter. If they disagreed, a watched turn and a replayed one would differ.
+func TestStreamModelReportsChunksAndFullMessage(t *testing.T) {
+	c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"stream":true`) {
+			t.Errorf("streaming request did not set stream: %s", body)
+		}
+		if !strings.Contains(string(body), `"include_usage":true`) {
+			t.Errorf("streaming request did not ask for usage: %s", body)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, sseCompletion("Hello", ", ", "world"))
+	})
+
+	var chunks []string
+	resp, err := c.StreamModel(t.Context(), api.ModelRequest{
+		Messages: []api.Message{*api.TextMessage("user", "hi")},
+	}, func(s string) { chunks = append(chunks, s) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("chunks = %v, want 3", chunks)
+	}
+	if got := resp.Message.Text(); got != "Hello, world" {
+		t.Fatalf("assembled text = %q, want %q", got, "Hello, world")
+	}
+	if strings.Join(chunks, "") != resp.Message.Text() {
+		t.Fatalf("chunks %q do not assemble to the returned message %q", strings.Join(chunks, ""), resp.Message.Text())
+	}
+}
+
+// Usage arrives on a trailing frame with no choices. Without stream_options a streamed turn would
+// record zero tokens, so this is what keeps accounting honest.
+func TestStreamModelCapturesTrailingUsage(t *testing.T) {
+	c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, sseCompletion("x"))
+	})
+	resp, err := c.StreamModel(t.Context(), api.ModelRequest{
+		Messages: []api.Message{*api.TextMessage("user", "hi")},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Usage.InputTokens != 6 || resp.Usage.OutputTokens != 4 {
+		t.Fatalf("usage = %+v, want 6 in / 4 out", resp.Usage)
+	}
+}
+
+// A streaming error must surface as the provider's message rather than as an empty completion.
+func TestStreamModelSurfacesProviderError(t *testing.T) {
+	c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"Rate limit reached"}}`)
+	})
+	_, err := c.StreamModel(t.Context(), api.ModelRequest{
+		Messages: []api.Message{*api.TextMessage("user", "hi")},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "Rate limit reached") {
+		t.Fatalf("err = %v, want the provider message", err)
+	}
+}
+
+// Reasoning chunks accumulate into an opaque part rather than being emitted as visible output.
+func TestStreamModelAccumulatesReasoningSeparately(t *testing.T) {
+	c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w,
+			`data: {"choices":[{"delta":{"reasoning_content":"think"}}]}`+"\n\n"+
+				`data: {"choices":[{"delta":{"content":"answer"}}]}`+"\n\n"+
+				"data: [DONE]\n\n")
+	})
+	var chunks []string
+	resp, err := c.StreamModel(t.Context(), api.ModelRequest{
+		Messages: []api.Message{*api.TextMessage("user", "hi")},
+	}, func(s string) { chunks = append(chunks, s) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(chunks, "") != "answer" {
+		t.Fatalf("streamed %q, want only the visible output", strings.Join(chunks, ""))
+	}
+	var reasoning *api.ReasoningPart
+	for _, p := range resp.Message.Parts {
+		if p.Reasoning != nil {
+			reasoning = p.Reasoning
+		}
+	}
+	if reasoning == nil || string(reasoning.Opaque) != "think" {
+		t.Fatalf("reasoning part = %v, want the accumulated reasoning", reasoning)
+	}
+}
