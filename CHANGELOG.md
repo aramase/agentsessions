@@ -7,6 +7,33 @@ provide.
 
 ## Unreleased
 
+## v0.1.1
+
+A patch release. No API change; the reason to take it is the toolchain and the images.
+
+### Security
+
+- Built with Go 1.26.6. The v0.1.0 binaries were built with 1.26.0, which carries 23 reachable
+  standard-library vulnerabilities including TLS, x509, and asn1 issues. Both modules now pin a
+  toolchain floor so a release cannot ship an unpatched runtime again.
+- gRPC 1.83.2, fixing two reachable denial-of-service vulnerabilities against a gRPC server
+  (`GO-2026-6443`, `GO-2026-6348`).
+
+### Added
+
+- Container images, so a deployment no longer has to build its own:
+  `ghcr.io/aramase/agentsessions/agentsessionsd` and `.../harnessnode`. Multi-arch, built with ko
+  from the tagged source, each with an SBOM. The server runs as uid 65532.
+- `golangci-lint` and `govulncheck` gate every change, on both modules.
+
+### Fixed
+
+- A failed `Serve` in the embedded CLI server and the local runtime backend discarded its error,
+  leaving a dead server that surfaced later as a confusing client dial failure.
+- The substrate manifests named a `ko://` placeholder that only the conformance workflow could
+  resolve; they now name the published image and apply as written.
+- Release notes link each commit. A bare 40-character SHA is not a link in a release body.
+
 ## v0.1.0
 
 The first public release. Everything is new, so the useful summary is what the project does and what
