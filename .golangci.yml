@@ -1,0 +1,37 @@
+# Static analysis for the core module.
+#
+# The default linters are enabled as-is. errcheck is the only one configured, because its defaults
+# flag a set of calls whose error is genuinely not actionable: closing a reader you are done with,
+# rolling back a transaction that already committed, removing a socket during cleanup. Excluding
+# those keeps the signal high, so a new unchecked error in real logic is worth reading rather than
+# one more line of noise.
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        # Closing a resource after reading it. Any error that matters has already surfaced from the
+        # read itself, and for sql.Rows it is reported again by Rows.Err.
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Tx).Rollback
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - (*google.golang.org/grpc.ClientConn).Close
+        # Removing a socket or temp file during teardown. There is nothing to do about a failure and
+        # nowhere useful to report it.
+        - os.Remove
+        - os.RemoveAll
+
+  exclusions:
+    rules:
+      # Tests close fixtures in defers constantly, and a failure there cannot affect the assertion
+      # that already ran. Requiring a check would add noise to every table-driven test.
+      - path: _test\.go
+        linters: [errcheck]
+
+formatters:
+  enable:
+    - gofmt

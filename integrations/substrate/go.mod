@@ -2,6 +2,8 @@ module github.com/aramase/agentsessions/integrations/substrate
 
 go 1.26.3
 
+toolchain go1.26.6
+
 require (
 	github.com/agent-substrate/substrate v0.0.0-20260731195148-b1bd558aba3c
 	github.com/aramase/agentsessions v0.0.0

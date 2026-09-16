@@ -112,7 +112,13 @@ func (b *Backend) start(ctx context.Context) (addr string, err error) {
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(b.logger)),
 	)
 	v1.RegisterHarnessServer(srv, harnesswire.NewServer(b.harness))
-	go srv.Serve(lis)
+	// The harness address is returned before Serve is known to have succeeded, so a failure here
+	// would otherwise surface only as the Placer failing to dial an address this backend handed it.
+	go func() {
+		if err := srv.Serve(lis); err != nil {
+			b.logger.Error("local harness server stopped", "error", err, "socket", sock)
+		}
+	}()
 	b.srv, b.sock, b.addr = srv, sock, "unix://"+sock
 	return b.addr, nil
 }

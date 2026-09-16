@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+    # A change to prose cannot break a build. substrate-e2e already gates this way; the reason to
+    # match here is that a docs pull request should not wait on a full matrix to say so.
+    paths-ignore:
+      - "**/*.md"
+      - LICENSE
 
 permissions:
   contents: read
@@ -75,6 +80,17 @@ jobs:
       # -race guards the single-writer log and the streaming sinks.
       - run: go test -race ./...
 
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+      # Known vulnerabilities in code that is actually reachable. govulncheck reports call paths
+      # rather than dependency versions, so an advisory in a package nothing calls does not fail the
+      # build and a reachable one does.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       # Vendor-neutrality gate: the core module must not link any backend vendor. This is the
       # architectural invariant the whole design rests on, so it is enforced per-PR and not only
       # nightly — a stray import from core into the substrate adapter has to fail here.
@@ -104,6 +120,15 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test -race ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          working-directory: integrations/substrate
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   integrity:
     # Full cross-language provenance audit: record a real journal, have an INDEPENDENT Python
