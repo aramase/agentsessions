@@ -116,4 +116,5 @@ jobs:
       # attestation per image digest, which cannot be exercised while the repository is private, so
       # it is deliberately not written blind: it lands with the first public release.
       - if: ${{ github.event.repository.private }}
-        run: echo "Repository is private: build provenance is unavailable until it is public."
+        run: |
+          echo "Repository is private: build provenance is unavailable until it is public."

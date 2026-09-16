@@ -80,6 +80,14 @@ jobs:
       # -race guards the single-writer log and the streaming sinks.
       - run: go test -race ./...
 
+      # An unparseable workflow is not reported as a syntax error: GitHub cannot evaluate the `on:`
+      # trigger either, so it records a failed run for every push on every branch and the real
+      # trigger never applies. That failure mode went unnoticed across several changes because
+      # nothing here read the workflow files. actionlint parses them and checks expressions.
+      - name: actionlint
+        run: |
+          go run github.com/rhysd/actionlint/cmd/actionlint@latest
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
