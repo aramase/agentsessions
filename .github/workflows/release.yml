@@ -90,6 +90,15 @@ jobs:
 
       # Provenance ties each artifact to this workflow, this commit, and this runner, so a consumer
       # can verify where a binary came from instead of trusting the release page.
-      - uses: actions/attest-build-provenance@v2
+      #
+      # The attestation API rejects user-owned private repositories, and a release that already
+      # published its artifacts should not then fail on a step that cannot succeed. Skipping while
+      # private keeps the run honest, and the condition arms itself the moment the repository is
+      # public rather than needing to be remembered.
+      - if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/*.tar.gz
+
+      - if: ${{ github.event.repository.private }}
+        run: echo "Repository is private: build provenance is unavailable until it is public."
