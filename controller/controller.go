@@ -32,6 +32,10 @@ var ErrReplayInvokedModel = errors.New("controller: replay invoked the model (I1
 // the log was written (a determinism violation, symmetric to the I0 input-hash check).
 var ErrReplayDiverged = errors.New("controller: replay diverged from the journal")
 
+// ErrInvalidExecutionLog is returned when execution-scoped events do not carry a valid, contiguous
+// execution ID. Replay and resume require this durable identity to recover exact turn boundaries.
+var ErrInvalidExecutionLog = errors.New("controller: invalid execution log")
+
 // ErrMissingIdempotencyKey rejects a CONTROLLER_MEDIATED tool call that omits the idempotency key
 // the crash-recovery re-drive needs to dedup its side effect (I3). Without a key, at-most-once
 // silently would not hold, so the host fails loud rather than record an unrecoverable intent. The
@@ -130,7 +134,6 @@ type Controller struct {
 	observer           Observer
 	startConfig        []byte
 	startResumeFromSeq int64
-	executionID        string
 	tool               ToolFunc
 	fence              int64
 	liveModelCalls     int
@@ -167,12 +170,14 @@ func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, erro
 // host-mediated, and the turn ends with an END event.
 func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
+	executionID := newID()
 	var historyEvents int
 	var finalSeq int64
 	modelCallsBefore := c.liveModelCalls
 	toolCallsBefore := c.liveToolCalls
 	finish := observability.StartDebug(ctx, c.logger, "controller", "exec",
 		"session_uid", c.sessionUID,
+		"execution_id", executionID,
 		"expected_last_seq", expectedLastSeq,
 		"input_count", len(inputs),
 	)
@@ -204,7 +209,11 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		// This is the CAS-guarded append, so it cannot go through appendSeq (which reads the head
 		// itself). It still has to be observed, or a caller watching the turn would never see the
 		// input that started it.
-		rec, err := c.log.Append(last, c.fence, api.Event{Kind: api.EventInput, Message: &in})
+		rec, err := c.log.Append(last, c.fence, api.Event{
+			ExecutionID: executionID,
+			Kind:        api.EventInput,
+			Message:     &in,
+		})
 		if err != nil {
 			return err
 		}
@@ -217,26 +226,27 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		"input_count", len(inputs),
 	)
 	start := &api.Start{
+		ExecutionID:   executionID,
 		History:       history,
 		Inputs:        inputs,
 		Config:        c.startConfig,
 		ResumeFromSeq: c.startResumeFromSeq,
 	}
-	if err := har.Run(ctx, start, &liveSink{c: c}); err != nil {
+	if err := har.Run(ctx, start, &liveSink{c: c, executionID: executionID}); err != nil {
 		runFinished(err, "error_kind", "harness_run_failed")
 		// Best-effort: record the failure. If this append itself fails we still surface the
 		// original harness error to the caller.
-		_, _ = c.appendSeq(api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
+		_, _ = c.appendSeq(executionID, api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
 		return err
 	}
 	runFinished(nil)
-	rec, err := c.appendSeq(api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	rec, err := c.appendSeq(executionID, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	finalSeq = rec.Seq
 	return err
 }
 
-// Replay reconstructs the session by re-executing the harness with every effect served from the
-// journal. It asserts the model is never invoked (I1) and that each recorded model-input hash
+// Replay reconstructs the session by re-executing each completed execution with its recorded
+// effects. It asserts the model is never invoked (I1) and that each recorded model-input hash
 // matches (I0), returning the reconstructed outputs for an equivalence check. It is read-only.
 func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []string, err error) {
 	ctx = observability.EnsureRequestID(ctx)
@@ -256,35 +266,40 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 		return nil, err
 	}
 	recordCount = len(recs)
-	var inputs []api.Message
-	var stream, history []api.Event
+	events := make([]api.Event, 0, recordCount)
 	for _, r := range recs {
-		history = append(history, r.Event)
-		switch r.Event.Kind {
-		case api.EventInput:
-			if r.Event.Message != nil {
-				inputs = append(inputs, *r.Event.Message)
-			}
-		case api.EventModelCall, api.EventOutput, api.EventToolCall, api.EventToolResult:
-			stream = append(stream, r.Event)
-		}
+		events = append(events, r.Event)
 	}
-	effectCount = len(stream)
-	before := c.liveModelCalls
-	sink := &replaySink{stream: stream}
-	if err := har.Run(ctx, &api.Start{Inputs: inputs, History: history}, sink); err != nil {
+	executions, err := recordedExecutions(events)
+	if err != nil {
 		return nil, err
 	}
-	if c.liveModelCalls != before {
-		return nil, ErrReplayInvokedModel
+
+	before := c.liveModelCalls
+	for _, execution := range executions {
+		if !execution.completed {
+			continue
+		}
+		effectCount += len(execution.stream)
+		sink := &replaySink{stream: execution.stream}
+		start := &api.Start{
+			ExecutionID: execution.id,
+			History:     events[:execution.start],
+			Inputs:      execution.inputs,
+		}
+		if err := har.Run(ctx, start, sink); err != nil {
+			return nil, err
+		}
+		if c.liveModelCalls != before {
+			return nil, ErrReplayInvokedModel
+		}
+		// Over-consumption errors inside the sink; this catches a shorter replay path.
+		if sink.i != len(sink.stream) {
+			return nil, fmt.Errorf("%w: execution %q consumed %d of %d recorded effects",
+				ErrReplayDiverged, execution.id, sink.i, len(sink.stream))
+		}
+		outputs = append(outputs, sink.outputs...)
 	}
-	// The harness must consume the recorded effect stream exactly. Over-consumption already errors
-	// inside the sink (nextOf); this catches under-consumption — a harness that took a shorter path
-	// on replay would otherwise return success with truncated outputs.
-	if sink.i != len(sink.stream) {
-		return nil, fmt.Errorf("%w: consumed %d of %d recorded effects", ErrReplayDiverged, sink.i, len(sink.stream))
-	}
-	outputs = sink.outputs
 	return outputs, nil
 }
 
@@ -312,7 +327,11 @@ func (c *Controller) ToolInvocations() int { return c.liveToolCalls }
 // Head returns the current log head seq.
 func (c *Controller) Head() (int64, error) { return c.log.Head() }
 
-func (c *Controller) appendSeq(ev api.Event) (eventlog.Record, error) {
+func (c *Controller) appendSeq(executionID string, ev api.Event) (eventlog.Record, error) {
+	if executionID == "" {
+		return eventlog.Record{}, fmt.Errorf("%w: event has no execution_id", ErrInvalidExecutionLog)
+	}
+	ev.ExecutionID = executionID
 	head, err := c.log.Head()
 	if err != nil {
 		return eventlog.Record{}, err
@@ -336,12 +355,12 @@ func (c *Controller) observe(rec eventlog.Record) {
 // emitDelta reports an ephemeral chunk. Nothing is logged and no sequence is assigned, so a delta
 // has no effect on the hash chain and a turn produces the same journal whether or not anyone was
 // watching it.
-func (c *Controller) emitDelta(partIndex int32, chunk string, done bool) {
+func (c *Controller) emitDelta(executionID string, partIndex int32, chunk string, done bool) {
 	if c.observer.OnDelta == nil || chunk == "" && !done {
 		return
 	}
 	c.observer.OnDelta(api.Delta{
-		ExecutionID: c.executionID,
+		ExecutionID: executionID,
 		PartIndex:   partIndex,
 		Chunk:       chunk,
 		Done:        done,
@@ -351,18 +370,18 @@ func (c *Controller) emitDelta(partIndex int32, chunk string, done bool) {
 // invokeModel performs the live model call, streaming partial output when a streaming model is
 // configured. Either way it returns the complete response, which is what gets recorded: the chunks
 // are a view of the call in progress, not the record of it.
-func (c *Controller) invokeModel(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+func (c *Controller) invokeModel(ctx context.Context, executionID string, req api.ModelRequest) (api.ModelResponse, error) {
 	if c.stream == nil {
 		return c.model(ctx, req)
 	}
 	var index int32
 	resp, err := c.stream(ctx, req, func(chunk string) {
-		c.emitDelta(index, chunk, false)
+		c.emitDelta(executionID, index, chunk, false)
 	})
 	if err != nil {
 		return resp, err
 	}
-	c.emitDelta(index, "", true)
+	c.emitDelta(executionID, index, "", true)
 	return resp, nil
 }
 
@@ -418,6 +437,8 @@ func controllerErrorKind(err error) string {
 		return "replay_invoked_model"
 	case errors.Is(err, ErrReplayDiverged):
 		return "replay_diverged"
+	case errors.Is(err, ErrInvalidExecutionLog):
+		return "invalid_execution_log"
 	case errors.Is(err, ErrMissingIdempotencyKey):
 		return "missing_idempotency_key"
 	case errors.Is(err, ErrUnmediatedToolCall):

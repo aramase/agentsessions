@@ -62,6 +62,7 @@ type Capabilities struct {
 
 // Start is the per-execution invocation the host sends to the harness.
 type Start struct {
+	ExecutionID   string    // host-assigned identity of this Run; shared by its events and deltas
 	Config        []byte    // opaque per-execution config
 	History       []Event   // replay context; empty if the sandbox was memory-restored
 	Inputs        []Message // new input(s); empty = resume/re-drive an interrupted execution

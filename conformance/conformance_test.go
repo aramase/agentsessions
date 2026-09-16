@@ -185,6 +185,15 @@ func TestCrashMidTurnRedriveAtMostOnce(t *testing.T) {
 	if recs[len(recs)-1].Event.Kind != api.EventEnd {
 		t.Fatal("resume did not complete the turn (no END)")
 	}
+	executionID := recs[0].Event.ExecutionID
+	if executionID == "" {
+		t.Fatal("resumed execution has an empty execution ID")
+	}
+	for i, record := range recs {
+		if record.Event.ExecutionID != executionID {
+			t.Fatalf("event %d execution ID = %q, want resumed ID %q", i+1, record.Event.ExecutionID, executionID)
+		}
+	}
 	if err := log.Verify(); err != nil {
 		t.Fatalf("verify after resume: %v", err)
 	}
@@ -597,14 +606,14 @@ func TestReplayEmitsNoDeltas(t *testing.T) {
 	defer s.Close()
 	log := s.Session("s")
 
-	var liveDeltas, replayDeltas int
-	observer := func(count *int) controller.Observer {
-		return controller.Observer{OnDelta: func(api.Delta) { *count++ }}
-	}
+	var liveDeltas []api.Delta
+	var replayDeltas int
 
 	c, err := controller.New(log, (&countModel{}).call,
 		controller.WithStreamingModel((&streamingModel{}).call),
-		controller.WithObserver(observer(&liveDeltas)),
+		controller.WithObserver(controller.Observer{
+			OnDelta: func(delta api.Delta) { liveDeltas = append(liveDeltas, delta) },
+		}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -612,13 +621,25 @@ func TestReplayEmitsNoDeltas(t *testing.T) {
 	if err := c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if liveDeltas == 0 {
+	if len(liveDeltas) == 0 {
 		t.Fatal("the live turn produced no deltas, so this cannot prove replay suppresses them")
+	}
+	records, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executionID := records[0].Event.ExecutionID
+	for i, delta := range liveDeltas {
+		if delta.ExecutionID != executionID {
+			t.Fatalf("delta %d execution ID = %q, want %q", i, delta.ExecutionID, executionID)
+		}
 	}
 
 	c2, err := controller.New(log, (&countModel{}).call,
 		controller.WithStreamingModel((&streamingModel{}).call),
-		controller.WithObserver(observer(&replayDeltas)),
+		controller.WithObserver(controller.Observer{
+			OnDelta: func(api.Delta) { replayDeltas++ },
+		}),
 	)
 	if err != nil {
 		t.Fatal(err)

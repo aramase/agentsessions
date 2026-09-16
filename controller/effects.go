@@ -10,7 +10,10 @@ import (
 
 // liveSink is the host-mediated EventSink for a live turn: it invokes each nondeterministic op and
 // records it to the log, so the identical events can be served on a later replay.
-type liveSink struct{ c *Controller }
+type liveSink struct {
+	c           *Controller
+	executionID string
+}
 
 var _ api.EventSink = (*liveSink)(nil)
 
@@ -21,26 +24,26 @@ var _ api.EventSink = (*liveSink)(nil)
 // Footgun: the completion is ALREADY recorded as the output here. A harness that also calls
 // Output() with the same content double-records it; use Output() only for additional/streamed text.
 func (s *liveSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
-	if _, err := s.c.appendSeq(api.Event{
+	if _, err := s.c.appendSeq(s.executionID, api.Event{
 		Kind:      api.EventModelCall,
 		ModelCall: &api.ModelCall{Model: req.Model, InputHash: hashModelInput(req), ID: newID()},
 	}); err != nil {
 		return api.ModelResponse{}, err
 	}
-	resp, err := s.c.invokeModel(ctx, req)
+	resp, err := s.c.invokeModel(ctx, s.executionID, req)
 	if err != nil {
 		return api.ModelResponse{}, err
 	}
 	s.c.liveModelCalls++
 	msg := resp.Message
-	if _, err := s.c.appendSeq(api.Event{Kind: api.EventOutput, Message: &msg}); err != nil {
+	if _, err := s.c.appendSeq(s.executionID, api.Event{Kind: api.EventOutput, Message: &msg}); err != nil {
 		return api.ModelResponse{}, err
 	}
 	return resp, nil
 }
 
 func (s *liveSink) Output(_ context.Context, delta string) error {
-	_, err := s.c.appendSeq(api.Event{Kind: api.EventOutput, Message: api.TextMessage("assistant", delta)})
+	_, err := s.c.appendSeq(s.executionID, api.Event{Kind: api.EventOutput, Message: api.TextMessage("assistant", delta)})
 	return err
 }
 
@@ -66,7 +69,7 @@ func (s *liveSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResul
 	if call.IdempotencyKey == "" {
 		return api.ToolResult{}, ErrMissingIdempotencyKey
 	}
-	if _, err := s.c.appendSeq(api.Event{Kind: api.EventToolCall, ToolCall: &call}); err != nil {
+	if _, err := s.c.appendSeq(s.executionID, api.Event{Kind: api.EventToolCall, ToolCall: &call}); err != nil {
 		return api.ToolResult{}, err
 	}
 	return s.execTool(ctx, call)
@@ -89,7 +92,7 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolRes
 	s.c.liveToolCalls++
 	result := res
 	result.ID = call.ID // the host owns tool-result correlation: the result references its call's ID
-	if _, err := s.c.appendSeq(api.Event{Kind: api.EventToolResult, Result: &result}); err != nil {
+	if _, err := s.c.appendSeq(s.executionID, api.Event{Kind: api.EventToolResult, Result: &result}); err != nil {
 		return api.ToolResult{}, err
 	}
 	return result, nil
@@ -97,13 +100,13 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolRes
 
 func (s *liveSink) Report(_ context.Context, tr api.ToolResult) error {
 	res := tr
-	_, err := s.c.appendSeq(api.Event{Kind: api.EventToolResult, Result: &res})
+	_, err := s.c.appendSeq(s.executionID, api.Event{Kind: api.EventToolResult, Result: &res})
 	return err
 }
 
 func (s *liveSink) Usage(_ context.Context, u api.Usage) error {
 	usage := u
-	_, err := s.c.appendSeq(api.Event{Kind: api.EventUsage, Usage: &usage})
+	_, err := s.c.appendSeq(s.executionID, api.Event{Kind: api.EventUsage, Usage: &usage})
 	return err
 }
 
