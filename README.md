@@ -114,6 +114,17 @@ Full docs live in [`docs/`](docs/README.md):
 | `integrations/substrate/` | The substrate `ControlClient` adapter — a **separate module** so the core stays substrate-free. |
 | `deploy/substrate/`, `.github/workflows/substrate-e2e.yml` | Manifests + CI for the real-substrate conformance. |
 
+## Container images
+
+```
+ghcr.io/aramase/agentsessions/agentsessionsd:v0.1.1
+ghcr.io/aramase/agentsessions/harnessnode:v0.1.1
+```
+
+Multi-arch, built from the tagged source with no Dockerfile. `agentsessionsd` is the Sessions
+server; `harnessnode` is the in-sandbox harness the substrate manifests in `deploy/substrate/`
+reference. The server runs as uid 65532, so mount its journal path writable.
+
 ## Try it
 
 ```bash

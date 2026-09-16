@@ -55,7 +55,7 @@ spec:
   containers:
     - name: harness
       # cmd/harnessnode with HARNESS_KIND=counter serves the in-RAM counter over harnesswire on :80.
-      image: ko://github.com/aramase/agentsessions/cmd/harnessnode
+      image: ghcr.io/aramase/agentsessions/harnessnode:latest
       command:
         - /ko-app/harnessnode
       env:

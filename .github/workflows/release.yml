@@ -64,6 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and upload artifacts
+      packages: write # push container images to ghcr.io
       id-token: write # sign the provenance attestation
       attestations: write
     steps:
@@ -79,6 +80,17 @@ jobs:
 
       # Generates the per-archive SBOMs the goreleaser config asks for.
       - uses: anchore/sbom-action/download-syft@v0
+
+      # ko builds the images straight from the Go packages and pushes them, so the release publishes
+      # binaries and images from one run rather than leaving a deployment to build its own.
+      - uses: ko-build/setup-ko@v0.9
+
+      - name: log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: goreleaser/goreleaser-action@v6
         with:
@@ -100,5 +112,8 @@ jobs:
         with:
           subject-path: dist/*.tar.gz
 
+      # Images carry a ko-generated SBOM pushed alongside them. Provenance for them needs one
+      # attestation per image digest, which cannot be exercised while the repository is private, so
+      # it is deliberately not written blind: it lands with the first public release.
       - if: ${{ github.event.repository.private }}
         run: echo "Repository is private: build provenance is unavailable until it is public."

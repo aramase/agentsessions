@@ -44,7 +44,7 @@ spec:
   - name: harness
     # Built from this repo by ko. Serves the echo harness over the harnesswire gRPC Harness.Connect
     # stream on :80 (the port the atenet mesh routes to); the controller dials the actor's mesh DNS.
-    image: ko://github.com/aramase/agentsessions/cmd/harnessnode
+    image: ghcr.io/aramase/agentsessions/harnessnode:latest
     command:
     - /ko-app/harnessnode
     # ResumeActor blocks on this probe, so the controller only dials once the gRPC server is live.

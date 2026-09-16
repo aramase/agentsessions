@@ -116,6 +116,8 @@ jobs:
       - name: Build the harness image (shared by both conformance tiers)
         # Both tiers run the same harnessnode image (HARNESS_KIND selects echo vs counter), so build
         # and push it to the local registry once and reuse the ref, instead of ko-building it twice.
+        # The manifests name the published image so they apply as written; this overrides it with a
+        # build of the commit under test, which is the whole point of running conformance in CI.
         run: echo "HARNESS_IMG=$(ko build ./cmd/harnessnode)" >> "$GITHUB_ENV"
 
       - name: Build + apply the echo harness ActorTemplate + WorkerPool
@@ -123,7 +125,7 @@ jobs:
         # substitute both refs into the manifest, apply.
         run: |
           ATEOM_IMG="$(cd _substrate && ko build ./cmd/ateom-gvisor)"
-          sed -e "s#ko://github.com/aramase/agentsessions/cmd/harnessnode#${HARNESS_IMG}#" \
+          sed -e "s#ghcr.io/aramase/agentsessions/harnessnode:latest#${HARNESS_IMG}#" \
               -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
               deploy/substrate/echo-actortemplate.yaml | kubectl --context kind-kind apply -f -
           kubectl --context kind-kind wait --for=condition=Ready \
@@ -165,7 +167,7 @@ jobs:
         # Reuses the harness image built once above (HARNESS_IMG); builds substrate's ateom-microvm.
         run: |
           ATEOM_MV_IMG="$(cd _substrate && ko build ./cmd/ateom-microvm)"
-          sed -e "s#ko://github.com/aramase/agentsessions/cmd/harnessnode#${HARNESS_IMG}#" \
+          sed -e "s#ghcr.io/aramase/agentsessions/harnessnode:latest#${HARNESS_IMG}#" \
               -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
               deploy/substrate/counter-microvm-actortemplate.yaml | kubectl --context kind-kind apply -f -
           kubectl --context kind-kind wait --for=condition=Ready \
