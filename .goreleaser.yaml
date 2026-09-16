@@ -37,8 +37,73 @@ builds:
       - -X github.com/aramase/agentsessions/internal/version.commit={{.FullCommit}}
       - -X github.com/aramase/agentsessions/internal/version.date={{.Date}}
 
+  # Built for the image only; it is not a user-facing CLI, so it is not archived below.
+  - id: harnessnode
+    main: ./cmd/harnessnode
+    binary: harnessnode
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/aramase/agentsessions/internal/version.version={{.Version}}
+      - -X github.com/aramase/agentsessions/internal/version.commit={{.FullCommit}}
+      - -X github.com/aramase/agentsessions/internal/version.date={{.Date}}
+
+# Container images, so a deployment does not have to build its own.
+#
+# ko builds straight from the Go packages: no Dockerfile, reproducible, and multi-arch from one
+# invocation. The base is distroless static rather than ko's default, because substrate's node-local
+# image cache rejects the char-device entries the default base ships. That constraint lives in
+# .ko.yaml for local `ko build`; it is repeated here because goreleaser passes its own base.
+kos:
+  - id: agentsessionsd
+    build: agentsessionsd
+    main: ./cmd/agentsessionsd
+    base_image: gcr.io/distroless/static-debian13
+    # Non-root: the server binds an unprivileged port and only needs to write its journal, which a
+    # deployment grants with fsGroup. harnessnode below cannot do this, because the substrate mesh
+    # routes to port 80 and binding it requires root.
+    user: "65532:65532"
+    repositories:
+      - ghcr.io/aramase/agentsessions/agentsessionsd
+    platforms: [linux/amd64, linux/arm64]
+    tags:
+      - "{{ .Version }}"
+      # Only a final release moves the floating tag: a prerelease pushing it would silently upgrade
+      # anyone tracking latest.
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    creation_time: "{{ .CommitTimestamp }}"
+    ko_data_creation_time: "{{ .CommitTimestamp }}"
+    sbom: spdx
+    labels: &image_labels
+      org.opencontainers.image.source: https://github.com/aramase/agentsessions
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.licenses: Apache-2.0
+
+  # The in-sandbox harness, referenced by the substrate ActorTemplates. Publishing it is what lets a
+  # deployment apply those manifests without first building and pushing an image of its own.
+  - id: harnessnode
+    build: harnessnode
+    main: ./cmd/harnessnode
+    base_image: gcr.io/distroless/static-debian13
+    repositories:
+      - ghcr.io/aramase/agentsessions/harnessnode
+    platforms: [linux/amd64, linux/arm64]
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    creation_time: "{{ .CommitTimestamp }}"
+    ko_data_creation_time: "{{ .CommitTimestamp }}"
+    sbom: spdx
+    labels: *image_labels
+
 archives:
   - formats: [tar.gz]
+    # Only the user-facing CLIs are archived; harnessnode ships as an image.
+    ids: [agentctl, agentsessionsd]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE
@@ -112,3 +177,13 @@ release:
     ```
     gh attestation verify <file> --repo {{ .Env.GITHUB_REPOSITORY }}
     ```
+
+    **Container images**
+
+    ```
+    ghcr.io/aramase/agentsessions/agentsessionsd:{{ .Version }}
+    ghcr.io/aramase/agentsessions/harnessnode:{{ .Version }}
+    ```
+
+    Multi-arch (amd64 and arm64), built with ko from the tagged source, each with an SBOM pushed
+    alongside it. `agentsessionsd` runs as uid 65532; give its journal path a writable volume.
