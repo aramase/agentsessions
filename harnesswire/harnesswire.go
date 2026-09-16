@@ -315,7 +315,14 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			}
 		case v1.EventKind_EVENT_USAGE:
 			if u := ev.GetUsage(); u != nil {
-				_ = sink.Usage(ctx, api.Usage{Model: u.GetModel(), InputTokens: u.GetInputTokens(), OutputTokens: u.GetOutputTokens(), ReasoningTokens: u.GetReasoningTokens()})
+				if err := sink.Usage(ctx, api.Usage{
+					Model:           u.GetModel(),
+					InputTokens:     u.GetInputTokens(),
+					OutputTokens:    u.GetOutputTokens(),
+					ReasoningTokens: u.GetReasoningTokens(),
+				}); err != nil {
+					return err
+				}
 			}
 		case v1.EventKind_EVENT_END:
 			return endError(ev.GetEnd())

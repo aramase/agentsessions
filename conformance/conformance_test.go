@@ -203,6 +203,105 @@ func TestCrashMidTurnRedriveAtMostOnce(t *testing.T) {
 	}
 }
 
+type usageHarness struct {
+	usage api.Usage
+}
+
+func (usageHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{
+		ID:           "usage",
+		Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay},
+	}, nil
+}
+
+func (h usageHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	if _, err := sink.Model(ctx, api.ModelRequest{
+		Model:    "usage",
+		Messages: start.Inputs,
+	}); err != nil {
+		return err
+	}
+	return sink.Usage(ctx, h.usage)
+}
+
+func TestCrashAfterUsageDoesNotDuplicateAccounting(t *testing.T) {
+	s, path := openFile(t)
+	usage := api.Usage{
+		Model:           "usage",
+		InputTokens:     10,
+		OutputTokens:    20,
+		ReasoningTokens: 5,
+	}
+	c1, err := controller.New(s.Session("s"), (&countModel{}).call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c1.Exec(
+		context.Background(),
+		usageHarness{usage: usage},
+		[]api.Message{*api.TextMessage("user", "hi")},
+		0,
+	); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// INPUT, MODEL_CALL, OUTPUT, and USAGE are durable; only END was lost.
+	truncateFrom(t, path, "s", 5)
+
+	s2, err := sqlitelog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	log := s2.Session("s")
+	c2, err := controller.New(log, (&countModel{}).call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := c2.Resume(context.Background(), usageHarness{usage: usage})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if !resumed {
+		t.Fatal("expected Resume to re-drive the interrupted turn")
+	}
+	if c2.ModelInvocations() != 0 {
+		t.Fatalf("resume re-invoked the recorded model %d times", c2.ModelInvocations())
+	}
+
+	records, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageEvents := 0
+	for _, record := range records {
+		if record.Event.Kind == api.EventUsage {
+			usageEvents++
+			if record.Event.Usage == nil || *record.Event.Usage != usage {
+				t.Fatalf("recorded usage = %+v, want %+v", record.Event.Usage, usage)
+			}
+		}
+	}
+	if usageEvents != 1 {
+		t.Fatalf("usage events = %d, want 1", usageEvents)
+	}
+	if records[len(records)-1].Event.Kind != api.EventEnd {
+		t.Fatal("resume did not append END")
+	}
+
+	replay, err := controller.New(log, (&countModel{}).call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replay.Replay(context.Background(), usageHarness{usage: usage}); err != nil {
+		t.Fatalf("replay recorded usage: %v", err)
+	}
+	if replay.ModelInvocations() != 0 {
+		t.Fatalf("replay invoked the model %d times", replay.ModelInvocations())
+	}
+}
+
 // 4. Fork equivalence: a fork shares the parent prefix hashes exactly (hash-tree) and both branches
 // verify independently on the persistent backend.
 func TestForkEquivalence(t *testing.T) {
