@@ -55,6 +55,11 @@ sboms:
 changelog:
   use: github
   sort: asc
+  # Link every entry to its commit. The default renders a bare 40-character SHA, which GitHub does
+  # not turn into a link in a release body, so the most useful reference in each line is unreachable.
+  # Abbreviating keeps the line readable; a short SHA still resolves.
+  abbrev: 7
+  format: "[`{{ .SHA }}`](https://github.com/aramase/agentsessions/commit/{{ .SHA }}) {{ .Message }}"
   # Conventional Commits are enforced by convention in CONTRIBUTING, so the notes group by type
   # rather than dumping a flat list.
   groups:
@@ -76,6 +81,10 @@ changelog:
     exclude:
       - '^test(\(.+\))?:'
       - '^chore\(deps\):'
+      # Merge commits restate a change the squashed commit already describes, so listing both says
+      # the same thing twice.
+      - '^Merge pull request'
+      - '^Merge branch'
 
 release:
   # v0.x is pre-1.0 and makes no compatibility promise, which the release notes should say rather
@@ -90,6 +99,15 @@ release:
     untrusted network or treat it as multi-tenant. See `docs/security.md`.
   footer: |
     **Verify an artifact**
+
+    Every archive is checksummed, and each carries an SBOM alongside it:
+
+    ```
+    sha256sum -c checksums.txt --ignore-missing
+    ```
+
+    Public releases also carry signed build provenance, which ties an archive to the workflow,
+    commit, and runner that produced it:
 
     ```
     gh attestation verify <file> --repo {{ .Env.GITHUB_REPOSITORY }}
