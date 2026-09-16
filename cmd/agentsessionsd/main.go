@@ -73,7 +73,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("open journal %s: %w", *journal, err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	modelFn, streamFn, modelDesc, err := modelFunc(*model, *modelBaseURL, *modelPath, *modelAuthHeader)
 	if err != nil {
@@ -81,7 +81,7 @@ func run() error {
 	}
 
 	backend := local.New(echoagent.Harness{}, local.WithLogger(logger))
-	defer backend.Close()
+	defer func() { _ = backend.Close() }()
 
 	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{
 		"echo": placement.New(backend, modelFn,

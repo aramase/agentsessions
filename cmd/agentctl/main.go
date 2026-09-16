@@ -101,8 +101,8 @@ func dial(cfg *config) (*client.Client, func(), error) {
 		"echo": placement.New(backend, echoagent.Model, placement.WithLogger(logger)),
 	})
 	if err != nil {
-		backend.Close()
-		store.Close()
+		_ = backend.Close()
+		_ = store.Close()
 		return nil, nil, err
 	}
 	svc := session.NewService(store, registry,
@@ -111,8 +111,8 @@ func dial(cfg *config) (*client.Client, func(), error) {
 	_ = os.Remove(sock)
 	lis, err := net.Listen("unix", sock)
 	if err != nil {
-		backend.Close()
-		store.Close()
+		_ = backend.Close()
+		_ = store.Close()
 		return nil, nil, err
 	}
 	srv := grpc.NewServer(
@@ -120,7 +120,14 @@ func dial(cfg *config) (*client.Client, func(), error) {
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
 	)
 	v1.RegisterSessionsServer(srv, svc)
-	go srv.Serve(lis)
+	// A failed Serve leaves the embedded server dead and every later call failing to connect, which
+	// reads as a client bug rather than a server that never started. Log it; the command is already
+	// committed to this socket by the time it could be reported.
+	go func() {
+		if err := srv.Serve(lis); err != nil {
+			logger.Error("embedded sessions server stopped", "error", err)
+		}
+	}()
 
 	c, err := client.Dial("passthrough:///embedded",
 		client.WithProject(cfg.project),
@@ -131,16 +138,16 @@ func dial(cfg *config) (*client.Client, func(), error) {
 	if err != nil {
 		srv.Stop()
 		os.Remove(sock)
-		backend.Close()
-		store.Close()
+		_ = backend.Close()
+		_ = store.Close()
 		return nil, nil, err
 	}
 	cleanup := func() {
 		_ = c.Close()
 		srv.Stop()
 		os.Remove(sock)
-		backend.Close()
-		store.Close()
+		_ = backend.Close()
+		_ = store.Close()
 	}
 	return c, cleanup, nil
 }

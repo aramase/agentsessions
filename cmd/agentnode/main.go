@@ -59,7 +59,7 @@ func main() {
 	if err != nil {
 		fatalf(host, "open journal: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	log := store.Session(session)
 
 	head, err := log.Head()
