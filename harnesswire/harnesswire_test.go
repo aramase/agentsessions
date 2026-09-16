@@ -54,3 +54,67 @@ func TestStreamSinkToolCorrelationMismatch(t *testing.T) {
 		t.Fatalf("tool event execution ID = %q, want exec-1", got)
 	}
 }
+
+func TestStreamSinkExecutionIDMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		resultID  string
+		operation func(*streamSink) error
+	}{
+		{
+			name:     "model wrong ID",
+			resultID: "other-execution",
+			operation: func(s *streamSink) error {
+				_, err := s.Model(t.Context(), api.ModelRequest{Model: "m"})
+				return err
+			},
+		},
+		{
+			name:     "model empty ID",
+			resultID: "",
+			operation: func(s *streamSink) error {
+				_, err := s.Model(t.Context(), api.ModelRequest{Model: "m"})
+				return err
+			},
+		},
+		{
+			name:     "tool wrong ID",
+			resultID: "other-execution",
+			operation: func(s *streamSink) error {
+				_, err := s.ToolCall(t.Context(), api.ToolCall{ID: "t1", Tool: "charge"})
+				return err
+			},
+		},
+		{
+			name:     "tool empty ID",
+			resultID: "",
+			operation: func(s *streamSink) error {
+				_, err := s.ToolCall(t.Context(), api.ToolCall{ID: "t1", Tool: "charge"})
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			results := make(chan *v1.ControllerFrame, 1)
+			s := &streamSink{
+				stream:      &fakeConnectServer{},
+				results:     results,
+				executionID: "exec-1",
+			}
+			results <- &v1.ControllerFrame{
+				ExecutionId: test.resultID,
+				Frame:       &v1.ControllerFrame_Model{Model: &v1.ModelResult{}},
+			}
+
+			err := test.operation(s)
+			if err == nil || !strings.Contains(err.Error(), "execution_id mismatch") {
+				t.Fatalf("want execution ID mismatch, got %v", err)
+			}
+			if strings.Contains(err.Error(), "correlation mismatch") {
+				t.Fatalf("call correlation ran before execution ID validation: %v", err)
+			}
+		})
+	}
+}

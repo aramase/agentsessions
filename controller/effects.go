@@ -111,8 +111,8 @@ func (s *liveSink) Usage(_ context.Context, u api.Usage) error {
 }
 
 // replaySink serves recorded results from the journal in order and never invokes a live op. It
-// enforces the I0 model-input-hash check. The recorded effect stream is the ordered MODEL_CALL /
-// OUTPUT / TOOL_CALL / TOOL_RESULT events; a deterministic harness requests them in the same order.
+// enforces the I0 model-input-hash check. A deterministic harness requests the recorded model,
+// output, tool, and usage events in the same order.
 type replaySink struct {
 	stream  []api.Event
 	i       int
@@ -190,5 +190,17 @@ func (s *replaySink) Report(context.Context, api.ToolResult) error {
 	return nil
 }
 
-// Usage is auxiliary accounting and not part of the served effect stream, so replay ignores it.
-func (s *replaySink) Usage(context.Context, api.Usage) error { return nil }
+func (s *replaySink) Usage(_ context.Context, usage api.Usage) error {
+	ev, ok := s.nextOf(api.EventUsage)
+	if !ok {
+		return errors.New("replay: unexpected usage (no matching recorded event)")
+	}
+	if ev.Usage == nil {
+		return errors.New("replay: recorded usage is missing its payload")
+	}
+	if *ev.Usage != usage {
+		return fmt.Errorf("replay: usage mismatch — harness emitted %+v, journal recorded %+v (I0)",
+			usage, *ev.Usage)
+	}
+	return nil
+}

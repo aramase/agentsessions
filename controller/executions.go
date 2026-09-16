@@ -48,7 +48,7 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 			if event.Message != nil {
 				execution.inputs = append(execution.inputs, *event.Message)
 			}
-		case api.EventModelCall, api.EventOutput, api.EventToolCall, api.EventToolResult:
+		case api.EventModelCall, api.EventOutput, api.EventToolCall, api.EventToolResult, api.EventUsage:
 			execution.stream = append(execution.stream, event)
 		case api.EventEnd:
 			execution.completed = true

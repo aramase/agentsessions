@@ -163,8 +163,18 @@ func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
 }
 
 func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
-	if s.i >= len(s.stream) {
-		return s.live.Usage(ctx, u)
+	if s.i < len(s.stream) {
+		ev, ok := s.recordedNext(api.EventUsage)
+		if !ok {
+			return errors.New("resume: recorded stream diverged (expected usage)")
+		}
+		if ev.Usage == nil {
+			return errors.New("resume: recorded usage is missing its payload")
+		}
+		if *ev.Usage != u {
+			return fmt.Errorf("resume: usage mismatch — %+v != recorded %+v", u, *ev.Usage)
+		}
+		return nil
 	}
-	return nil // usage is not part of the served effect stream
+	return s.live.Usage(ctx, u)
 }
