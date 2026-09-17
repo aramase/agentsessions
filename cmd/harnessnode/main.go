@@ -1,5 +1,5 @@
 // Command harnessnode is the harness packaged to run INSIDE a compute sandbox (a substrate actor, or
-// any runtime). It serves the echo harness over the harnesswire gRPC Harness.Connect stream on :80 —
+// any runtime). It serves a selected harness over the harnesswire gRPC Harness.Connect stream on :80 —
 // the port the atenet mesh routes to — so the external agentsessions controller drives it remotely,
 // exactly as it drives the in-process runtime/local harness over a unix socket. A separate HTTP
 // /readyz on :8081 lets ResumeActor block until the harness is live (ActorTemplate readyz probe).
@@ -23,6 +23,7 @@ import (
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/harness/chatagent"
 	"github.com/aramase/agentsessions/harness/counteragent"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/harnesswire"
@@ -38,6 +39,10 @@ func env(key, def string) string {
 }
 
 func main() {
+	harness, err := selectHarness()
+	if err != nil {
+		log.Fatalf("harnessnode: configure harness: %v", err)
+	}
 	grpcAddr := env("HARNESS_ADDR", ":"+substrate.HarnessPort) // harnesswire gRPC; the driver dials PodIP here
 	readyzAddr := env("HARNESS_READYZ", ":8081")               // HTTP readyz for the ActorTemplate probe
 
@@ -53,7 +58,7 @@ func main() {
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(slog.Default())),
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(slog.Default())),
 	)
-	v1.RegisterHarnessServer(srv, harnesswire.NewServer(selectHarness()))
+	v1.RegisterHarnessServer(srv, harnesswire.NewServer(harness))
 
 	// readyz on a side port so the actor is reported live once the gRPC server is accepting.
 	readyz := &http.Server{
@@ -79,13 +84,19 @@ func main() {
 }
 
 // selectHarness picks the harness this node serves, by HARNESS_KIND (default "echo"). One image
-// serves both conformance tiers: "echo" is STATELESS_REPLAY; "counter" is REQUIRES_MEMORY_SNAPSHOT
-// (micro-VM) and holds in-RAM state that only a memory snapshot can preserve.
-func selectHarness() api.Harness {
+// serves both conformance tiers: "echo" and "chat" are STATELESS_REPLAY; "counter" requires a memory
+// snapshot. Chat's model ID is supplied by HARNESS_MODEL; provider configuration stays on the host.
+func selectHarness() (api.Harness, error) {
 	switch env("HARNESS_KIND", "echo") {
+	case "chat":
+		model := os.Getenv("HARNESS_MODEL")
+		if model == "" {
+			return nil, errors.New("HARNESS_MODEL is required when HARNESS_KIND=chat")
+		}
+		return chatagent.Harness{Model: model}, nil
 	case "counter":
-		return &counteragent.Harness{}
+		return &counteragent.Harness{}, nil
 	default:
-		return echoagent.Harness{}
+		return echoagent.Harness{}, nil
 	}
 }
