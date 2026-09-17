@@ -241,9 +241,10 @@ func cmdGet(args []string) error {
 func cmdExec(args []string) error {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	cfg := commonFlags(fs)
-	var sess, input string
+	var sess, input, harness string
 	fs.StringVar(&sess, "session", "", "session UID (created if empty)")
 	fs.StringVar(&input, "input", "", "user input for this turn")
+	fs.StringVar(&harness, "harness", "", "harness for a new session or override for this turn (default: the session's or host's)")
 	_ = fs.Parse(args)
 	c, cleanup, err := dial(cfg)
 	if err != nil {
@@ -256,6 +257,7 @@ func cmdExec(args []string) error {
 	_, err = c.Exec(context.Background(), client.ExecOptions{
 		Session: sess,
 		Inputs:  []string{input},
+		Harness: harness,
 		OnSession: func(s *v1.Session) {
 			if sess == "" {
 				fmt.Printf("session %s\n", s.GetMetadata().GetUid())
