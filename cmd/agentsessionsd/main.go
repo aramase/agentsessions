@@ -20,28 +20,22 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"google.golang.org/grpc"
-
-	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/harness/chatagent"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/internal/modelconfig"
+	"github.com/aramase/agentsessions/internal/sessionserver"
 	"github.com/aramase/agentsessions/internal/version"
 	"github.com/aramase/agentsessions/model/openai"
-	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
-	"github.com/aramase/agentsessions/session"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
@@ -70,12 +64,6 @@ func run() error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	store, err := sqlitelog.Open(*journal, sqlitelog.WithDefaultProject(*project))
-	if err != nil {
-		return fmt.Errorf("open journal %s: %w", *journal, err)
-	}
-	defer func() { _ = store.Close() }()
-
 	modelFn, streamFn, modelDesc, err := modelFunc(*model, *modelBaseURL, *modelPath, *modelAuthHeader)
 	if err != nil {
 		return err
@@ -87,45 +75,14 @@ func run() error {
 	}
 	defer closeBackends()
 
-	srv := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
-		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
-	)
-	v1.RegisterSessionsServer(srv, session.NewService(store, registry,
-		session.WithLogger(logger), session.WithDefaultProject(*project)))
-
-	lis, err := net.Listen("tcp", *addr)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", *addr, err)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(lis) }()
-
-	logger.Info("agentsessionsd listening",
-		"version", version.Get().Version,
-		"addr", lis.Addr().String(),
-		"journal", *journal,
-		"project", *project,
-		"harnesses", registry.Names(),
-		"default_harness", registry.Default(),
-		"model", modelDesc,
-	)
-
-	select {
-	case <-ctx.Done():
-		logger.Info("shutting down")
-		srv.GracefulStop()
-		return nil
-	case err := <-serveErr:
-		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-			return fmt.Errorf("serve: %w", err)
-		}
-		return nil
-	}
+	return sessionserver.ListenAndServe(ctx, *addr, sessionserver.Config{
+		Journal:          *journal,
+		Project:          *project,
+		ModelDescription: modelDesc,
+	}, registry, logger)
 }
 
 // harnessRegistry owns the local backends as a group so every startup error and shutdown closes
