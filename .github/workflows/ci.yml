@@ -75,6 +75,15 @@ jobs:
             echo "gofmt needed on:"; echo "$unformatted"; exit 1
           fi
 
+      # A stale go.mod fails the build with "updates to go.mod needed", which reads like a broken
+      # dependency rather than an untidy manifest. Checking it first names the cause. It matters
+      # most for the nested module: it consumes this one through a replace directive, so a bump
+      # here leaves its manifest stale and dependabot cannot see the coupling.
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
       - run: go build ./...
       - run: go vet ./...
       # -race guards the single-writer log and the streaming sinks.
@@ -124,6 +133,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: integrations/substrate/go.mod
+
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
 
       - run: go build ./...
       - run: go vet ./...
