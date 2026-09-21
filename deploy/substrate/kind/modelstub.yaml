@@ -1,0 +1,41 @@
+# CI-only deterministic OpenAI-compatible provider. The documented example configures a real
+# provider; this fixture makes the infrastructure and restart path reproducible without credentials.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: modelstub
+  namespace: ate-agentsessions
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: modelstub
+  template:
+    metadata:
+      labels:
+        app: modelstub
+    spec:
+      containers:
+        - name: modelstub
+          image: MODELSTUB_IMAGE
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: modelstub
+  namespace: ate-agentsessions
+spec:
+  selector:
+    app: modelstub
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
