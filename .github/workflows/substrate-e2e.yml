@@ -125,6 +125,7 @@ jobs:
         # substitute both refs into the manifest, apply.
         run: |
           ATEOM_IMG="$(cd _substrate && ko build ./cmd/ateom-gvisor)"
+          echo "ATEOM_GVISOR_IMG=${ATEOM_IMG}" >> "$GITHUB_ENV"
           sed -e "s#ghcr.io/aramase/agentsessions/harnessnode:latest#${HARNESS_IMG}#" \
               -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
               deploy/substrate/echo-actortemplate.yaml | kubectl --context kind-kind apply -f -
@@ -152,6 +153,45 @@ jobs:
       - name: Stateless-tier conformance (in-cluster Job)
         # Runs before the expensive micro-VM staging below, so a break in the cheap tier fails fast.
         run: hack/run-e2e-job.sh 'TestStatelessReplayOnGVisor' "${E2E_IMAGE}" 600
+
+      - name: Build the production-shaped control-plane and model fixture images
+        run: |
+          echo "CONTROL_IMG=$(cd integrations/substrate && ko build ./cmd/controlplane)" >> "$GITHUB_ENV"
+          echo "MODELSTUB_IMG=$(cd integrations/substrate && ko build ./cmd/modelstub)" >> "$GITHUB_ENV"
+
+      - name: Deploy the chat harness ActorTemplate + WorkerPool
+        run: |
+          sed -e "s#ghcr.io/aramase/agentsessions/harnessnode:latest#${HARNESS_IMG}#" \
+              -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_GVISOR_IMG}#" \
+              -e "s#MODEL_NAME#smoke-model#g" \
+              deploy/substrate/kind/chat-actortemplate.yaml | kubectl --context kind-kind apply -f -
+          kubectl --context kind-kind wait --for=condition=Ready \
+            actortemplate/chat-harness -n ate-agentsessions --timeout=600s
+          hack/wait-worker-pool.sh chat-harness
+
+      - name: Deploy the deterministic smoke model
+        run: |
+          kubectl --context kind-kind create configmap agentsessions-model -n ate-agentsessions \
+            --from-literal=project=smoke \
+            --from-literal=model=smoke-model \
+            --from-literal=base-url=http://modelstub.ate-agentsessions.svc:8080/v1 \
+            --from-literal=path=/chat/completions \
+            --from-literal=auth-header=Authorization \
+            --dry-run=client -o yaml | kubectl --context kind-kind apply -f -
+          sed -e "s#MODELSTUB_IMAGE#${MODELSTUB_IMG}#" \
+            deploy/substrate/kind/modelstub.yaml | kubectl --context kind-kind apply -f -
+          kubectl --context kind-kind rollout status deployment/modelstub \
+            -n ate-agentsessions --timeout=300s
+
+      - name: Deploy the persistent Sessions control plane
+        run: |
+          sed -e "s#ghcr.io/aramase/agentsessions/controlplane:latest#${CONTROL_IMG}#" \
+            deploy/substrate/kind/control-plane.yaml | kubectl --context kind-kind apply -f -
+          kubectl --context kind-kind rollout status deployment/agentsessions \
+            -n ate-agentsessions --timeout=600s
+
+      - name: Production-shaped restart smoke
+        run: EXPECT_MODELSTUB=1 hack/smoke-production-kind.sh
 
       - name: Deploy the micro-VM sandbox class
         # run-microvm-demo-kind stages the (cached) kata-assets into rustfs and installs the

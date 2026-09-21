@@ -1,0 +1,46 @@
+# Production-shaped chat harness on a gVisor substrate actor. The harness receives only its model
+# identifier; provider location and credentials stay with the Sessions control plane.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-agentsessions
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: chat-harness
+  namespace: ate-agentsessions
+  labels:
+    workload: agentsessions-chat-harness
+spec:
+  replicas: 2
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+---
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: chat-harness
+  namespace: ate-agentsessions
+spec:
+  pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+  containers:
+    - name: harness
+      image: ghcr.io/aramase/agentsessions/harnessnode:latest
+      command:
+        - /ko-app/harnessnode
+      env:
+        - name: HARNESS_KIND
+          value: chat
+        - name: HARNESS_MODEL
+          value: MODEL_NAME
+      readyz:
+        httpGet:
+          path: /readyz
+          port: 8081
+  workerSelector:
+    matchLabels:
+      workload: agentsessions-chat-harness
+  snapshotsConfig:
+    onPause: Full
+    onCommit: Full
+    location: gs://ate-snapshots/ate-agentsessions-chat/

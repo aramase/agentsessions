@@ -104,14 +104,15 @@ Full docs live in [`docs/`](docs/README.md):
 | `harnesswire/` | Bridges the in-process `api.Harness` SPI and the out-of-process `Harness.Connect` gRPC stream. |
 | `placement/` | The `Placer`: wires Sessions to the `Runtime` SPI, mints/binds fences, gates via `CanPlace`. The `Registry` routes a session to the harness it names. |
 | `runtime/local`, `runtime/substrate` | `Runtime` backends: a filesystem-only local backend, and agent-substrate. |
-| `harness/echoagent`, `harness/counteragent` | Reference harnesses: `STATELESS_REPLAY` echo, `REQUIRES_MEMORY_SNAPSHOT` counter. |
+| `harness/echoagent`, `harness/chatagent`, `harness/counteragent` | Reference harnesses: stateless echo and conversational chat, plus the memory-snapshot counter. |
 | `model/openai` | Model provider for OpenAI-compatible endpoints; no vendor SDK, so any compatible service works. |
 | `session/` | The `Sessions` gRPC service: the client-facing seam over the log and the Placer. |
 | `client/` | Go client SDK: dialing, the session frame, pagination, and stream draining. |
 | `cmd/agentsessionsd` | The Sessions server: a TCP entry point over the journal and the harness registry. |
-| `cmd/agentctl` | Client CLI (create / exec / replay / fork / suspend / resume). |
+| `cmd/agentctl` | Client CLI (create / exec / replay / verify / fork / suspend / resume). |
 | `conformance/` | The replay-conformance suite (the neutral determinism checks). |
-| `integrations/substrate/` | The substrate `ControlClient` adapter — a **separate module** so the core stays substrate-free. |
+| `internal/sessionserver` | Runtime-neutral Sessions daemon lifecycle shared by local and integration composition binaries. |
+| `integrations/substrate/` | The substrate adapter and Sessions composition — a **separate module** so the core stays substrate-free. |
 | `deploy/substrate/`, `.github/workflows/substrate-e2e.yml` | Manifests + CI for the real-substrate conformance. |
 
 ## Container images
@@ -139,6 +140,10 @@ independent chain verification), follow [`docs/quickstart.md`](docs/quickstart.m
 The real-substrate conformance (both tiers) runs in the `substrate-conformance` workflow
 (`.github/workflows/substrate-e2e.yml`), on every pull request and nightly. See
 [`docs/substrate-conformance.md`](docs/substrate-conformance.md) to reproduce it.
+
+For the complete client → persistent Sessions service → substrate actor → chat harness path, including
+a control-plane pod replacement and continued execution, see the
+[production-shaped kind deployment](docs/production-shaped-kind.md).
 
 ## Ecosystem
 
