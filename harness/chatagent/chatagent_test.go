@@ -7,8 +7,144 @@ import (
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/harness/chatagent"
+	"github.com/aramase/agentsessions/sqlitelog"
 )
+
+func TestControllerReplay(t *testing.T) {
+	question := *api.TextMessage("user", "first question")
+	followUp := *api.TextMessage("user", "follow-up")
+	reply := *api.TextMessage("assistant", "first reply")
+	for _, tt := range []struct {
+		name      string
+		inputs    [][]api.Message
+		contexts  [][]api.Message
+		failFirst bool
+	}{
+		{
+			name:     "single turn",
+			inputs:   [][]api.Message{{question}},
+			contexts: [][]api.Message{{question}},
+		},
+		{
+			name:     "multiple turns",
+			inputs:   [][]api.Message{{question}, {followUp}},
+			contexts: [][]api.Message{{question}, {question, reply, followUp}},
+		},
+		{
+			name:     "grouped and repeated inputs",
+			inputs:   [][]api.Message{{question, question}, {question, followUp}},
+			contexts: [][]api.Message{{question, question}, {question, question, reply, question, followUp}},
+		},
+		{
+			name:      "failed input remains in subsequent context",
+			inputs:    [][]api.Message{{question}, {followUp}},
+			contexts:  [][]api.Message{{question}, {question, followUp}},
+			failFirst: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			log := store.Session("chat")
+			modelErr := errors.New("model unavailable")
+			var requests []api.ModelRequest
+			var wantOutputs []string
+			live, err := controller.New(log, func(_ context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+				requests = append(requests, req)
+				if tt.failFirst && len(requests) == 1 {
+					return api.ModelResponse{}, modelErr
+				}
+				text := "first reply"
+				if len(requests) > 1 {
+					text = "second reply"
+				}
+				wantOutputs = append(wantOutputs, text)
+				return api.ModelResponse{Message: *api.TextMessage("assistant", text)}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			harness := chatagent.Harness{Model: "test-model"}
+			for i, inputs := range tt.inputs {
+				head, err := log.Head()
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = live.Exec(t.Context(), harness, inputs, head)
+				if tt.failFirst && i == 0 {
+					if !errors.Is(err, modelErr) {
+						t.Fatalf("failed turn error = %v, want %v", err, modelErr)
+					}
+					records, err := log.Read(1)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var kinds []api.EventKind
+					for _, record := range records {
+						kinds = append(kinds, record.Event.Kind)
+					}
+					if !reflect.DeepEqual(kinds, []api.EventKind{api.EventInput, api.EventModelCall, api.EventError}) {
+						t.Fatalf("failed turn records = %v", kinds)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(requests) != len(tt.contexts) {
+				t.Fatalf("model calls = %d, want %d", len(requests), len(tt.contexts))
+			}
+			for i, want := range tt.contexts {
+				if requests[i].Model != "test-model" || !reflect.DeepEqual(requests[i].Messages, want) {
+					t.Fatalf("turn %d request = %+v, want configured model and %+v", i+1, requests[i], want)
+				}
+			}
+			liveOutputs, err := live.Outputs()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(liveOutputs, wantOutputs) {
+				t.Fatalf("live outputs = %v, want %v", liveOutputs, wantOutputs)
+			}
+			before, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replayCalls := 0
+			replay, err := controller.New(log, func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
+				replayCalls++
+				return api.ModelResponse{}, errors.New("unexpected live model call during replay")
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			outputs, err := replay.Replay(t.Context(), harness)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(outputs, liveOutputs) {
+				t.Fatalf("replay outputs = %v, want %v", outputs, liveOutputs)
+			}
+			if replayCalls != 0 || replay.ModelInvocations() != 0 {
+				t.Fatal("replay invoked the live model")
+			}
+			after, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatal("replay changed the journal")
+			}
+			if err := log.Verify(); err != nil {
+				t.Fatalf("journal integrity: %v", err)
+			}
+		})
+	}
+}
 
 func TestDescribe(t *testing.T) {
 	got, err := (chatagent.Harness{Model: "test-model"}).Describe(t.Context())

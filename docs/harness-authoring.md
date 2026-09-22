@@ -211,6 +211,11 @@ Each turn it retains the messages from prior `EVENT_INPUT` and `EVENT_OUTPUT` ev
 Audit and lifecycle events (`MODEL_CALL`, `END`, `ERROR`, `LIFECYCLE`, and other non-conversation
 events) do not enter model context.
 
+Inputs from failed turns are intentionally retained. If a model call fails before producing an
+output, the next turn includes that prior user message without an assistant reply; the harness
+neither discards the input nor invents a response. Controller replay preserves this same context
+when re-executing later completed turns.
+
 The harness calls only `EventSink.Model` with its configured model ID and this conversation.
 The host supplies the model implementation and records the completion; the harness does not
 import a provider SDK or re-emit the completion through `sink.Output`. It has no tools, provider
@@ -264,17 +269,12 @@ provides the zero-configuration quickstart. The embedded `agentctl` server remai
 so chat requires `--server`. The reference server is plaintext and unauthenticated; keep it on
 a trusted interface (see [security.md](security.md)).
 
-Two current limitations matter:
+One current limitation matters:
 
 - `Session.model` is stored metadata, not effective model selection
   ([aramase/agentsessions#31](https://github.com/aramase/agentsessions/issues/31)).
   The example deliberately omits `agentctl create --model`; `agentsessionsd --model` configures
   the model ID requested by chat for all its sessions.
-- Controller re-execution of a history-aware harness is blocked by the turn-boundary bug in
-  [aramase/agentsessions#41](https://github.com/aramase/agentsessions/issues/41).
-  Chat's controller-level replay coverage must wait for that fix. Live multi-turn execution and
-  `agentctl replay` (which only reads committed journal records via the Sessions API) are separate
-  from `Controller.Replay`.
 
 ### Package chat for a remote runtime
 
