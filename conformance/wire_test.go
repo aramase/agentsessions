@@ -57,6 +57,44 @@ func (failHarness) Run(context.Context, *api.Start, api.EventSink) error {
 	return errors.New("boom")
 }
 
+type executionCaptureHarness struct {
+	executionIDs chan<- string
+}
+
+func (executionCaptureHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "execution-capture"}, nil
+}
+
+func (h executionCaptureHarness) Run(_ context.Context, start *api.Start, _ api.EventSink) error {
+	h.executionIDs <- start.ExecutionID
+	return nil
+}
+
+func TestWirePropagatesExecutionID(t *testing.T) {
+	s, _ := openFile(t)
+	defer s.Close()
+	log := s.Session("s")
+	executionIDs := make(chan string, 1)
+	har := wireHarnessFrom(t, executionCaptureHarness{executionIDs: executionIDs})
+
+	c, err := controller.New(log, (&countModel{}).call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Exec(context.Background(), har, []api.Message{*api.TextMessage("user", "hi")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	records, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := <-executionIDs
+	want := records[0].Event.ExecutionID
+	if got == "" || got != want {
+		t.Fatalf("remote harness execution ID = %q, want journal ID %q", got, want)
+	}
+}
+
 // TestWireFailedHarnessSurfacesError is the END-state correctness proof across the wire: a remote
 // harness that FAILs is journaled as EVENT_ERROR, not EVENT_END{COMPLETED}. Before the fix,
 // ClientHarness.Run returned nil on any END event, so the controller recorded the failed turn as a

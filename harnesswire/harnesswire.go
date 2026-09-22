@@ -58,6 +58,10 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 	if start == nil {
 		return errors.New("harnesswire: first ControllerFrame must be Start")
 	}
+	executionID := first.GetExecutionId()
+	if executionID == "" {
+		return errors.New("harnesswire: Start frame requires execution_id")
+	}
 
 	results := make(chan *v1.ControllerFrame, 1)
 	go func() {
@@ -71,19 +75,33 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 		}
 	}()
 
-	sink := &streamSink{stream: stream, results: results}
-	if err := s.harness.Run(stream.Context(), startFromProto(start), sink); err != nil {
-		_ = stream.Send(&v1.Event{Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "FAILED", Error: &v1.Error{Description: err.Error()}}}})
+	sink := &streamSink{stream: stream, results: results, executionID: executionID}
+	runStart := startFromProto(start)
+	runStart.ExecutionID = executionID
+	if err := s.harness.Run(stream.Context(), runStart, sink); err != nil {
+		_ = stream.Send(&v1.Event{
+			ExecutionId: executionID,
+			Kind:        v1.EventKind_EVENT_END,
+			Body: &v1.Event_End{End: &v1.HarnessEnd{
+				State: "FAILED",
+				Error: &v1.Error{Description: err.Error()},
+			}},
+		})
 		return err
 	}
-	return stream.Send(&v1.Event{Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}})
+	return stream.Send(&v1.Event{
+		ExecutionId: executionID,
+		Kind:        v1.EventKind_EVENT_END,
+		Body:        &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}},
+	})
 }
 
 // streamSink is the harness-side EventSink: each op becomes an Event on the wire; Model/ToolCall
 // then block for the host's reply frame.
 type streamSink struct {
-	stream  v1.Harness_ConnectServer
-	results <-chan *v1.ControllerFrame
+	stream      v1.Harness_ConnectServer
+	results     <-chan *v1.ControllerFrame
+	executionID string
 }
 
 // awaitResult blocks for the host's reply frame, honoring cancellation. The ctx arm is what stops a
@@ -95,6 +113,10 @@ func (s *streamSink) awaitResult(ctx context.Context) (*v1.ControllerFrame, erro
 		if !ok {
 			return nil, io.EOF
 		}
+		if frame.GetExecutionId() != s.executionID {
+			return nil, fmt.Errorf("harnesswire: result execution_id mismatch: got %q, want %q",
+				frame.GetExecutionId(), s.executionID)
+		}
 		return frame, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -104,7 +126,8 @@ func (s *streamSink) awaitResult(ctx context.Context) (*v1.ControllerFrame, erro
 func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 	id := newID()
 	ev := &v1.Event{
-		Kind: v1.EventKind_EVENT_MODEL_CALL,
+		ExecutionId: s.executionID,
+		Kind:        v1.EventKind_EVENT_MODEL_CALL,
 		Body: &v1.Event_Model{Model: &v1.ModelCall{
 			Model:    req.Model,
 			Params:   req.Params,
@@ -137,8 +160,9 @@ func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 
 func (s *streamSink) Output(_ context.Context, delta string) error {
 	return s.stream.Send(&v1.Event{
-		Kind: v1.EventKind_EVENT_OUTPUT,
-		Body: &v1.Event_Message{Message: wire.MessageToProto(api.TextMessage("assistant", delta))},
+		ExecutionId: s.executionID,
+		Kind:        v1.EventKind_EVENT_OUTPUT,
+		Body:        &v1.Event_Message{Message: wire.MessageToProto(api.TextMessage("assistant", delta))},
 	})
 }
 
@@ -149,8 +173,9 @@ func (s *streamSink) Output(_ context.Context, delta string) error {
 func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
 	call := tc
 	if err := s.stream.Send(&v1.Event{
-		Kind: v1.EventKind_EVENT_TOOL_CALL,
-		Body: &v1.Event_Tool{Tool: wire.ToolCallToProto(&call)},
+		ExecutionId: s.executionID,
+		Kind:        v1.EventKind_EVENT_TOOL_CALL,
+		Body:        &v1.Event_Tool{Tool: wire.ToolCallToProto(&call)},
 	}); err != nil {
 		return api.ToolResult{}, err
 	}
@@ -179,12 +204,13 @@ func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 func (s *streamSink) Report(_ context.Context, tr api.ToolResult) error {
 	res := tr
 	return s.stream.Send(&v1.Event{
-		Kind: v1.EventKind_EVENT_TOOL_RESULT,
-		Body: &v1.Event_Result{Result: wire.ToolResultToProto(&res)},
+		ExecutionId: s.executionID,
+		Kind:        v1.EventKind_EVENT_TOOL_RESULT,
+		Body:        &v1.Event_Result{Result: wire.ToolResultToProto(&res)},
 	})
 }
 func (s *streamSink) Usage(_ context.Context, u api.Usage) error {
-	return s.stream.Send(&v1.Event{Kind: v1.EventKind_EVENT_USAGE, Body: &v1.Event_Usage{Usage: &v1.Usage{
+	return s.stream.Send(&v1.Event{ExecutionId: s.executionID, Kind: v1.EventKind_EVENT_USAGE, Body: &v1.Event_Usage{Usage: &v1.Usage{
 		Model: u.Model, InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, ReasoningTokens: u.ReasoningTokens,
 	}}})
 }
@@ -215,11 +241,17 @@ func (h *ClientHarness) Describe(ctx context.Context) (api.Descriptor, error) {
 func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // tear the Connect stream down (and the server's recv loop) when Run returns
+	if start == nil || start.ExecutionID == "" {
+		return errors.New("harnesswire: Start requires execution_id")
+	}
 	stream, err := h.client.Connect(ctx)
 	if err != nil {
 		return err
 	}
-	if err := stream.Send(&v1.ControllerFrame{Frame: &v1.ControllerFrame_Start{Start: startToProto(start)}}); err != nil {
+	if err := stream.Send(&v1.ControllerFrame{
+		ExecutionId: start.ExecutionID,
+		Frame:       &v1.ControllerFrame_Start{Start: startToProto(start)},
+	}); err != nil {
 		return err
 	}
 	for {
@@ -229,6 +261,10 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 		}
 		if err != nil {
 			return err
+		}
+		if ev.GetExecutionId() != start.ExecutionID {
+			return fmt.Errorf("harnesswire: event execution_id mismatch: got %q, want %q",
+				ev.GetExecutionId(), start.ExecutionID)
 		}
 		switch ev.GetKind() {
 		case v1.EventKind_EVENT_MODEL_CALL:
@@ -241,10 +277,13 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			if err != nil {
 				return err
 			}
-			if err := stream.Send(&v1.ControllerFrame{Frame: &v1.ControllerFrame_Model{Model: &v1.ModelResult{
-				Message:     wire.MessageToProto(&resp.Message),
-				ModelCallId: mc.GetId(),
-			}}}); err != nil {
+			if err := stream.Send(&v1.ControllerFrame{
+				ExecutionId: start.ExecutionID,
+				Frame: &v1.ControllerFrame_Model{Model: &v1.ModelResult{
+					Message:     wire.MessageToProto(&resp.Message),
+					ModelCallId: mc.GetId(),
+				}},
+			}); err != nil {
 				return err
 			}
 		case v1.EventKind_EVENT_OUTPUT:
@@ -262,7 +301,10 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			if err != nil {
 				return err
 			}
-			if err := stream.Send(&v1.ControllerFrame{Frame: &v1.ControllerFrame_Tool{Tool: wire.ToolResultToProto(&res)}}); err != nil {
+			if err := stream.Send(&v1.ControllerFrame{
+				ExecutionId: start.ExecutionID,
+				Frame:       &v1.ControllerFrame_Tool{Tool: wire.ToolResultToProto(&res)},
+			}); err != nil {
 				return err
 			}
 		case v1.EventKind_EVENT_TOOL_RESULT:
@@ -273,7 +315,14 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			}
 		case v1.EventKind_EVENT_USAGE:
 			if u := ev.GetUsage(); u != nil {
-				_ = sink.Usage(ctx, api.Usage{Model: u.GetModel(), InputTokens: u.GetInputTokens(), OutputTokens: u.GetOutputTokens(), ReasoningTokens: u.GetReasoningTokens()})
+				if err := sink.Usage(ctx, api.Usage{
+					Model:           u.GetModel(),
+					InputTokens:     u.GetInputTokens(),
+					OutputTokens:    u.GetOutputTokens(),
+					ReasoningTokens: u.GetReasoningTokens(),
+				}); err != nil {
+					return err
+				}
 			}
 		case v1.EventKind_EVENT_END:
 			return endError(ev.GetEnd())

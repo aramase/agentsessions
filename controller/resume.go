@@ -14,8 +14,6 @@ import (
 // already-recorded effects — never re-invoking a recorded model/tool call (at-most-once, I3) — and
 // switches to LIVE (invoke + record) for anything past the crash point, then appends END. If the
 // last turn is complete or the log is empty, it is a no-op (returns false).
-//
-// It assumes one INPUT per turn (the echo/demo shape); multi-input turns are a later refinement.
 func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, recordedEffectCount int
@@ -38,46 +36,34 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		return false, nil
 	}
 
-	lastInput, lastEnd := -1, -1
-	for i, r := range recs {
-		switch r.Event.Kind {
-		case api.EventInput:
-			lastInput = i
-		case api.EventEnd:
-			lastEnd = i
-		}
+	events := make([]api.Event, 0, len(recs))
+	for _, record := range recs {
+		events = append(events, record.Event)
 	}
-	// Complete (or nothing to do) when there is no turn, or an END follows the last INPUT. A
-	// trailing lifecycle marker (e.g. SUSPEND) after a completed turn is not an interrupted turn.
-	if lastInput < 0 || lastEnd > lastInput {
+	executions, err := recordedExecutions(events)
+	if err != nil {
+		return false, err
+	}
+	if len(executions) == 0 || executions[len(executions)-1].completed {
 		return false, nil
 	}
 
-	var inputs []api.Message
-	var histEvents, stream []api.Event
-	for i, r := range recs {
-		switch {
-		case i < lastInput:
-			histEvents = append(histEvents, r.Event)
-		case i == lastInput:
-			if r.Event.Message != nil {
-				inputs = append(inputs, *r.Event.Message)
-			}
-		default: // i > lastInput: already-recorded effects of the incomplete turn
-			switch r.Event.Kind {
-			case api.EventModelCall, api.EventOutput, api.EventToolCall, api.EventToolResult:
-				stream = append(stream, r.Event)
-			}
-		}
+	execution := executions[len(executions)-1]
+	sink := &resumeSink{
+		live:   liveSink{c: c, executionID: execution.id},
+		stream: execution.stream,
 	}
-
-	sink := &resumeSink{live: liveSink{c: c}, stream: stream}
-	recordedEffectCount = len(stream)
-	if err := har.Run(ctx, &api.Start{Inputs: inputs, History: histEvents}, sink); err != nil {
-		_, _ = c.appendSeq(api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
+	recordedEffectCount = len(execution.stream)
+	start := &api.Start{
+		ExecutionID: execution.id,
+		Inputs:      execution.inputs,
+		History:     events[:execution.start],
+	}
+	if err := har.Run(ctx, start, sink); err != nil {
+		_, _ = c.appendSeq(execution.id, api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
 		return true, err
 	}
-	_, err = c.appendSeq(api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	_, err = c.appendSeq(execution.id, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	return true, err
 }
 
@@ -177,8 +163,18 @@ func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
 }
 
 func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
-	if s.i >= len(s.stream) {
-		return s.live.Usage(ctx, u)
+	if s.i < len(s.stream) {
+		ev, ok := s.recordedNext(api.EventUsage)
+		if !ok {
+			return errors.New("resume: recorded stream diverged (expected usage)")
+		}
+		if ev.Usage == nil {
+			return errors.New("resume: recorded usage is missing its payload")
+		}
+		if *ev.Usage != u {
+			return fmt.Errorf("resume: usage mismatch — %+v != recorded %+v", u, *ev.Usage)
+		}
+		return nil
 	}
-	return nil // usage is not part of the served effect stream
+	return s.live.Usage(ctx, u)
 }
