@@ -207,3 +207,23 @@
   border: 0;
   font-size: 0.9em;
 }
+
+/* Figures carry their own chrome and caption, so they need more air than a paragraph does.
+   At the shared 1.1rem rhythm they collided with the heading or the sentence introducing them. */
+[data-has-hero] .sl-markdown-content > .panel,
+[data-has-hero] .sl-markdown-content > figure.panel {
+  margin-top: 1.75rem;
+  margin-bottom: 1.75rem;
+}
+
+/* A heading immediately followed by its figure, with no intervening prose, still needs the gap. */
+[data-has-hero] .sl-markdown-content h2 + .panel,
+[data-has-hero] .sl-markdown-content h2 + figure.panel {
+  margin-top: 1.5rem;
+}
+
+/* Stacked figures (the tier diagram under its cards) should not fuse into one block. */
+[data-has-hero] .sl-markdown-content .card-grid + .panel,
+[data-has-hero] .sl-markdown-content .card-grid + figure.panel {
+  margin-top: 1.75rem;
+}

@@ -17,7 +17,6 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
 
 <figure class="cast panel">
   <div class="panel__bar">
-    <span class="cast__dots" aria-hidden="true"><i></i><i></i><i></i></span>
     <span class="panel__label">{title}</span>
     <span class="panel__note cast__badge">recorded</span>
   </div>
@@ -65,29 +64,6 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
 </script>
 
 <style is:global>
-  .cast__dots {
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .cast__dots i {
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-  }
-
-  .cast__dots i:nth-child(1) {
-    background: #ff5f57;
-  }
-
-  .cast__dots i:nth-child(2) {
-    background: #febc2e;
-  }
-
-  .cast__dots i:nth-child(3) {
-    background: #28c840;
-  }
-
   .cast__badge {
     color: var(--p-good);
     border: 1px solid rgb(63 185 80 / 0.35);

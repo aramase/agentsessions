@@ -14,8 +14,7 @@
 
 <div class="term panel" data-demo>
   <div class="panel__bar term__chrome">
-    <span class="term__dots" aria-hidden="true"><i></i><i></i><i></i></span>
-    <span class="panel__label">agentsessions</span>
+    <span class="panel__label">local &middot; no server, no API key</span>
     <span class="panel__note term__meter">provider calls <b data-calls>0</b></span>
   </div>
 
@@ -171,29 +170,6 @@
     }
   }
 
-  .term__dots {
-    display: flex;
-    gap: 0.4rem;
-  }
-
-  .term__dots i {
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-  }
-
-  .term__dots i:nth-child(1) {
-    background: #ff5f57;
-  }
-
-  .term__dots i:nth-child(2) {
-    background: #febc2e;
-  }
-
-  .term__dots i:nth-child(3) {
-    background: #28c840;
-  }
-
   .term__meter {
     display: inline-flex;
     align-items: center;
@@ -344,6 +320,10 @@
   .term.is-animating .term__row {
     opacity: 0;
     transform: translateY(2px);
+  }
+
+  .term.is-animating .term__row--wait:not(.is-shown) {
+    display: none;
   }
 
   .term.is-animating .term__row.is-shown {
