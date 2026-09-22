@@ -1,0 +1,48 @@
+---
+// Fades a section in as it scrolls into view. One observer serves every instance on the page.
+//
+// Content is visible by default and only hidden once the script marks the document as capable, so
+// nothing disappears without JS, and nothing animates under prefers-reduced-motion.
+interface Props {
+  delay?: number;
+}
+const { delay = 0 } = Astro.props;
+---
+
+<div class="reveal" data-reveal style={delay ? `--reveal-delay:${delay}ms` : undefined}>
+  <slot />
+</div>
+
+<script>
+  if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    document.documentElement.classList.add("reveal-ready");
+
+    const io = new IntersectionObserver(
+      (entries, obs) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          e.target.classList.add("is-visible");
+          obs.unobserve(e.target); // reveal once; re-animating on scroll-back is noise
+        }
+      },
+      { threshold: 0.12, rootMargin: "0px 0px -8% 0px" },
+    );
+
+    for (const el of document.querySelectorAll("[data-reveal]")) io.observe(el);
+  }
+</script>
+
+<style is:global>
+  :root.reveal-ready .reveal {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+
+  :root.reveal-ready .reveal.is-visible {
+    opacity: 1;
+    transform: none;
+    transition:
+      opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1) var(--reveal-delay, 0ms),
+      transform 0.5s cubic-bezier(0.22, 1, 0.36, 1) var(--reveal-delay, 0ms);
+  }
+</style>

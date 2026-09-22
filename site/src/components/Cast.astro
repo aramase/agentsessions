@@ -1,0 +1,141 @@
+---
+// Embeds an asciinema recording of a real run.
+//
+// The player is bundled from npm rather than loaded from asciinema.org, so nothing is uploaded and
+// the page has no third-party dependency at runtime. The .cast files in public/casts are real
+// recordings produced by the scripts in hack/demos, not hand-written transcripts.
+interface Props {
+  src: string;
+  title: string;
+  caption?: string;
+  poster?: string;
+  idle?: number;
+}
+const { src, title, caption, poster = "npt:0:04", idle = 1.5 } = Astro.props;
+const id = `cast-${src.replace(/\W+/g, "-")}`;
+---
+
+<figure class="cast">
+  <div class="cast__head">
+    <span class="cast__dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="cast__title">{title}</span>
+    <span class="cast__badge">recorded</span>
+  </div>
+  <div
+    class="cast__player"
+    id={id}
+    data-cast
+    data-src={src}
+    data-poster={poster}
+    data-idle={String(idle)}
+  >
+  </div>
+  {caption && <figcaption class="cast__caption" set:html={caption} />}
+</figure>
+
+<script>
+  import * as AsciinemaPlayer from "asciinema-player";
+  import "asciinema-player/dist/bundle/asciinema-player.css";
+
+  for (const el of document.querySelectorAll<HTMLElement>("[data-cast]")) {
+    const src = el.dataset.src!;
+    // Autoplay only once the recording scrolls into view, and only then create the player, so a
+    // page with several recordings does not start them all at load.
+    const observer = new IntersectionObserver(
+      (entries, obs) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          AsciinemaPlayer.create(src, el, {
+            autoPlay: true,
+            loop: true,
+            // Long pauses are real (a rollout takes time) but boring to watch, so cap them.
+            idleTimeLimit: Number(el.dataset.idle),
+            poster: el.dataset.poster,
+            fit: "width",
+            terminalFontSize: "13px",
+            theme: "dracula",
+          });
+          obs.unobserve(entry.target);
+        }
+      },
+      { threshold: 0.25 },
+    );
+    observer.observe(el);
+  }
+</script>
+
+<style is:global>
+  .cast {
+    margin: 0;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #0d1117;
+  }
+
+  .cast__head {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.5rem 0.8rem;
+    border-bottom: 1px solid #21262d;
+    background: #161b22;
+  }
+
+  .cast__dots {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .cast__dots i {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+  }
+
+  .cast__dots i:nth-child(1) {
+    background: #ff5f57;
+  }
+
+  .cast__dots i:nth-child(2) {
+    background: #febc2e;
+  }
+
+  .cast__dots i:nth-child(3) {
+    background: #28c840;
+  }
+
+  .cast__title {
+    font-size: 0.78rem;
+    color: #8b949e;
+  }
+
+  .cast__badge {
+    margin-left: auto;
+    font-size: 0.65rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #3fb950;
+    border: 1px solid rgb(63 185 80 / 0.35);
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
+  }
+
+  .cast__player {
+    min-height: 8rem;
+  }
+
+  /* The player ships its own dark palette; drop its border so it sits flush in our chrome. */
+  .cast .ap-player {
+    border: 0;
+    font-feature-settings: normal;
+  }
+
+  .cast__caption {
+    padding: 0.6rem 0.9rem 0.75rem;
+    font-size: var(--sl-text-sm);
+    line-height: 1.5;
+    color: var(--sl-color-gray-2);
+    border-top: 1px solid #21262d;
+  }
+</style>

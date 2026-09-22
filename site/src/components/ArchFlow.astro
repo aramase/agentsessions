@@ -1,0 +1,350 @@
+---
+// The request path for one turn, drawn across process boundaries.
+//
+// This exists to make the central claim visible rather than stated: the arrow to the provider
+// leaves the *host*, and the sandbox has no provider arrow at all. That is the whole reason a
+// replay needs no provider, and it is easier to see than to read.
+//
+// All three contracts appear, because leaving Runtime out made it look as though the Controller
+// talks to a sandbox that nothing created. The two gRPC streams carry arrowheads at both ends,
+// since Exec streams records back and the harness stream is bidirectional.
+//
+// Progressive enhancement: the SVG is complete without JS; the script only adds `is-animating`
+// to dim it and walk the steps.
+---
+
+<figure class="arch" data-arch>
+  <div class="arch__head">
+    <span class="arch__step" data-step>1 / 7</span>
+    <span class="arch__legend">one turn, across process boundaries</span>
+  </div>
+
+  <svg viewBox="0 0 760 500" role="img" aria-labelledby="arch-title" class="arch__svg">
+    <title id="arch-title">
+      A turn flowing from your application into the agentsessions host, which provisions a sandbox
+      through the Runtime SPI and drives a harness inside it, while the host itself makes the model
+      call and appends the result to the journal.
+    </title>
+
+    <defs>
+      <marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6"
+        markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" class="arch__head-fill"></path>
+      </marker>
+    </defs>
+
+    <g class="arch__zone" data-zone="app">
+      <rect x="248" y="6" width="264" height="66" rx="8"></rect>
+      <text x="260" y="24">YOUR APPLICATION</text>
+    </g>
+    <g class="arch__zone" data-zone="host">
+      <rect x="20" y="92" width="720" height="288" rx="8"></rect>
+      <text x="32" y="110">AGENTSESSIONS HOST</text>
+    </g>
+    <g class="arch__zone arch__zone--sandbox" data-zone="sandbox">
+      <rect x="248" y="404" width="264" height="86" rx="8"></rect>
+      <text x="260" y="422">SANDBOX — POD, GVISOR, OR MICRO-VM</text>
+    </g>
+
+    <!-- Exec is server-streaming, so records come back the same way they were asked for. -->
+    <path class="arch__edge" data-edge="e1" d="M 380 72 V 116" marker-start="url(#arch-arrow)"
+      marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge" data-edge="e2" d="M 380 162 V 186" marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge" data-edge="e3" d="M 380 232 V 254" marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge" data-edge="e7" d="M 380 300 V 324" marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge arch__edge--dashed" data-edge="e9" d="M 380 370 V 400"
+      marker-end="url(#arch-arrow)"></path>
+    <!-- One bidirectional stream: the host drives Run, the harness emits events back. -->
+    <path class="arch__edge" data-edge="e4" d="M 470 296 H 530 V 454 H 474"
+      marker-start="url(#arch-arrow)" marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge arch__edge--key" data-edge="e5" d="M 472 278 H 544"
+      marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge" data-edge="e6" d="M 288 278 H 216" marker-end="url(#arch-arrow)"></path>
+
+    <text class="arch__elabel" data-elabel="e1" x="390" y="108">Exec, streaming back</text>
+    <text class="arch__elabel" data-elabel="e2" x="390" y="178">CanPlace</text>
+    <text class="arch__elabel" data-elabel="e7" x="390" y="318">Runtime SPI</text>
+    <text class="arch__elabel" data-elabel="e9" x="390" y="392">create / restore</text>
+    <text class="arch__elabel" data-elabel="e4" x="540" y="360">harness stream</text>
+    <text class="arch__elabel arch__elabel--key" data-elabel="e5" x="498" y="246">host makes the call</text>
+    <text class="arch__elabel" data-elabel="e6" x="276" y="268" text-anchor="end">append</text>
+
+    <g class="arch__node" data-node="client">
+      <rect x="290" y="30" width="180" height="38" rx="6"></rect>
+      <text x="380" y="54">client / agentctl</text>
+    </g>
+    <g class="arch__node" data-node="api">
+      <rect x="290" y="118" width="180" height="44" rx="6"></rect>
+      <text x="380" y="145">Sessions API</text>
+    </g>
+    <g class="arch__node" data-node="placer">
+      <rect x="290" y="188" width="180" height="44" rx="6"></rect>
+      <text x="380" y="215">Placer</text>
+    </g>
+    <g class="arch__node" data-node="controller">
+      <rect x="290" y="256" width="180" height="44" rx="6"></rect>
+      <text x="380" y="283">Controller</text>
+    </g>
+    <g class="arch__node arch__node--side" data-node="journal">
+      <rect x="46" y="256" width="170" height="44" rx="6"></rect>
+      <text x="131" y="283">Journal</text>
+    </g>
+    <g class="arch__node arch__node--key" data-node="model">
+      <rect x="546" y="256" width="170" height="44" rx="6"></rect>
+      <text x="631" y="283">Model provider</text>
+    </g>
+    <g class="arch__node arch__node--runtime" data-node="runtime">
+      <rect x="290" y="326" width="180" height="44" rx="6"></rect>
+      <text x="380" y="353">Runtime</text>
+    </g>
+    <g class="arch__node arch__node--sandbox" data-node="harness">
+      <rect x="290" y="432" width="180" height="44" rx="6"></rect>
+      <text x="380" y="459">Harness</text>
+    </g>
+  </svg>
+
+  <figcaption class="arch__caption" data-caption>
+    Your application calls <code>Exec</code>, and records stream back as they commit.
+  </figcaption>
+</figure>
+
+<script>
+  const root = document.querySelector<HTMLElement>("[data-arch]");
+
+  if (root && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const stepLabel = root.querySelector<HTMLElement>("[data-step]")!;
+    const caption = root.querySelector<HTMLElement>("[data-caption]")!;
+
+    type Frame = { on: string[]; text: string; hold?: number };
+
+    // Each frame lights only the parts involved in that step. Frame 6 is the one the diagram
+    // exists for: the provider arrow starts at the Controller, inside the host.
+    const frames: Frame[] = [
+      {
+        on: ['[data-zone="app"]', '[data-node="client"]', '[data-edge="e1"]', '[data-elabel="e1"]', '[data-node="api"]'],
+        text: "Your application calls <code>Exec</code>, and records stream back as they commit.",
+      },
+      {
+        on: ['[data-node="api"]', '[data-edge="e2"]', '[data-elabel="e2"]', '[data-node="placer"]'],
+        text: "The Placer checks the harness against the runtime's capabilities, before any compute exists.",
+      },
+      {
+        on: ['[data-node="placer"]', '[data-edge="e3"]', '[data-node="controller"]'],
+        text: "The Controller takes the turn and mints a fencing token, so a superseded incarnation cannot write.",
+      },
+      {
+        on: ['[data-node="controller"]', '[data-edge="e7"]', '[data-elabel="e7"]', '[data-node="runtime"]', '[data-edge="e9"]', '[data-elabel="e9"]', '[data-zone="sandbox"]'],
+        text: "The Runtime SPI creates or restores a sandbox. Swap the backend and nothing above this line changes.",
+      },
+      {
+        on: ['[data-node="controller"]', '[data-edge="e4"]', '[data-elabel="e4"]', '[data-zone="sandbox"]', '[data-node="harness"]'],
+        text: "The harness runs exactly one turn over a single bidirectional stream, emitting typed events.",
+      },
+      {
+        on: ['[data-node="controller"]', '[data-edge="e5"]', '[data-elabel="e5"]', '[data-node="model"]'],
+        text: "The harness asks for a completion, and the <strong>host</strong> makes the call. Notice the sandbox has no arrow to the provider.",
+        hold: 3600,
+      },
+      {
+        on: ['[data-node="controller"]', '[data-edge="e6"]', '[data-elabel="e6"]', '[data-node="journal"]'],
+        text: "The completion is journaled on the way back. That is why a replay never needs the provider again.",
+        hold: 3600,
+      },
+    ];
+
+    root.classList.add("is-animating");
+
+    let i = 0;
+    let timer = 0;
+    let running = false;
+
+    const tick = () => {
+      root
+        .querySelectorAll(".arch__node, .arch__edge, .arch__elabel, .arch__zone")
+        .forEach((e) => e.classList.remove("is-on"));
+      const frame = frames[i];
+      for (const sel of frame.on) root.querySelector(sel)?.classList.add("is-on");
+      caption.innerHTML = frame.text;
+      stepLabel.textContent = `${i + 1} / ${frames.length}`;
+
+      const hold = frame.hold ?? 2600;
+      i = (i + 1) % frames.length;
+      timer = window.setTimeout(tick, hold);
+    };
+
+    new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting && !running) {
+            running = true;
+            i = 0;
+            tick();
+          } else if (!e.isIntersecting && running) {
+            running = false;
+            clearTimeout(timer);
+          }
+        }
+      },
+      { threshold: 0.2 },
+    ).observe(root);
+  }
+</script>
+
+<style>
+  .arch {
+    margin: 0;
+    padding: 1rem 1rem 0.75rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 10px;
+    background: var(--sl-color-black);
+  }
+
+  .arch__head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .arch__step {
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    font-size: 0.75rem;
+    color: var(--sl-color-accent-high);
+    padding: 0.1rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--sl-color-accent) 45%, transparent);
+    border-radius: 999px;
+  }
+
+  .arch__legend {
+    margin-left: auto;
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--sl-color-gray-3);
+  }
+
+  .arch__svg {
+    width: 100%;
+    height: auto;
+  }
+
+  .arch__zone rect {
+    fill: none;
+    stroke: var(--sl-color-gray-5);
+    stroke-width: 1;
+    stroke-dasharray: 4 4;
+  }
+
+  .arch__zone text {
+    fill: var(--sl-color-gray-4);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+  }
+
+  .arch__node rect {
+    fill: var(--sl-color-gray-6);
+    stroke: var(--sl-color-gray-4);
+    stroke-width: 1.5;
+  }
+
+  .arch__node text {
+    fill: var(--sl-color-white);
+    font-size: 14px;
+    text-anchor: middle;
+  }
+
+  .arch__node--side rect {
+    stroke: #8957e5;
+  }
+
+  .arch__node--key rect {
+    stroke: #d29922;
+  }
+
+  .arch__node--runtime rect,
+  .arch__node--sandbox rect {
+    stroke: #3fb950;
+  }
+
+  .arch__edge {
+    fill: none;
+    stroke: var(--sl-color-gray-4);
+    stroke-width: 1.8;
+  }
+
+  .arch__edge--dashed {
+    stroke-dasharray: 5 4;
+  }
+
+  .arch__head-fill {
+    fill: var(--sl-color-gray-4);
+  }
+
+  .arch__elabel {
+    fill: var(--sl-color-gray-3);
+    font-size: 11px;
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+  }
+
+  .arch__elabel--key {
+    fill: #d29922;
+  }
+
+  .arch__caption {
+    margin-top: 0.5rem;
+    min-height: 3em;
+    font-size: var(--sl-text-sm);
+    line-height: 1.5;
+    color: var(--sl-color-gray-2);
+  }
+
+  .arch__caption code {
+    font-size: 0.9em;
+  }
+
+  /* Animated: everything dims, and only the parts in the current step light up. */
+  .arch.is-animating .arch__node rect,
+  .arch.is-animating .arch__edge,
+  .arch.is-animating .arch__elabel,
+  .arch.is-animating .arch__zone {
+    opacity: 0.26;
+    transition: opacity 0.35s ease;
+  }
+
+  .arch.is-animating .arch__node text {
+    opacity: 0.4;
+    transition: opacity 0.35s ease;
+  }
+
+  .arch.is-animating .arch__node.is-on rect,
+  .arch.is-animating .arch__node.is-on text,
+  .arch.is-animating .arch__edge.is-on,
+  .arch.is-animating .arch__elabel.is-on,
+  .arch.is-animating .arch__zone.is-on {
+    opacity: 1;
+  }
+
+  .arch.is-animating .arch__node.is-on rect {
+    fill: color-mix(in srgb, var(--sl-color-accent) 22%, var(--sl-color-gray-6));
+  }
+
+  .arch.is-animating .arch__edge.is-on {
+    stroke: var(--sl-color-accent-high);
+    stroke-width: 2.4;
+  }
+
+  .arch.is-animating .arch__edge--key.is-on {
+    stroke: #e3a008;
+  }
+
+  @media (max-width: 50rem) {
+    .arch__caption {
+      min-height: 4.5em;
+    }
+
+    .arch__legend {
+      display: none;
+    }
+  }
+</style>

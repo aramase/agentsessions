@@ -1,0 +1,396 @@
+---
+// The landing page's centrepiece: a terminal that plays a live turn, then replays it.
+//
+// The claim is structural, not a benchmark, so the meter counts provider calls (1, then 0) rather
+// than asserting wall-clock numbers that depend on somebody's hardware. Pacing carries the speed
+// difference; the counter carries the claim.
+//
+// The two phases are separate "screens" stacked in the same box, so the panel stays the height of
+// one screen instead of reserving space for both. Progressive enhancement: every row is real
+// markup, visible by default, so without JS this degrades to a plain stacked transcript. The
+// script adds `is-animating`, which overlays the screens and hides the rows to reveal on a
+// timeline.
+---
+
+<div class="term" data-demo>
+  <div class="term__chrome">
+    <span class="term__dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="term__title">agentsessions</span>
+    <span class="term__meter">provider calls <b data-calls>0</b></span>
+  </div>
+
+  <div class="term__body">
+    <pre class="term__screen" data-screen="a"><code><span class="term__row term__row--cmd"><span class="term__sigil">$</span><span data-cmd="a">agentctl exec --input "hello world"</span><span class="term__caret" data-caret="a"></span></span><span class="term__row" data-line="a0">session sess-6ff29e8d93d3a4c65f6f38bc</span><span class="term__row" data-line="a1"><b>seq=1</b>   EVENT_INPUT  user: hello world</span><span class="term__row term__row--wait" data-wait><span class="term__spin"></span>calling provider</span><span class="term__row" data-line="a2"><b>seq=2</b>   EVENT_MODEL_CALL</span><span class="term__row" data-line="a3"><b>seq=3</b>   EVENT_OUTPUT  assistant: echo:hello world</span><span class="term__row" data-line="a4"><b>seq=4</b>   EVENT_END</span><span class="term__row term__note" data-line="a5">one turn, journaled and hash-chained</span></code></pre>
+
+    <pre class="term__screen" data-screen="b"><code><span class="term__row term__row--cmd"><span class="term__sigil">$</span><span data-cmd="b">agentctl replay --session sess-6ff29e8d</span><span class="term__caret" data-caret="b"></span></span><span class="term__row" data-line="b1"><b>seq=1</b>   EVENT_INPUT  user: hello world</span><span class="term__row" data-line="b2"><b>seq=2</b>   EVENT_MODEL_CALL</span><span class="term__row" data-line="b3"><b>seq=3</b>   EVENT_OUTPUT  assistant: echo:hello world</span><span class="term__row" data-line="b4"><b>seq=4</b>   EVENT_END</span><span class="term__row term__note term__note--win" data-line="b5">byte-identical, and the provider was never called</span></code></pre>
+  </div>
+</div>
+
+<script>
+  const root = document.querySelector<HTMLElement>("[data-demo]");
+
+  if (root && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const calls = root.querySelector<HTMLElement>("[data-calls]")!;
+    const wait = root.querySelector<HTMLElement>("[data-wait]")!;
+    const screenA = root.querySelector<HTMLElement>('[data-screen="a"]')!;
+    const screenB = root.querySelector<HTMLElement>('[data-screen="b"]')!;
+    const cmdA = root.querySelector<HTMLElement>('[data-cmd="a"]')!;
+    const cmdB = root.querySelector<HTMLElement>('[data-cmd="b"]')!;
+    const caretA = root.querySelector<HTMLElement>('[data-caret="a"]')!;
+    const caretB = root.querySelector<HTMLElement>('[data-caret="b"]')!;
+    const line = (k: string) => root.querySelector<HTMLElement>(`[data-line="${k}"]`)!;
+
+    const textA = cmdA.textContent ?? "";
+    const textB = cmdB.textContent ?? "";
+    const SPEED = 32;
+
+    root.classList.add("is-animating");
+
+    let timers: number[] = [];
+    let running = false;
+    const at = (ms: number, fn: () => void) => timers.push(window.setTimeout(fn, ms));
+    const show = (el: HTMLElement) => el.classList.add("is-shown");
+    const hide = (el: HTMLElement) => el.classList.remove("is-shown");
+
+    const reset = () => {
+      timers.forEach(clearTimeout);
+      timers = [];
+      root.querySelectorAll<HTMLElement>(".term__row").forEach(hide);
+      hide(wait);
+      hide(caretA);
+      hide(caretB);
+      hide(screenB);
+      show(screenA);
+      cmdA.textContent = "";
+      cmdB.textContent = "";
+      calls.textContent = "0";
+      calls.classList.remove("is-hot", "is-cool");
+    };
+
+    /** Types `text` into `el` one character at a time; returns the time typing ends. */
+    const type = (el: HTMLElement, text: string, start: number) => {
+      for (let i = 1; i <= text.length; i++) {
+        at(start + i * SPEED, () => {
+          el.textContent = text.slice(0, i);
+        });
+      }
+      return start + text.length * SPEED;
+    };
+
+    const play = () => {
+      reset();
+      let t = 400;
+
+      show(screenA.querySelector<HTMLElement>(".term__row--cmd")!);
+      show(caretA);
+      t = type(cmdA, textA, t) + 320;
+
+      at(t, () => show(line("a0")));
+      at((t += 260), () => show(line("a1")));
+
+      // The pause here is the cost being paid: a real provider round-trip.
+      at((t += 220), () => show(wait));
+      at((t += 1500), () => {
+        hide(wait);
+        show(line("a2"));
+        calls.textContent = "1";
+        calls.classList.add("is-hot");
+      });
+      at((t += 320), () => show(line("a3")));
+      at((t += 240), () => show(line("a4")));
+      at((t += 240), () => show(line("a5")));
+
+      // Phase two swaps screens, the way clearing a terminal would, so the panel never has to be
+      // tall enough to hold both transcripts at once.
+      at((t += 1700), () => {
+        hide(caretA);
+        hide(screenA);
+        show(screenB);
+        show(screenB.querySelector<HTMLElement>(".term__row--cmd")!);
+        show(caretB);
+        calls.textContent = "0";
+        calls.classList.remove("is-hot");
+      });
+      t = type(cmdB, textB, t + 220) + 300;
+
+      at((t += 160), () => {
+        for (const k of ["b1", "b2", "b3", "b4"]) show(line(k));
+        calls.classList.add("is-cool");
+      });
+      at((t += 380), () => show(line("b5")));
+      at((t += 3800), play);
+    };
+
+    // Animate only while on screen, so the page costs nothing in a background tab.
+    new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting && !running) {
+            running = true;
+            play();
+          } else if (!e.isIntersecting && running) {
+            running = false;
+            reset();
+          }
+        }
+      },
+      { threshold: 0.25 },
+    ).observe(root);
+  }
+</script>
+
+<style>
+  .term {
+    --term-bg: #0d1117;
+    --term-fg: #c9d1d9;
+    --term-dim: #6e7681;
+    --term-accent: #58a6ff;
+    --term-good: #3fb950;
+
+    position: relative;
+    margin: 0 0 0.5rem;
+    border-radius: 10px;
+    background: var(--term-bg);
+    border: 1px solid #30363d;
+    box-shadow: 0 16px 44px -26px rgb(0 0 0 / 0.7);
+    overflow: hidden;
+    text-align: left;
+  }
+
+  /* A slow sheen across the top edge, so the panel reads as live rather than a screenshot. */
+  .term::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--term-accent), transparent);
+    opacity: 0.55;
+    animation: term-sheen 6s ease-in-out infinite;
+  }
+
+  @keyframes term-sheen {
+    0%,
+    100% {
+      transform: translateX(-60%);
+    }
+    50% {
+      transform: translateX(60%);
+    }
+  }
+
+  .term__chrome {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.5rem 0.8rem;
+    border-bottom: 1px solid #21262d;
+    background: #161b22;
+  }
+
+  .term__dots {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .term__dots i {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+  }
+
+  .term__dots i:nth-child(1) {
+    background: #ff5f57;
+  }
+
+  .term__dots i:nth-child(2) {
+    background: #febc2e;
+  }
+
+  .term__dots i:nth-child(3) {
+    background: #28c840;
+  }
+
+  .term__title {
+    font-size: 0.78rem;
+    color: var(--term-dim);
+  }
+
+  .term__meter {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--term-dim);
+  }
+
+  .term__meter b {
+    min-width: 1.6rem;
+    padding: 0.08rem 0.4rem;
+    border-radius: 999px;
+    text-align: center;
+    font-size: 0.8rem;
+    background: #21262d;
+    color: var(--term-fg);
+    transition:
+      background 0.3s ease,
+      color 0.3s ease,
+      transform 0.3s ease;
+  }
+
+  .term__meter b.is-hot {
+    background: rgb(219 109 40 / 0.18);
+    color: #e3a008;
+    transform: scale(1.1);
+  }
+
+  .term__meter b.is-cool {
+    background: rgb(63 185 80 / 0.16);
+    color: var(--term-good);
+    transform: scale(1.1);
+  }
+
+  .term__body {
+    position: relative;
+    padding: 0.85rem 1rem 1rem;
+  }
+
+  .term__screen {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    font-size: 0.82rem;
+    line-height: 1.7;
+    color: var(--term-fg);
+    overflow-x: auto;
+  }
+
+  .term__screen code {
+    display: block;
+    background: none;
+    padding: 0;
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+  }
+
+  .term__row {
+    display: block;
+    white-space: pre;
+  }
+
+  .term__row b {
+    color: var(--term-dim);
+    font-weight: 400;
+  }
+
+  .term__row--cmd {
+    color: #fff;
+  }
+
+  .term__sigil {
+    color: var(--term-good);
+    margin-right: 0.55rem;
+  }
+
+  .term__caret {
+    display: none;
+    width: 8px;
+    height: 1.05em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: var(--term-accent);
+    animation: term-blink 1.1s step-end infinite;
+  }
+
+  .term__caret.is-shown {
+    display: inline-block;
+  }
+
+  @keyframes term-blink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+  }
+
+  .term__row--wait {
+    color: var(--term-dim);
+  }
+
+  .term__spin {
+    display: inline-block;
+    width: 0.75em;
+    height: 0.75em;
+    margin-right: 0.5em;
+    border: 2px solid #30363d;
+    border-top-color: var(--term-accent);
+    border-radius: 50%;
+    animation: term-spin 0.7s linear infinite;
+  }
+
+  @keyframes term-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .term__note {
+    color: var(--term-dim);
+    font-style: italic;
+  }
+
+  .term__note--win {
+    color: var(--term-good);
+    font-style: normal;
+  }
+
+  /* Animated: the two screens overlay in one box, sized to the taller of them, so swapping phases
+     costs no layout shift and leaves no dead space. */
+  .term.is-animating .term__body {
+    min-height: 12.6rem;
+  }
+
+  .term.is-animating .term__screen {
+    position: absolute;
+    inset: 0.85rem 1rem 1rem;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .term.is-animating .term__screen.is-shown {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .term.is-animating .term__row {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+
+  .term.is-animating .term__row.is-shown {
+    opacity: 1;
+    transform: none;
+    transition:
+      opacity 0.18s ease,
+      transform 0.18s ease;
+  }
+
+  @media (max-width: 40rem) {
+    .term__screen {
+      font-size: 0.68rem;
+    }
+
+    .term.is-animating .term__body {
+      min-height: 10.5rem;
+    }
+
+    .term__title {
+      display: none;
+    }
+  }
+</style>

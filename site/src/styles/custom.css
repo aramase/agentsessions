@@ -1,0 +1,139 @@
+/* Starlight's defaults carry most of this. What follows is only what the content needs:
+   a readable accent, and a terminal block that looks like output rather than source. */
+
+:root {
+  /* Slate blue: distinct from the purple most agent tooling has settled on, and it keeps
+     contrast on both themes without tuning per-mode. */
+  --sl-color-accent-low: #10243e;
+  --sl-color-accent: #2d6cdf;
+  --sl-color-accent-high: #b3cdfb;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #c7d9f7;
+  --sl-color-accent: #1b52b8;
+  --sl-color-accent-high: #10243e;
+}
+
+/* The hero tagline is the one sentence that has to land, so give it room to breathe. */
+.hero .tagline {
+  font-size: clamp(1.05rem, 2.2vw, 1.35rem);
+  line-height: 1.55;
+  max-width: 44ch;
+}
+
+/* Tables on this site are comparisons (capability tiers, surface status), not data dumps.
+   Left-aligned with generous padding reads better than the default density. */
+.sl-markdown-content table {
+  display: table;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.sl-markdown-content th,
+.sl-markdown-content td {
+  text-align: left;
+  padding: 0.6rem 0.8rem;
+  vertical-align: top;
+}
+
+/* ---- landing page ---------------------------------------------------------------------- */
+
+/* A soft accent glow behind the hero, so the splash page has depth without a hero image. */
+[data-has-hero] main {
+  position: relative;
+}
+
+[data-has-hero] main::before {
+  content: "";
+  position: absolute;
+  top: -16rem;
+  left: 50%;
+  width: min(120rem, 190vw);
+  height: 34rem;
+  transform: translateX(-50%);
+  background: radial-gradient(
+    ellipse at 50% 40%,
+    color-mix(in srgb, var(--sl-color-accent) 20%, transparent),
+    transparent 62%
+  );
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* The splash template is built for marketing pages with little content and spaces everything
+   accordingly. This page is dense, so tighten the vertical rhythm throughout. */
+[data-has-hero] .hero {
+  padding-block: clamp(1rem, 4vw, 2.5rem) 0;
+  gap: 1.5rem;
+}
+
+[data-has-hero] .hero .tagline {
+  margin-block: 0;
+}
+
+[data-has-hero] .hero .actions {
+  margin-top: 0.25rem;
+}
+
+[data-has-hero] .content-panel {
+  padding-block: 1rem;
+  border-top: 0;
+}
+
+[data-has-hero] .sl-markdown-content > * + * {
+  margin-top: 1.1rem;
+}
+
+[data-has-hero] .sl-markdown-content h2 {
+  margin-top: 2.25rem;
+  margin-bottom: 0.6rem;
+  font-size: var(--sl-text-2xl);
+}
+
+/* Starlight hides its "Section titled ..." affordance behind an anchor; on a landing page the
+   headings are signposts rather than link targets, so drop the extra affordance. */
+[data-has-hero] .sl-markdown-content h2 + p {
+  margin-top: 0.4rem;
+}
+
+[data-has-hero] .card-grid {
+  gap: 0.9rem;
+  margin-top: 1rem;
+}
+
+[data-has-hero] .card {
+  padding: 1rem;
+}
+
+[data-has-hero] .card .title {
+  font-size: var(--sl-text-base);
+}
+
+[data-has-hero] .card .body {
+  font-size: var(--sl-text-sm);
+  line-height: 1.6;
+  margin-top: 0.35rem;
+}
+
+/* Cards are the page's main rhythm, so give them a hover state rather than leaving them inert. */
+.card {
+  transition:
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.22s ease,
+    box-shadow 0.22s ease;
+}
+
+.card:hover {
+  transform: translateY(-3px);
+  border-color: color-mix(in srgb, var(--sl-color-accent) 55%, var(--sl-color-gray-5));
+  box-shadow: 0 12px 28px -18px color-mix(in srgb, var(--sl-color-accent) 70%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .card:hover {
+    transform: none;
+    transition: none;
+  }
+}

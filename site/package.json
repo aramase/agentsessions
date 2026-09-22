@@ -1,0 +1,25 @@
+{
+  "name": "site",
+  "type": "module",
+  "version": "0.0.1",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "sync": "node hack/sync-docs.mjs",
+    "dev": "npm run sync && astro dev",
+    "build": "npm run sync && astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.42.0",
+    "asciinema-player": "^3.17.0",
+    "astro": "^7.3.2",
+    "astro-mermaid": "^2.1.0",
+    "mermaid": "^11.17.2"
+  },
+  "allowScripts": {
+    "esbuild": true
+  }
+}

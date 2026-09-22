@@ -1,0 +1,177 @@
+---
+title: agentsessions
+description: A neutral contract for durable agent sessions. Replay a run byte-for-byte without calling a model, fork it, and verify the record with a tool you wrote yourself.
+template: splash
+editUrl: false
+hero:
+  tagline: Run an agent once. Replay it byte-for-byte without calling a model, branch it from any point, and hand an auditor a record they can verify themselves.
+  actions:
+    - text: Quickstart
+      link: /agentsessions/quickstart/
+      icon: right-arrow
+    - text: Read the docs
+      link: /agentsessions/concepts/
+      icon: open-book
+      variant: minimal
+    - text: GitHub
+      link: https://github.com/aramase/agentsessions
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import ReplayDemo from '../../components/ReplayDemo.astro';
+import SessionFlow from '../../components/SessionFlow.astro';
+import ArchFlow from '../../components/ArchFlow.astro';
+import Cast from '../../components/Cast.astro';
+import Reveal from '../../components/Reveal.astro';
+
+<ReplayDemo />
+
+<Reveal>
+Most frameworks log what an agent did. `agentsessions` keeps the run itself: an append-only,
+hash-chained journal that reconstructs the session exactly, with no provider in the loop.
+</Reveal>
+
+<Reveal>
+## How a turn runs
+
+Almost every framework lets the agent call the provider, so the completion exists only in the
+agent's memory and the log can describe a run but never rebuild it. Here the **host** makes the
+call.
+
+<ArchFlow />
+
+<CardGrid>
+  <Card title="Replay is exact, and free" icon="rocket">
+    Recorded completions come from the log, so a replay is the same bytes rather than a similar
+    answer. Zero provider calls, covered in CI.
+  </Card>
+  <Card title="Fork is not a re-run" icon="random">
+    Children inherit the parent's prefix, so a fan-out starts from identical state at no model
+    cost instead of drifting.
+  </Card>
+  <Card title="Neutral, and enforced" icon="seti:plan">
+    No provider SDK anywhere, and CI asserts the core links no backend vendor. Neutrality is a
+    build failure, not a promise.
+  </Card>
+</CardGrid>
+</Reveal>
+
+<Reveal>
+## What a session does over time
+
+<SessionFlow />
+</Reveal>
+
+<Reveal>
+## On Kubernetes, a session outlives its pod
+
+No substrate and no memory snapshot here: just `agentsessionsd`, a PersistentVolume, and a plain
+Deployment. The pod is deleted mid-session, and a different pod replays the session byte-for-byte
+and continues it. That is the whole claim, recorded against a real cluster.
+
+<Cast
+  src="/agentsessions/casts/pod-resume.cast"
+  title="kind cluster — pod deleted, session survives"
+  caption="Recorded with <code>hack/demos/pod-resume.sh</code> against a kind cluster running <code>deploy/kubernetes/agentsessionsd.yaml</code>. The replay after the pod dies is served from the journal, so the model is called zero times."
+/>
+</Reveal>
+
+<Reveal>
+## The surface you build against
+
+Three contracts, one neutral wire form with a Go SPI. `Event` is shared by the log and the harness
+stream, so what is journaled is exactly what the harness emitted.
+
+<CardGrid>
+  <Card title="Sessions" icon="seti:config">
+    ```
+    CreateSession   Exec      Fork
+    GetSession      Replay    Suspend
+    ListSessions              Resume
+    ```
+  </Card>
+  <Card title="Harness" icon="seti:robot">
+    ```
+    Describe  the static contract
+    Run       drive one turn,
+              emitting typed events
+    ```
+  </Card>
+  <Card title="Runtime" icon="seti:shell">
+    ```
+    Create    Restore   Stop
+    Snapshot  Fork      Status
+              Capabilities
+    ```
+  </Card>
+</CardGrid>
+
+`agentctl` is a thin shell over the same Go client your code would use, so each command is one call
+on that API. With no `--server` it runs an embedded host over a local sqlite journal.
+
+| | | |
+| --- | --- | --- |
+| `create` new session | `list` a project | `get` one session |
+| `exec` a turn | `replay` free, no provider | `fork` at a seq |
+| `suspend` release compute | `resume` continue | `version` build info |
+</Reveal>
+
+<Reveal>
+## Where a session can run
+
+A harness declares what it needs to survive a resume; a runtime declares what it can provide.
+`CanPlace` refuses an impossible pairing **before** provisioning compute.
+
+| Tier | Needs | Runs on |
+| --- | --- | --- |
+| `STATELESS_REPLAY` | Nothing beyond the log | Anything, including a plain pod |
+| `REQUIRES_MEMORY_SNAPSHOT` | RAM captured and restored | Memory-snapshot-capable compute |
+
+**`runtime/local`** is filesystem-only and refuses a memory-snapshot harness rather than resuming
+it wrongly. **`runtime/substrate`** runs both tiers against a real cluster on every pull request,
+on gVisor and on a micro-VM. Kata, Cloud Hypervisor, and plain pods fit the same SPI but are not
+shipped here.
+</Reveal>
+
+<Reveal>
+## Get started
+
+```bash
+go install github.com/aramase/agentsessions/cmd/agentctl@latest
+```
+
+Signed archives and container images are on the
+[latest release](https://github.com/aramase/agentsessions/releases/latest).
+
+<CardGrid>
+  <LinkCard title="Quickstart" href="/agentsessions/quickstart/"
+    description="A turn, a free replay, a fork, suspend and resume, and an independent audit of the chain." />
+  <LinkCard title="Concepts" href="/agentsessions/concepts/"
+    description="Sessions, typed events, incarnations, fences, resumability, and capabilities." />
+  <LinkCard title="How you interact with it" href="/agentsessions/interaction-model/"
+    description="Which seam to build against, and what each one is for." />
+  <LinkCard title="Writing a harness" href="/agentsessions/harness-authoring/"
+    description="Implement Describe and Run, and get durability for free." />
+  <LinkCard title="Architecture" href="/agentsessions/architecture/"
+    description="The host, the log, placement, and how the pieces fit." />
+  <LinkCard title="Running on agent-substrate" href="/agentsessions/substrate-conformance/"
+    description="Both capability tiers on a real cluster, on gVisor and a micro-VM." />
+  <LinkCard title="Observability" href="/agentsessions/observability/"
+    description="Structured logs, request correlation, and what to watch." />
+  <LinkCard title="Security posture" href="/agentsessions/security/"
+    description="What is and is not protected today. Read before exposing a host." />
+  <LinkCard title="API reference" href="/agentsessions/api-reference/"
+    description="Generated from the proto: every message, field, and RPC." />
+  <LinkCard title="FAQ" href="/agentsessions/faq/"
+    description="Why not just a transcript, why fencing, and other recurring questions." />
+</CardGrid>
+
+:::caution[Pre-1.0, and not yet secured]
+No authentication, authorization, or transport security. `IdentityRef` is recorded as provenance
+and never enforced, `project` is a filter rather than a tenancy boundary, and `DeleteSession` and
+`Cancel` are declared in the proto but not implemented. `agentsessions.v1` is a proto namespace,
+not a stability promise.
+:::
+</Reveal>
