@@ -1,0 +1,115 @@
+# agentsessionsd on plain Kubernetes: the Sessions API over a durable sqlite journal on a
+# PersistentVolume. No substrate, no memory snapshots. Sessions survive pod death because the
+# journal does, and the host replays it.
+#
+# This deploys the published image as-is, which is built with the local runtime and the reference
+# echo harness. To serve your own harness you build your own binary; harnesses are registered at
+# build time. See docs/deployment.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentsessions
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentsessionsd-journal
+  namespace: agentsessions
+  labels:
+    app: agentsessionsd
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentsessionsd
+  namespace: agentsessions
+  labels:
+    app: agentsessionsd
+spec:
+  selector:
+    app: agentsessionsd
+  ports:
+    - name: grpc
+      port: 8080
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentsessionsd
+  namespace: agentsessions
+  labels:
+    app: agentsessionsd
+spec:
+  replicas: 1
+  # The journal is the single writer for a session and the PVC is ReadWriteOnce, so the old pod
+  # must release the volume before the new one mounts it. Recreate, never RollingUpdate.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agentsessionsd
+  template:
+    metadata:
+      labels:
+        app: agentsessionsd
+    spec:
+      securityContext:
+        # The image runs as uid 65532; fsGroup makes the mounted journal writable by it.
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agentsessionsd
+          image: ghcr.io/aramase/agentsessions/agentsessionsd:v0.1.2
+          args:
+            # Must bind 0.0.0.0: the default is 127.0.0.1, which accepts nothing from outside
+            # the pod's network namespace and makes the Service look broken.
+            - --addr=0.0.0.0:8080
+            - --journal=/var/lib/agentsessions/sessions.db
+          ports:
+            - name: grpc
+              containerPort: 8080
+          # The server registers no gRPC health service, so a TCP probe is the honest check:
+          # it proves the listener is up, not that a turn can run.
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: journal
+              mountPath: /var/lib/agentsessions
+            # The local runtime opens a unix socket under os.TempDir() for each incarnation, so a
+            # read-only root filesystem needs a writable /tmp or every Exec fails at listen().
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: journal
+          persistentVolumeClaim:
+            claimName: agentsessionsd-journal
+        - name: tmp
+          emptyDir: {}
