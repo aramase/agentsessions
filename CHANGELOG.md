@@ -7,6 +7,19 @@ provide.
 
 ## Unreleased
 
+## v0.1.2
+
+A patch release. No API change; it exists because the v0.1.1 images were unusable.
+
+### Fixed
+
+- Container images are published under the documented names. v0.1.1 pushed them as
+  `agentsessionsd-<md5>` and `harnessnode-<md5>`, because ko derives a repository from the Go import
+  path and appends a hash unless told not to, so every name in the README and release notes returned
+  404.
+- Image tags carry the `v` prefix, matching the git tag and the release archives, so one string
+  identifies a release everywhere.
+
 ## v0.1.1
 
 A patch release. No API change; the reason to take it is the toolchain and the images.

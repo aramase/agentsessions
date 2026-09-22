@@ -68,9 +68,15 @@ kos:
     user: "65532:65532"
     repositories:
       - ghcr.io/aramase/agentsessions/agentsessionsd
+    # Without this, ko derives the repository from the Go import path and appends an MD5 hash under
+    # KO_DOCKER_REPO, which is how v0.1.1 published agentsessionsd-<hash> and left the documented
+    # name a 404.
+    bare: true
     platforms: [linux/amd64, linux/arm64]
     tags:
-      - "{{ .Version }}"
+      # v-prefixed to match the git tag and the release archives, so one string identifies a
+      # release everywhere.
+      - "{{ .Tag }}"
       # Only a final release moves the floating tag: a prerelease pushing it would silently upgrade
       # anyone tracking latest.
       - "{{ if not .Prerelease }}latest{{ end }}"
@@ -91,9 +97,10 @@ kos:
     base_image: gcr.io/distroless/static-debian13
     repositories:
       - ghcr.io/aramase/agentsessions/harnessnode
+    bare: true
     platforms: [linux/amd64, linux/arm64]
     tags:
-      - "{{ .Version }}"
+      - "{{ .Tag }}"
       - "{{ if not .Prerelease }}latest{{ end }}"
     creation_time: "{{ .CommitTimestamp }}"
     ko_data_creation_time: "{{ .CommitTimestamp }}"
@@ -181,8 +188,8 @@ release:
     **Container images**
 
     ```
-    ghcr.io/aramase/agentsessions/agentsessionsd:{{ .Version }}
-    ghcr.io/aramase/agentsessions/harnessnode:{{ .Version }}
+    ghcr.io/aramase/agentsessions/agentsessionsd:{{ .Tag }}
+    ghcr.io/aramase/agentsessions/harnessnode:{{ .Tag }}
     ```
 
     Multi-arch (amd64 and arm64), built with ko from the tagged source, each with an SBOM pushed

@@ -117,8 +117,8 @@ Full docs live in [`docs/`](docs/README.md):
 ## Container images
 
 ```
-ghcr.io/aramase/agentsessions/agentsessionsd:v0.1.1
-ghcr.io/aramase/agentsessions/harnessnode:v0.1.1
+ghcr.io/aramase/agentsessions/agentsessionsd:v0.1.2
+ghcr.io/aramase/agentsessions/harnessnode:v0.1.2
 ```
 
 Multi-arch, built from the tagged source with no Dockerfile. `agentsessionsd` is the Sessions
