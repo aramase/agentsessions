@@ -6,7 +6,10 @@ import mermaid from "astro-mermaid";
 // The docs under ../docs are the source of truth; hack/sync-docs.mjs copies them into
 // src/content/docs before a build, so the site cannot drift from the repository.
 export default defineConfig({
-  site: "https://aramase.github.io",
+  // aramase.github.io carries a user-level custom domain, so project pages are served from
+  // anishram.com and the github.io address only 301s there. Canonical links, og:url, and the
+  // sitemap have to name the address people actually land on.
+  site: "https://anishram.com",
   base: "/agentsessions",
   integrations: [
     // Must come before starlight so mermaid code fences are transformed before rendering.
