@@ -137,3 +137,73 @@
     transition: none;
   }
 }
+
+/* ---- figure panels --------------------------------------------------------------------- */
+
+/* The landing page stacks four figures: two terminals, two diagrams, and a recording. Two of
+   them are inherently dark (a terminal and an asciinema capture), so the whole set uses one
+   fixed dark surface rather than theme colours. Before this they mixed: the diagrams followed
+   the Starlight theme, so in light mode they were white between two dark terminals, and in dark
+   mode they matched the page background and lost their edge entirely. */
+.panel {
+  --p-bg: #0d1117;
+  --p-chrome: #161b22;
+  --p-line: #30363d;
+  --p-rule: #21262d;
+  --p-dim: #6e7681;
+  --p-fg: #c9d1d9;
+  --p-white: #ffffff;
+  --p-accent: #58a6ff;
+  --p-good: #3fb950;
+  --p-warn: #d29922;
+  --p-violet: #a371f7;
+
+  position: relative;
+  margin: 0;
+  border: 1px solid var(--p-line);
+  border-radius: 10px;
+  background: var(--p-bg);
+  overflow: hidden;
+  box-shadow: 0 16px 44px -30px rgb(0 0 0 / 0.75);
+}
+
+/* Shared chrome bar, so a diagram and a terminal read as the same kind of object. */
+.panel__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--p-rule);
+  background: var(--p-chrome);
+}
+
+.panel__label {
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--p-dim);
+}
+
+.panel__note {
+  margin-left: auto;
+  font-size: 0.7rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--p-dim);
+}
+
+.panel__caption {
+  padding: 0.6rem 0.9rem 0.75rem;
+  border-top: 1px solid var(--p-rule);
+  font-size: var(--sl-text-sm);
+  line-height: 1.55;
+  color: #9da7b3;
+}
+
+.panel__caption code {
+  background: rgb(110 118 129 / 0.2);
+  color: #c9d1d9;
+  border: 0;
+  font-size: 0.9em;
+}

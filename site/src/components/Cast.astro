@@ -15,11 +15,11 @@ const { src, title, caption, poster = "npt:0:04", idle = 1.5 } = Astro.props;
 const id = `cast-${src.replace(/\W+/g, "-")}`;
 ---
 
-<figure class="cast">
-  <div class="cast__head">
+<figure class="cast panel">
+  <div class="panel__bar">
     <span class="cast__dots" aria-hidden="true"><i></i><i></i><i></i></span>
-    <span class="cast__title">{title}</span>
-    <span class="cast__badge">recorded</span>
+    <span class="panel__label">{title}</span>
+    <span class="panel__note cast__badge">recorded</span>
   </div>
   <div
     class="cast__player"
@@ -30,7 +30,7 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
     data-idle={String(idle)}
   >
   </div>
-  {caption && <figcaption class="cast__caption" set:html={caption} />}
+  {caption && <figcaption class="panel__caption" set:html={caption} />}
 </figure>
 
 <script>
@@ -51,9 +51,9 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
             // Long pauses are real (a rollout takes time) but boring to watch, so cap them.
             idleTimeLimit: Number(el.dataset.idle),
             poster: el.dataset.poster,
-            fit: "width",
+            fit: false,
             terminalFontSize: "13px",
-            theme: "dracula",
+            theme: "asciinema",
           });
           obs.unobserve(entry.target);
         }
@@ -65,23 +65,6 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
 </script>
 
 <style is:global>
-  .cast {
-    margin: 0;
-    border: 1px solid #30363d;
-    border-radius: 10px;
-    overflow: hidden;
-    background: #0d1117;
-  }
-
-  .cast__head {
-    display: flex;
-    align-items: center;
-    gap: 0.7rem;
-    padding: 0.5rem 0.8rem;
-    border-bottom: 1px solid #21262d;
-    background: #161b22;
-  }
-
   .cast__dots {
     display: flex;
     gap: 0.4rem;
@@ -105,37 +88,27 @@ const id = `cast-${src.replace(/\W+/g, "-")}`;
     background: #28c840;
   }
 
-  .cast__title {
-    font-size: 0.78rem;
-    color: #8b949e;
-  }
-
   .cast__badge {
-    margin-left: auto;
-    font-size: 0.65rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #3fb950;
+    color: var(--p-good);
     border: 1px solid rgb(63 185 80 / 0.35);
     border-radius: 999px;
     padding: 0.05rem 0.45rem;
   }
 
-  .cast__player {
-    min-height: 8rem;
-  }
-
-  /* The player ships its own dark palette; drop its border so it sits flush in our chrome. */
-  .cast .ap-player {
+  /* The player ships its own surface colour, which drew a visible lighter rectangle inside the
+     panel. Make it transparent so the recording sits on the same background as everything else. */
+  .cast .ap-player,
+  .cast .ap-terminal {
+    background: transparent;
     border: 0;
     font-feature-settings: normal;
   }
 
-  .cast__caption {
-    padding: 0.6rem 0.9rem 0.75rem;
-    font-size: var(--sl-text-sm);
-    line-height: 1.5;
-    color: var(--sl-color-gray-2);
-    border-top: 1px solid #21262d;
+  /* The player reserves its own height once it initialises; this only covers the pre-init gap. */
+  .cast__player {
+    min-height: 12rem;
+    display: flex;
+    justify-content: center;
+    padding: 0.5rem 0;
   }
 </style>

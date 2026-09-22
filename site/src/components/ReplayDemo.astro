@@ -12,11 +12,11 @@
 // timeline.
 ---
 
-<div class="term" data-demo>
-  <div class="term__chrome">
+<div class="term panel" data-demo>
+  <div class="panel__bar term__chrome">
     <span class="term__dots" aria-hidden="true"><i></i><i></i><i></i></span>
-    <span class="term__title">agentsessions</span>
-    <span class="term__meter">provider calls <b data-calls>0</b></span>
+    <span class="panel__label">agentsessions</span>
+    <span class="panel__note term__meter">provider calls <b data-calls>0</b></span>
   </div>
 
   <div class="term__body">
@@ -130,7 +130,8 @@
             play();
           } else if (!e.isIntersecting && running) {
             running = false;
-            reset();
+            timers.forEach(clearTimeout);
+            timers = [];
           }
         }
       },
@@ -141,19 +142,11 @@
 
 <style>
   .term {
-    --term-bg: #0d1117;
-    --term-fg: #c9d1d9;
-    --term-dim: #6e7681;
-    --term-accent: #58a6ff;
-    --term-good: #3fb950;
+    --term-fg: var(--p-fg);
+    --term-dim: var(--p-dim);
+    --term-accent: var(--p-accent);
+    --term-good: var(--p-good);
 
-    position: relative;
-    margin: 0 0 0.5rem;
-    border-radius: 10px;
-    background: var(--term-bg);
-    border: 1px solid #30363d;
-    box-shadow: 0 16px 44px -26px rgb(0 0 0 / 0.7);
-    overflow: hidden;
     text-align: left;
   }
 
@@ -176,15 +169,6 @@
     50% {
       transform: translateX(60%);
     }
-  }
-
-  .term__chrome {
-    display: flex;
-    align-items: center;
-    gap: 0.7rem;
-    padding: 0.5rem 0.8rem;
-    border-bottom: 1px solid #21262d;
-    background: #161b22;
   }
 
   .term__dots {
@@ -210,20 +194,10 @@
     background: #28c840;
   }
 
-  .term__title {
-    font-size: 0.78rem;
-    color: var(--term-dim);
-  }
-
   .term__meter {
-    margin-left: auto;
     display: inline-flex;
     align-items: center;
     gap: 0.45rem;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
-    color: var(--term-dim);
   }
 
   .term__meter b {
@@ -389,7 +363,7 @@
       min-height: 10.5rem;
     }
 
-    .term__title {
+    .panel__label {
       display: none;
     }
   }

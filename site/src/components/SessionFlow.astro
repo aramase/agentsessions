@@ -10,10 +10,10 @@
 // adds `is-animating` to hide pieces and reveal them on a timeline.
 ---
 
-<figure class="flow" data-flow>
-  <div class="flow__head">
+<figure class="flow panel" data-flow>
+  <div class="panel__bar">
     <span class="flow__step" data-step>exec</span>
-    <span class="flow__compute">compute <b data-compute>LIVE</b></span>
+    <span class="panel__note flow__compute">compute <b data-compute>LIVE</b></span>
   </div>
 
   <svg viewBox="0 0 900 232" role="img" aria-labelledby="flow-title" class="flow__svg">
@@ -66,7 +66,7 @@
     <text class="flow__rail flow__rail--child" data-rail="child" x="14" y="150">fork</text>
   </svg>
 
-  <figcaption class="flow__caption" data-caption>
+  <figcaption class="panel__caption flow__caption" data-caption>
     Each turn appends typed, hash-chained records to one append-only log.
   </figcaption>
 </figure>
@@ -179,7 +179,8 @@
             play();
           } else if (!e.isIntersecting && running) {
             running = false;
-            reset();
+            timers.forEach(clearTimeout);
+            timers = [];
           }
         }
       },
@@ -190,18 +191,7 @@
 
 <style>
   .flow {
-    margin: 0;
-    padding: 1rem 1rem 0.75rem;
-    border: 1px solid var(--sl-color-gray-5);
-    border-radius: 10px;
-    background: var(--sl-color-black);
-  }
-
-  .flow__head {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    margin-bottom: 0.4rem;
+    padding: 0;
   }
 
   .flow__step {
@@ -209,9 +199,9 @@
     font-size: 0.78rem;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: var(--sl-color-accent-high);
+    color: var(--p-accent);
     padding: 0.1rem 0.5rem;
-    border: 1px solid color-mix(in srgb, var(--sl-color-accent) 45%, transparent);
+    border: 1px solid color-mix(in srgb, var(--p-accent) 45%, transparent);
     border-radius: 999px;
   }
 
@@ -220,7 +210,7 @@
     font-size: 0.7rem;
     letter-spacing: 0.07em;
     text-transform: uppercase;
-    color: var(--sl-color-gray-3);
+    color: var(--p-dim);
   }
 
   .flow__compute b {
@@ -234,14 +224,16 @@
   }
 
   .flow__svg {
+    display: block;
     width: 100%;
     height: auto;
+    padding: 1rem 1rem 0.5rem;
     overflow: visible;
   }
 
   .flow__link {
     fill: none;
-    stroke: var(--sl-color-gray-4);
+    stroke: #484f58;
     stroke-width: 2;
   }
 
@@ -250,8 +242,8 @@
   }
 
   .flow__node circle {
-    fill: var(--sl-color-gray-6);
-    stroke: var(--sl-color-accent);
+    fill: #161b22;
+    stroke: var(--p-accent);
     stroke-width: 2;
     transition:
       fill 0.25s ease,
@@ -260,14 +252,14 @@
   }
 
   .flow__node text {
-    fill: var(--sl-color-white);
+    fill: var(--p-white);
     font-family: var(--sl-font-mono, ui-monospace, monospace);
     font-size: 15px;
     text-anchor: middle;
   }
 
   .flow__node .flow__cap {
-    fill: var(--sl-color-gray-3);
+    fill: var(--p-dim);
     font-size: 12px;
     letter-spacing: 0.03em;
   }
@@ -282,12 +274,12 @@
 
   /* Highlight used by the replay sweep: the same records, re-read, nothing new. */
   .flow__node.is-hot circle {
-    fill: color-mix(in srgb, var(--sl-color-accent) 35%, var(--sl-color-gray-6));
-    filter: drop-shadow(0 0 6px color-mix(in srgb, var(--sl-color-accent) 70%, transparent));
+    fill: color-mix(in srgb, var(--p-accent) 35%, #161b22);
+    filter: drop-shadow(0 0 6px color-mix(in srgb, var(--p-accent) 70%, transparent));
   }
 
   .flow__rail {
-    fill: var(--sl-color-gray-3);
+    fill: var(--p-dim);
     font-family: var(--sl-font-mono, ui-monospace, monospace);
     font-size: 12px;
     letter-spacing: 0.08em;
@@ -309,10 +301,9 @@
   }
 
   .flow__caption {
-    margin-top: 0.35rem;
     min-height: 2.6em;
     font-size: var(--sl-text-sm);
-    color: var(--sl-color-gray-2);
+    color: #9da7b3;
     line-height: 1.5;
   }
 
