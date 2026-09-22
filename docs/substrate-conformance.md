@@ -131,8 +131,9 @@ children share pages.
 The first green run measured a 3-way fan-out at **5.06s total, ~1.69s per child**, on a kind cluster
 with the counter harness's small memory image.
 
-TODO(spike): that is one snapshot size on one sandbox class, so it bounds nothing. Measuring the
-curve against snapshot size, and whether a paused (node-local) parent changes it, is still open.
+Read that as an existence proof, not a bound: it is one snapshot size on one sandbox class. How
+the cost scales with snapshot size, and whether a paused (node-local) parent changes it, has not
+been measured.
 
 ## Placing an actor is idempotent
 
@@ -218,8 +219,9 @@ machinery on 2026-08-14; what remains is dataplane work. When h2c ingress lands,
 delete both concessions above and dial the router, because upstream is unambiguous that direct actor
 dialing is not a supported interface.
 
-TODO(spike): once #484's h2c ingress lands, what does the harness transport need in order to reach an
-actor through the router, and does bidirectional streaming survive the CONNECT tunnel?
+Two things have to be established before that swap: what the harness transport needs in order to
+reach an actor through the router, and whether bidirectional streaming survives the CONNECT tunnel.
+Neither has been tested yet.
 
 
 ## The suite (`integrations/substrate/e2e`)
