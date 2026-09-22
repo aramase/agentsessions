@@ -125,6 +125,16 @@ Multi-arch, built from the tagged source with no Dockerfile. `agentsessionsd` is
 server; `harnessnode` is the in-sandbox harness the substrate manifests in `deploy/substrate/`
 reference. The server runs as uid 65532, so mount its journal path writable.
 
+## Install
+
+```bash
+go install github.com/aramase/agentsessions/cmd/agentctl@latest
+go install github.com/aramase/agentsessions/cmd/agentsessionsd@latest
+```
+
+Signed archives for linux/darwin on amd64/arm64, with checksums and SBOMs, are on the
+[latest release](https://github.com/aramase/agentsessions/releases/latest).
+
 ## Try it
 
 ```bash
