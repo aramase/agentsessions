@@ -83,13 +83,14 @@ jobs:
 
       # ko builds the images straight from the Go packages and pushes them, so the release publishes
       # binaries and images from one run rather than leaving a deployment to build its own.
-      # setup-ko exports KO_DOCKER_REPO, which takes precedence over the per-image repositories in
-      # .goreleaser.yaml: with it set, ko either appends an MD5 hash to the derived name (v0.1.1) or,
-      # with bare, collapses every image onto the one repo (v0.1.2). Installing the binary without
-      # the login step leaves repositories: authoritative.
-      - uses: ko-build/setup-ko@v0.9
-        with:
-          skip-login: true
+      #
+      # Installed directly rather than through ko-build/setup-ko, because that action always exports
+      # KO_DOCKER_REPO and the variable takes precedence over the per-image repositories in
+      # .goreleaser.yaml. With it set, ko appended an MD5 hash to the derived name (v0.1.1) or, with
+      # bare, collapsed both images onto the one repo (v0.1.2). goreleaser only needs the binary on
+      # PATH; docker/login-action below supplies the registry credential.
+      - name: install ko
+        run: go install github.com/google/ko@latest
 
       - name: log in to ghcr.io
         uses: docker/login-action@v3
