@@ -209,6 +209,8 @@ service Sessions {
   rpc CreateSession(CreateSessionRequest) returns (Session);
   rpc GetSession(GetSessionRequest) returns (Session);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  // Not implemented: the server returns UNIMPLEMENTED. Declared so the delete path can land
+  // without a breaking change to the service.
   rpc DeleteSession(DeleteSessionRequest) returns (Session);
 
   // Exec runs one execution/turn. The live stream carries committed LogRecords plus
@@ -216,8 +218,9 @@ service Sessions {
   rpc Exec(ExecRequest) returns (stream ExecUpdate);
   rpc Replay(ReplayRequest) returns (stream LogRecord);
 
-  // In-flight control.
-  rpc Cancel(CancelRequest) returns (Session); // cancel the in-flight execution
+  // In-flight control: cancel the running execution. Not implemented: the server returns
+  // UNIMPLEMENTED.
+  rpc Cancel(CancelRequest) returns (Session);
 
   // Compute-layer durability. There is no warm Pause: no Runtime backend implements a
   // node-local warm checkpoint, so a session goes straight from live to a cold snapshot.

@@ -9,27 +9,57 @@ The command output below is real, captured from a live run.
 
 ## Prerequisites
 
-- Go 1.26 or newer.
+- Nothing, to follow sections 1 through 7. Go 1.26 or newer only if you build from source.
 - Optional, for the independent chain verifier: `buf`, `python3`, and `sqlite3`.
 
-## Build
+## Install
+
+Pick one. `agentctl` is the client CLI; `agentsessionsd` is the standalone server used from section
+8 onwards.
+
+```bash
+# Go toolchain
+go install github.com/aramase/agentsessions/cmd/agentctl@latest
+go install github.com/aramase/agentsessions/cmd/agentsessionsd@latest
+```
+
+```bash
+# Release archive: both binaries, for linux/darwin on amd64/arm64.
+# Checksums and SBOMs are published alongside it.
+VERSION=v0.1.2
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+curl -sSL "https://github.com/aramase/agentsessions/releases/download/${VERSION}/agentsessions_${VERSION#v}_${OS}_${ARCH}.tar.gz" \
+  | tar xz agentctl agentsessionsd
+```
+
+Container images are published for the server and the harness node:
+
+```bash
+docker run --rm ghcr.io/aramase/agentsessions/agentsessionsd:v0.1.2 --help
+```
+
+To build from a checkout instead:
 
 ```bash
 git clone https://github.com/aramase/agentsessions
 cd agentsessions
-go build ./...
-go build -o /tmp/agentctl ./cmd/agentctl
+go build -o agentctl ./cmd/agentctl
+go build -o agentsessionsd ./cmd/agentsessionsd
 ```
 
-`agentctl` is the client CLI. By default it starts an embedded Sessions gRPC server over a local unix
-socket, backed by a sqlite journal on disk, and drives it as a real gRPC client. Pass `--server <addr>`
-to drive a remote controller instead. The journal path defaults to `agentsessions.db`; the examples use
+The examples below assume both binaries are on your `PATH`; if you built them into the working
+directory, prefix the commands with `./`.
+
+`agentctl` starts an embedded Sessions gRPC server over a local unix socket, backed by a sqlite
+journal on disk, and drives it as a real gRPC client. Pass `--server <addr>` to drive a remote
+controller instead. The journal path defaults to `agentsessions.db`; the examples use
 `--journal /tmp/qs.db` to keep it out of the way.
 
 ## 1. Run a turn
 
 ```bash
-/tmp/agentctl exec --journal /tmp/qs.db --input "hello world"
+agentctl exec --journal /tmp/qs.db --input "hello world"
 ```
 
 ```
@@ -55,7 +85,7 @@ SID=sess-6ff29e8d93d3a4c65f6f38bc   # replace with your UID
 Pass `--session` to add a turn to the same session. The sequence numbers keep climbing in the one log.
 
 ```bash
-/tmp/agentctl exec --journal /tmp/qs.db --session "$SID" --input "how are you"
+agentctl exec --journal /tmp/qs.db --session "$SID" --input "how are you"
 ```
 
 ```
@@ -72,7 +102,7 @@ On replay the controller serves each recorded model result from the journal and 
 (invariant I1), so the reconstruction is byte-identical and free.
 
 ```bash
-/tmp/agentctl replay --journal /tmp/qs.db --session "$SID"
+agentctl replay --journal /tmp/qs.db --session "$SID"
 ```
 
 ```
@@ -98,7 +128,7 @@ parent is untouched. (A `REQUIRES_MEMORY_SNAPSHOT` harness checkpoints the paren
 [FAQ](faq.md#what-are-fork-semantics).)
 
 ```bash
-/tmp/agentctl fork --journal /tmp/qs.db --session "$SID" --at 4
+agentctl fork --journal /tmp/qs.db --session "$SID" --at 4
 ```
 
 ```
@@ -110,14 +140,14 @@ its label, so a listing does not fill up with rows that all read the same thing.
 label a fan-out, one comma-separated name per child:
 
 ```bash
-/tmp/agentctl fork --journal /tmp/qs.db --session "$SID" --at 4 --count 2 --names "optimistic,pessimistic"
+agentctl fork --journal /tmp/qs.db --session "$SID" --at 4 --count 2 --names "optimistic,pessimistic"
 ```
 
 Replay the child: it carries the parent's first four events, plus a `LIFECYCLE` record marking the fork.
 
 ```bash
 CHILD=sess-c63948fb24b628057b7b0920   # replace with your child UID
-/tmp/agentctl replay --journal /tmp/qs.db --session "$CHILD"
+agentctl replay --journal /tmp/qs.db --session "$CHILD"
 ```
 
 ```
@@ -131,7 +161,7 @@ seq=5   EVENT_LIFECYCLE
 Now exec on the child. It diverges from the parent while the parent still ends at seq 8.
 
 ```bash
-/tmp/agentctl exec --journal /tmp/qs.db --session "$CHILD" --input "child-only turn"
+agentctl exec --journal /tmp/qs.db --session "$CHILD" --input "child-only turn"
 ```
 
 ```
@@ -150,9 +180,9 @@ memory-capable backend the same commands restore RAM instead. The CLI is identic
 Use a fresh session so the sequence numbers are easy to follow:
 
 ```bash
-SID2=$(/tmp/agentctl exec --journal /tmp/sr.db --input "before suspend" | head -1 | cut -d' ' -f2)
-/tmp/agentctl suspend --journal /tmp/sr.db --session "$SID2"
-/tmp/agentctl resume  --journal /tmp/sr.db --session "$SID2"
+SID2=$(agentctl exec --journal /tmp/sr.db --input "before suspend" | head -1 | cut -d' ' -f2)
+agentctl suspend --journal /tmp/sr.db --session "$SID2"
+agentctl resume  --journal /tmp/sr.db --session "$SID2"
 ```
 
 ```
@@ -170,8 +200,8 @@ events in the log, so the compute history is auditable alongside the conversatio
 restart case: nothing is held in memory between commands.
 
 ```bash
-/tmp/agentctl create --journal /tmp/qs.db --project acme --name triage --model echo-1
-/tmp/agentctl list   --journal /tmp/qs.db --project acme
+agentctl create --journal /tmp/qs.db --project acme --name triage --model echo-1
+agentctl list   --journal /tmp/qs.db --project acme
 ```
 
 ```
@@ -185,7 +215,7 @@ Sessions are returned newest first and filtered on an exact `--project`. `list` 
 you; `--page-size` only changes how many are fetched per request.
 
 ```bash
-/tmp/agentctl list --journal /tmp/sr.db --project default
+agentctl list --journal /tmp/sr.db --project default
 ```
 
 ```
@@ -203,7 +233,11 @@ implementation can verify it. `hack/verify_chain.sh` records a real journal, the
 verifier that reproduces the Go hash, audits the full chain, and confirms a tampered record fails
 closed.
 
+This one is a script in the repository rather than a shipped binary, so it needs a checkout:
+
 ```bash
+git clone https://github.com/aramase/agentsessions
+cd agentsessions
 ./hack/verify_chain.sh
 ```
 
@@ -217,10 +251,8 @@ Everything above uses the built-in echo model, so it runs with no key. To drive 
 the Sessions API with `agentsessionsd` and give it an OpenAI-compatible endpoint.
 
 ```bash
-go build -o /tmp/agentsessionsd ./cmd/agentsessionsd
-
 export OPENAI_API_KEY=sk-...
-/tmp/agentsessionsd \
+agentsessionsd \
   --addr 127.0.0.1:8080 \
   --journal /tmp/real.db \
   --model gpt-4o-mini
@@ -235,7 +267,7 @@ gateway, a self-hosted server, or a proxy fronting another provider. Endpoints t
 the envelope are reached with two more flags, rather than by rebuilding the server:
 
 ```bash
-/tmp/agentsessionsd \
+agentsessionsd \
   --model gpt-4o \
   --model-base-url https://example.com/openai/deployments/gpt-4o \
   --model-path '/chat/completions?api-version=2024-10-21' \
@@ -251,13 +283,13 @@ owns the call.
 Then drive it with the same CLI, using `--server` instead of a local journal:
 
 ```bash
-/tmp/agentctl exec --server 127.0.0.1:8080 --input "name three prime numbers"
+agentctl exec --server 127.0.0.1:8080 --input "name three prime numbers"
 ```
 
 The interesting part is what happens next. Replay the session and watch your provider dashboard:
 
 ```bash
-/tmp/agentctl replay --server 127.0.0.1:8080 --session "$SID"
+agentctl replay --server 127.0.0.1:8080 --session "$SID"
 ```
 
 The turn comes back byte for byte, and the provider is not called. Same for `fork`: branching a

@@ -43,12 +43,15 @@ type SessionsClient interface {
 	CreateSession(ctx context.Context, in *CreateSessionRequest, opts ...grpc.CallOption) (*Session, error)
 	GetSession(ctx context.Context, in *GetSessionRequest, opts ...grpc.CallOption) (*Session, error)
 	ListSessions(ctx context.Context, in *ListSessionsRequest, opts ...grpc.CallOption) (*ListSessionsResponse, error)
+	// Not implemented: the server returns UNIMPLEMENTED. Declared so the delete path can land
+	// without a breaking change to the service.
 	DeleteSession(ctx context.Context, in *DeleteSessionRequest, opts ...grpc.CallOption) (*Session, error)
 	// Exec runs one execution/turn. The live stream carries committed LogRecords plus
 	// ephemeral Deltas; Replay re-delivers committed records only (read-only).
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecUpdate], error)
 	Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogRecord], error)
-	// In-flight control.
+	// In-flight control: cancel the running execution. Not implemented: the server returns
+	// UNIMPLEMENTED.
 	Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*Session, error)
 	// Compute-layer durability. There is no warm Pause: no Runtime backend implements a
 	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
@@ -193,12 +196,15 @@ type SessionsServer interface {
 	CreateSession(context.Context, *CreateSessionRequest) (*Session, error)
 	GetSession(context.Context, *GetSessionRequest) (*Session, error)
 	ListSessions(context.Context, *ListSessionsRequest) (*ListSessionsResponse, error)
+	// Not implemented: the server returns UNIMPLEMENTED. Declared so the delete path can land
+	// without a breaking change to the service.
 	DeleteSession(context.Context, *DeleteSessionRequest) (*Session, error)
 	// Exec runs one execution/turn. The live stream carries committed LogRecords plus
 	// ephemeral Deltas; Replay re-delivers committed records only (read-only).
 	Exec(*ExecRequest, grpc.ServerStreamingServer[ExecUpdate]) error
 	Replay(*ReplayRequest, grpc.ServerStreamingServer[LogRecord]) error
-	// In-flight control.
+	// In-flight control: cancel the running execution. Not implemented: the server returns
+	// UNIMPLEMENTED.
 	Cancel(context.Context, *CancelRequest) (*Session, error)
 	// Compute-layer durability. There is no warm Pause: no Runtime backend implements a
 	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.

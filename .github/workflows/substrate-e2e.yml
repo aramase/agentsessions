@@ -4,8 +4,8 @@
 #
 # The suite is an ordinary Go test package (integrations/substrate/e2e), compiled with `go test -c`
 # and run as an in-cluster Job. In-cluster is required, not preferred: the atenet mesh is HTTP/1.1-only
-# to actors (Q1 resolved), so a harness is reached by a direct gRPC dial to the actor's PodIP:80 (like
-# google/ax), not the router. A new capability is therefore a new Test function — not another driver
+# to actors (Q1 resolved), so a harness is reached by a direct gRPC dial to the actor's PodIP:80,
+# not the router. A new capability is therefore a new Test function — not another driver
 # binary, another Job manifest, and another copy of the polling shell.
 #
 # It runs in two passes against one cluster so the cheap tier fails fast:

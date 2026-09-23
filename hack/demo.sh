@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Live demo: agentsessions resumes a session on a FRESH Kubernetes pod via deterministic replay of
-# a durable journal — no substrate, no memory snapshot. This is the capability google/ax marks TODO.
+# a durable journal — no substrate, no memory snapshot.
 #
 #   exec on pod A  ->  kubectl delete pod  ->  fresh pod B replays the journal byte-identically
 #

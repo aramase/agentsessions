@@ -12,6 +12,34 @@ out="docs/api-reference.md"
 
 buf generate --template buf.gen.docs.yaml
 
+# protoc-gen-doc writes multi-line proto comments into table cells verbatim. A newline ends a
+# markdown table, so every row after such a comment is dropped from the rendered page: the Sessions
+# service table silently lost Suspend, Resume, and Fork. Fold continuation lines back into the cell.
+python3 - "${out}" <<'PYFOLD'
+import re
+import sys
+
+path = sys.argv[1]
+lines = open(path).read().split("\n")
+out, i = [], 0
+while i < len(lines):
+    line = lines[i]
+    if line.startswith("|") and not line.rstrip().endswith("|"):
+        parts = [line.rstrip()]
+        i += 1
+        while i < len(lines) and not lines[i].rstrip().endswith("|"):
+            parts.append(lines[i].strip())
+            i += 1
+        if i < len(lines):
+            parts.append(lines[i].strip())
+        merged = " ".join(p for p in parts if p)
+        out.append(re.sub(r"\s+", " ", merged))
+    else:
+        out.append(line)
+    i += 1
+open(path, "w").write("\n".join(out))
+PYFOLD
+
 # protoc-gen-doc emits no provenance header. A 1300-line file with no banner invites
 # hand-edits that the next regeneration silently reverts, so prepend one.
 tmp="$(mktemp)"

@@ -909,9 +909,7 @@ reasoning) part. No seq; never hash-chained (§8, A2A TaskArtifactUpdateEvent).
 | resume_from_seq | [int64](#int64) |  | Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a harness knows what resuming from a sequence means for its own state. To re-read committed records after a disconnect, use Replay, which is the read path for exactly that. |
 | harness | [string](#string) |  | empty = session default |
 | config | [bytes](#bytes) |  | opaque per-execution config, passed through to Start.config |
-| expected_last_seq | [int64](#int64) | optional | Single-writer CAS: the host commits this execution&#39;s first event only if the log head equals expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log.
-
-It is optional because the guarantee should be opt-in rather than the price of a simple call. Unset means &#34;append at whatever the head is now&#34;, which is what a caller with a single writer wants. Set means the strict check, and 0 is a real value there: it asserts the session has no events yet. That distinction is why this carries explicit presence instead of treating 0 as &#34;unset&#34; -- a caller could not otherwise say &#34;this must be the first turn&#34;. |
+| expected_last_seq | [int64](#int64) | optional | Single-writer CAS: the host commits this execution&#39;s first event only if the log head equals expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log. It is optional because the guarantee should be opt-in rather than the price of a simple call. Unset means &#34;append at whatever the head is now&#34;, which is what a caller with a single writer wants. Set means the strict check, and 0 is a real value there: it asserts the session has no events yet. That distinction is why this carries explicit presence instead of treating 0 as &#34;unset&#34; -- a caller could not otherwise say &#34;this must be the first turn&#34;. |
 | deadline_unix | [int64](#int64) |  | optional execution deadline (unix seconds); host cancels past it |
 
 
@@ -930,9 +928,7 @@ ephemeral streaming Delta (transport only — not logged, not hash-chained).
 | ----- | ---- | ----- | ----------- |
 | record | [LogRecord](#agentsessions-v1-LogRecord) |  |  |
 | delta | [Delta](#agentsessions-v1-Delta) |  |  |
-| session | [Session](#agentsessions-v1-Session) |  | The session this execution runs against, sent as the FIRST frame of every Exec stream. It is how a caller learns the uid of a session Exec created for it, and it reports the cursor the turn started from, so a caller that wants the strict CAS on its next turn has the value without a separate GetSession.
-
-It is sent before the turn runs, so a failed execution still tells the caller which session it was against. A caller therefore sees this frame BEFORE any error, and must read the stream to completion rather than treating the first receive as the result. |
+| session | [Session](#agentsessions-v1-Session) | | The session this execution runs against, sent as the FIRST frame of every Exec stream. It is how a caller learns the uid of a session Exec created for it, and it reports the cursor the turn started from, so a caller that wants the strict CAS on its next turn has the value without a separate GetSession. It is sent before the turn runs, so a failed execution still tells the caller which session it was against. A caller therefore sees this frame BEFORE any error, and must read the stream to completion rather than treating the first receive as the result. |
 
 
 
@@ -952,9 +948,7 @@ It is sent before the turn runs, so a failed execution still tells the caller wh
 | count | [int32](#int32) |  | fan-out N children; must be 1..128, else INVALID_ARGUMENT |
 | identity | [IdentityRef](#agentsessions-v1-IdentityRef) |  | optional child principal |
 | labels | [ForkRequest.LabelsEntry](#agentsessions-v1-ForkRequest-LabelsEntry) | repeated |  |
-| child_names | [string](#string) | repeated | Display names for the children, in the order they are returned. Length must be 0 or exactly count, else INVALID_ARGUMENT.
-
-Left unset, a child&#39;s name is empty rather than a copy of the parent&#39;s. A fork inherits the parent&#39;s workload (project, harness, model) because that is what defines the run, but a name is a caller-supplied label the server has no basis to invent. Copying it makes a listing report N&#43;1 rows that claim to be the same session, and synthesizing one (&#34;&lt;parent&gt; fork 2&#34;) would put a presentation convention in the wire contract and be wrong the moment the same parent is forked by two separate calls. Lineage is already on the child as parent_uid and fork_seq, so a caller that wants a derived label can render one without the server denormalizing it into a string. |
+| child_names | [string](#string) | repeated | Display names for the children, in the order they are returned. Length must be 0 or exactly count, else INVALID_ARGUMENT. Left unset, a child&#39;s name is empty rather than a copy of the parent&#39;s. A fork inherits the parent&#39;s workload (project, harness, model) because that is what defines the run, but a name is a caller-supplied label the server has no basis to invent. Copying it makes a listing report N&#43;1 rows that claim to be the same session, and synthesizing one (&#34;&lt;parent&gt; fork 2&#34;) would put a presentation convention in the wire contract and be wrong the moment the same parent is forked by two separate calls. Lineage is already on the child as parent_uid and fork_seq, so a caller that wants a derived label can render one without the server denormalizing it into a string. |
 
 
 
@@ -1245,15 +1239,11 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 | CreateSession | [CreateSessionRequest](#agentsessions-v1-CreateSessionRequest) | [Session](#agentsessions-v1-Session) |  |
 | GetSession | [GetSessionRequest](#agentsessions-v1-GetSessionRequest) | [Session](#agentsessions-v1-Session) |  |
 | ListSessions | [ListSessionsRequest](#agentsessions-v1-ListSessionsRequest) | [ListSessionsResponse](#agentsessions-v1-ListSessionsResponse) |  |
-| DeleteSession | [DeleteSessionRequest](#agentsessions-v1-DeleteSessionRequest) | [Session](#agentsessions-v1-Session) |  |
+| DeleteSession | [DeleteSessionRequest](#agentsessions-v1-DeleteSessionRequest) | [Session](#agentsessions-v1-Session) | Not implemented: the server returns UNIMPLEMENTED. Declared so the delete path can land without a breaking change to the service. |
 | Exec | [ExecRequest](#agentsessions-v1-ExecRequest) | [ExecUpdate](#agentsessions-v1-ExecUpdate) stream | Exec runs one execution/turn. The live stream carries committed LogRecords plus ephemeral Deltas; Replay re-delivers committed records only (read-only). |
 | Replay | [ReplayRequest](#agentsessions-v1-ReplayRequest) | [LogRecord](#agentsessions-v1-LogRecord) stream |  |
-| Cancel | [CancelRequest](#agentsessions-v1-CancelRequest) | [Session](#agentsessions-v1-Session) | In-flight control.
-
-cancel the in-flight execution |
-| Suspend | [SuspendRequest](#agentsessions-v1-SuspendRequest) | [Session](#agentsessions-v1-Session) | Compute-layer durability. There is no warm Pause: no Runtime backend implements a node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
-
-cold, free worker |
+| Cancel | [CancelRequest](#agentsessions-v1-CancelRequest) | [Session](#agentsessions-v1-Session) | In-flight control: cancel the running execution. Not implemented: the server returns UNIMPLEMENTED. |
+| Suspend | [SuspendRequest](#agentsessions-v1-SuspendRequest) | [Session](#agentsessions-v1-Session) | Compute-layer durability. There is no warm Pause: no Runtime backend implements a node-local warm checkpoint, so a session goes straight from live to a cold snapshot. cold, free worker |
 | Resume | [ResumeRequest](#agentsessions-v1-ResumeRequest) | [Session](#agentsessions-v1-Session) |  |
 | Fork | [ForkRequest](#agentsessions-v1-ForkRequest) | [ForkResponse](#agentsessions-v1-ForkResponse) | The differentiator: branch a session at a sequence into one or more children. Forking a REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event lands on its chain) because the children are cloned from that snapshot; resume brings it back. |
 
