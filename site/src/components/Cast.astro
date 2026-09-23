@@ -1,0 +1,90 @@
+---
+// Embeds an asciinema recording of a real run.
+//
+// The player is bundled from npm rather than loaded from asciinema.org, so nothing is uploaded and
+// the page has no third-party dependency at runtime. The .cast files in public/casts are real
+// recordings produced by the scripts in hack/demos, not hand-written transcripts.
+interface Props {
+  src: string;
+  title: string;
+  caption?: string;
+  poster?: string;
+  idle?: number;
+}
+const { src, title, caption, poster = "npt:0:04", idle = 1.5 } = Astro.props;
+const id = `cast-${src.replace(/\W+/g, "-")}`;
+---
+
+<figure class="cast panel">
+  <div class="panel__bar">
+    <span class="panel__label">{title}</span>
+    <span class="panel__note cast__badge">recorded</span>
+  </div>
+  <div
+    class="cast__player"
+    id={id}
+    data-cast
+    data-src={src}
+    data-poster={poster}
+    data-idle={String(idle)}
+  >
+  </div>
+  {caption && <figcaption class="panel__caption" set:html={caption} />}
+</figure>
+
+<script>
+  import * as AsciinemaPlayer from "asciinema-player";
+  import "asciinema-player/dist/bundle/asciinema-player.css";
+
+  for (const el of document.querySelectorAll<HTMLElement>("[data-cast]")) {
+    const src = el.dataset.src!;
+    // Autoplay only once the recording scrolls into view, and only then create the player, so a
+    // page with several recordings does not start them all at load.
+    const observer = new IntersectionObserver(
+      (entries, obs) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          AsciinemaPlayer.create(src, el, {
+            autoPlay: true,
+            loop: true,
+            // Long pauses are real (a rollout takes time) but boring to watch, so cap them.
+            idleTimeLimit: Number(el.dataset.idle),
+            poster: el.dataset.poster,
+            fit: false,
+            terminalFontSize: "13px",
+            theme: "asciinema",
+          });
+          obs.unobserve(entry.target);
+        }
+      },
+      { threshold: 0.25 },
+    );
+    observer.observe(el);
+  }
+</script>
+
+<style is:global>
+  .cast__badge {
+    color: var(--p-good);
+    border: 1px solid rgb(63 185 80 / 0.35);
+    border-radius: 999px;
+    padding: 0.05rem 0.45rem;
+  }
+
+  /* The player ships its own surface colour, which drew a visible lighter rectangle inside the
+     panel. Make it transparent so the recording sits on the same background as everything else. */
+  .cast .ap-player,
+  .cast .ap-terminal {
+    background: transparent;
+    border: 0;
+    font-feature-settings: normal;
+  }
+
+  /* The player reserves its own height once it initialises; this only covers the pre-init gap. */
+  .cast__player {
+    min-height: 12rem;
+    display: flex;
+    justify-content: center;
+    padding: 0.5rem 0;
+  }
+</style>

@@ -2,9 +2,9 @@
 # PersistentVolume. No substrate, no memory snapshots. Sessions survive pod death because the
 # journal does, and the host replays it.
 #
-# This deploys the published image as-is, which is built with the local runtime and the reference
-# echo harness. To serve your own harness you build your own binary; harnesses are registered at
-# build time. See docs/deployment.md.
+# This deploys the published image as-is, which runs the local runtime and the reference harnesses
+# compiled into it: echo always, plus chat once a model is configured. To serve your own harness you
+# build your own binary, because harnesses are registered at build time.
 apiVersion: v1
 kind: Namespace
 metadata:

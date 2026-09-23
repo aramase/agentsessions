@@ -1,0 +1,254 @@
+/* Starlight's defaults carry most of this. What follows is only what the content needs:
+   a readable accent, and a terminal block that looks like output rather than source. */
+
+:root {
+  /* Slate blue: distinct from the purple most agent tooling has settled on, and it keeps
+     contrast on both themes without tuning per-mode. */
+  --sl-color-accent-low: #10243e;
+  --sl-color-accent: #2d6cdf;
+  --sl-color-accent-high: #b3cdfb;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #c7d9f7;
+  --sl-color-accent: #1b52b8;
+  --sl-color-accent-high: #10243e;
+}
+
+/* The hero tagline is the one sentence that has to land, so give it room to breathe. */
+.hero .tagline {
+  font-size: clamp(1.05rem, 2.2vw, 1.35rem);
+  line-height: 1.55;
+  max-width: 44ch;
+}
+
+/* Tables on this site are comparisons (capability tiers, surface status), not data dumps.
+   Left-aligned with generous padding reads better than the default density. */
+.sl-markdown-content table {
+  display: table;
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.sl-markdown-content th,
+.sl-markdown-content td {
+  text-align: left;
+  padding: 0.6rem 0.8rem;
+  vertical-align: top;
+}
+
+/* ---- landing page ---------------------------------------------------------------------- */
+
+/* A soft accent glow behind the hero, so the splash page has depth without a hero image. */
+[data-has-hero] main {
+  position: relative;
+}
+
+[data-has-hero] main::before {
+  content: "";
+  position: absolute;
+  top: -16rem;
+  left: 50%;
+  width: min(120rem, 190vw);
+  height: 34rem;
+  transform: translateX(-50%);
+  background: radial-gradient(
+    ellipse at 50% 40%,
+    color-mix(in srgb, var(--sl-color-accent) 20%, transparent),
+    transparent 62%
+  );
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* The splash template is built for marketing pages with little content and spaces everything
+   accordingly. This page is dense, so tighten the vertical rhythm throughout. */
+[data-has-hero] .hero {
+  padding-block: clamp(1rem, 4vw, 2.5rem) 0;
+  gap: 1.5rem;
+}
+
+[data-has-hero] .hero .tagline {
+  margin-block: 0;
+}
+
+[data-has-hero] .hero .actions {
+  margin-top: 0.25rem;
+}
+
+[data-has-hero] .content-panel {
+  padding-block: 1rem;
+  border-top: 0;
+}
+
+[data-has-hero] .sl-markdown-content > * + * {
+  margin-top: 1.1rem;
+}
+
+[data-has-hero] .sl-markdown-content h2 {
+  margin-top: 2.25rem;
+  margin-bottom: 0.6rem;
+  font-size: var(--sl-text-2xl);
+}
+
+/* Starlight hides its "Section titled ..." affordance behind an anchor; on a landing page the
+   headings are signposts rather than link targets, so drop the extra affordance. */
+[data-has-hero] .sl-markdown-content h2 + p {
+  margin-top: 0.4rem;
+}
+
+[data-has-hero] .card-grid {
+  gap: 0.9rem;
+  margin-top: 1rem;
+}
+
+[data-has-hero] .card {
+  padding: 1rem;
+}
+
+[data-has-hero] .card .title {
+  font-size: var(--sl-text-base);
+}
+
+[data-has-hero] .card .body {
+  font-size: var(--sl-text-sm);
+  line-height: 1.6;
+  margin-top: 0.35rem;
+}
+
+/* Cards are the page's main rhythm, so give them a hover state rather than leaving them inert. */
+.card {
+  transition:
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.22s ease,
+    box-shadow 0.22s ease;
+}
+
+.card:hover {
+  transform: translateY(-3px);
+  border-color: color-mix(in srgb, var(--sl-color-accent) 55%, var(--sl-color-gray-5));
+  box-shadow: 0 12px 28px -18px color-mix(in srgb, var(--sl-color-accent) 70%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .card:hover {
+    transform: none;
+    transition: none;
+  }
+}
+
+/* ---- figure panels --------------------------------------------------------------------- */
+
+/* The landing page stacks four figures: two terminals, two diagrams, and a recording. Two of
+   them are inherently dark (a terminal and an asciinema capture), so the whole set uses one
+   fixed dark surface rather than theme colours. Before this they mixed: the diagrams followed
+   the Starlight theme, so in light mode they were white between two dark terminals, and in dark
+   mode they matched the page background and lost their edge entirely. */
+.panel {
+  --p-bg: #0d1117;
+  --p-chrome: #161b22;
+  --p-line: #30363d;
+  --p-rule: #21262d;
+  --p-dim: #6e7681;
+  --p-fg: #c9d1d9;
+  --p-white: #ffffff;
+  --p-accent: #58a6ff;
+  --p-good: #3fb950;
+  --p-warn: #d29922;
+  --p-violet: #a371f7;
+
+  position: relative;
+  margin: 0;
+  border: 1px solid var(--p-line);
+  border-radius: 10px;
+  background: var(--p-bg);
+  overflow: hidden;
+  box-shadow: 0 16px 44px -30px rgb(0 0 0 / 0.75);
+}
+
+/* Shared chrome bar, so a diagram and a terminal read as the same kind of object. */
+.panel__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--p-rule);
+  background: var(--p-chrome);
+}
+
+.panel__label {
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--p-dim);
+}
+
+.panel__note {
+  margin-left: auto;
+  font-size: 0.7rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--p-dim);
+}
+
+.panel__caption {
+  padding: 0.6rem 0.9rem 0.75rem;
+  border-top: 1px solid var(--p-rule);
+  font-size: var(--sl-text-sm);
+  line-height: 1.55;
+  color: #9da7b3;
+}
+
+.panel__caption code {
+  background: rgb(110 118 129 / 0.2);
+  color: #c9d1d9;
+  border: 0;
+  font-size: 0.9em;
+}
+
+/* Figures carry their own chrome and caption, so they need more air than a paragraph does.
+   At the shared 1.1rem rhythm they collided with the heading or the sentence introducing them. */
+[data-has-hero] .sl-markdown-content > .panel,
+[data-has-hero] .sl-markdown-content > figure.panel {
+  margin-top: 1.75rem;
+  margin-bottom: 1.75rem;
+}
+
+/* A heading immediately followed by its figure, with no intervening prose, still needs the gap. */
+[data-has-hero] .sl-markdown-content h2 + .panel,
+[data-has-hero] .sl-markdown-content h2 + figure.panel {
+  margin-top: 1.5rem;
+}
+
+/* Stacked figures (the tier diagram under its cards) should not fuse into one block. */
+[data-has-hero] .sl-markdown-content .card-grid + .panel,
+[data-has-hero] .sl-markdown-content .card-grid + figure.panel {
+  margin-top: 1.75rem;
+}
+
+/* ---- hero heading ---------------------------------------------------------------------- */
+
+/* The heading carries a kicker and a claim rather than the project name, which the nav already
+   shows. Both live inside the h1 so the page still has exactly one top-level heading. */
+[data-has-hero] .hero h1 {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.hero-kicker {
+  font-size: var(--sl-text-sm);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sl-color-accent-high);
+}
+
+.hero-claim {
+  font-size: clamp(2.2rem, 5.5vw, 3.4rem);
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}

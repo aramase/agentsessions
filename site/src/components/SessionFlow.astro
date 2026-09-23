@@ -1,0 +1,349 @@
+---
+// An animated session graph: records appending, a replay sweeping the existing chain, a fork
+// branching off it, then suspend and resume.
+//
+// Every frame is a thing the system actually does, and the sequence numbers match real output:
+// a fork copies the parent's prefix and the child's first new record is the LIFECYCLE event at
+// seq 5, which is what `agentctl replay` prints on a freshly forked child.
+//
+// Progressive enhancement: the SVG renders the complete graph with no JS, and the script only
+// adds `is-animating` to hide pieces and reveal them on a timeline.
+---
+
+<figure class="flow panel" data-flow>
+  <div class="panel__bar">
+    <span class="flow__step" data-step>exec</span>
+    <span class="panel__note flow__compute">compute <b data-compute>LIVE</b></span>
+  </div>
+
+  <svg viewBox="0 0 900 232" role="img" aria-labelledby="flow-title" class="flow__svg">
+    <title id="flow-title">
+      A session log growing by four records, being replayed, forked into a child, then suspended
+      and resumed.
+    </title>
+
+    <!-- parent chain -->
+    <path class="flow__link" data-link="p2" d="M 97 66 H 188" pathLength="1"></path>
+    <path class="flow__link" data-link="p3" d="M 222 66 H 313" pathLength="1"></path>
+    <path class="flow__link" data-link="p4" d="M 347 66 H 438" pathLength="1"></path>
+    <path class="flow__link" data-link="p5" d="M 472 66 H 563" pathLength="1"></path>
+
+    <!-- fork: parent record 4 down into the child chain -->
+    <path class="flow__link flow__link--fork" data-link="fork" d="M 455 84 V 140 Q 455 176 491 176 H 563" pathLength="1"></path>
+    <path class="flow__link flow__link--fork" data-link="c6" d="M 597 176 H 688" pathLength="1"></path>
+
+    <g class="flow__node" data-node="p1">
+      <circle cx="80" cy="66" r="17"></circle><text x="80" y="71">1</text>
+      <text class="flow__cap" x="80" y="104">INPUT</text>
+    </g>
+    <g class="flow__node" data-node="p2">
+      <circle cx="205" cy="66" r="17"></circle><text x="205" y="71">2</text>
+      <text class="flow__cap" x="205" y="104">MODEL_CALL</text>
+    </g>
+    <g class="flow__node" data-node="p3">
+      <circle cx="330" cy="66" r="17"></circle><text x="330" y="71">3</text>
+      <text class="flow__cap" x="330" y="104">OUTPUT</text>
+    </g>
+    <g class="flow__node" data-node="p4">
+      <circle cx="455" cy="66" r="17"></circle><text x="455" y="71">4</text>
+      <text class="flow__cap" x="455" y="104">END</text>
+    </g>
+    <g class="flow__node flow__node--new" data-node="p5">
+      <circle cx="580" cy="66" r="17"></circle><text x="580" y="71">5</text>
+      <text class="flow__cap" x="580" y="104">resumed</text>
+    </g>
+
+    <g class="flow__node flow__node--child" data-node="c5">
+      <circle cx="580" cy="176" r="17"></circle><text x="580" y="181">5</text>
+      <text class="flow__cap" x="580" y="214">LIFECYCLE</text>
+    </g>
+    <g class="flow__node flow__node--child" data-node="c6">
+      <circle cx="705" cy="176" r="17"></circle><text x="705" y="181">6</text>
+      <text class="flow__cap" x="705" y="214">child turn</text>
+    </g>
+
+    <text class="flow__rail" data-rail="parent" x="14" y="40">session</text>
+    <text class="flow__rail flow__rail--child" data-rail="child" x="14" y="150">fork</text>
+  </svg>
+
+  <figcaption class="panel__caption flow__caption" data-caption>
+    Each turn appends typed, hash-chained records to one append-only log.
+  </figcaption>
+</figure>
+
+<script>
+  const root = document.querySelector<HTMLElement>("[data-flow]");
+
+  if (root && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const step = root.querySelector<HTMLElement>("[data-step]")!;
+    const compute = root.querySelector<HTMLElement>("[data-compute]")!;
+    const caption = root.querySelector<HTMLElement>("[data-caption]")!;
+    const el = (sel: string) => root.querySelector<SVGElement>(sel)!;
+    const node = (k: string) => el(`[data-node="${k}"]`);
+    const link = (k: string) => el(`[data-link="${k}"]`);
+    const childRail = el('[data-rail="child"]');
+
+    root.classList.add("is-animating");
+
+    let timers: number[] = [];
+    let running = false;
+    const at = (ms: number, fn: () => void) => timers.push(window.setTimeout(fn, ms));
+    const on = (e: Element) => e.classList.add("is-on");
+    const off = (e: Element) => e.classList.remove("is-on");
+
+    const phase = (name: string, text: string) => {
+      step.textContent = name;
+      caption.textContent = text;
+    };
+
+    const reset = () => {
+      timers.forEach(clearTimeout);
+      timers = [];
+      root.querySelectorAll(".flow__node, .flow__link, .flow__rail--child").forEach((e) => {
+        off(e);
+        e.classList.remove("is-hot", "is-cold");
+      });
+      compute.textContent = "LIVE";
+      compute.classList.remove("is-cold");
+      root.classList.remove("is-suspended");
+    };
+
+    const play = () => {
+      reset();
+      let t = 300;
+
+      // 1. exec: four records append in order, each linked to the last.
+      phase("exec", "Each turn appends typed, hash-chained records to one append-only log.");
+      at(t, () => on(node("p1")));
+      for (const [i, k] of ["p2", "p3", "p4"].entries()) {
+        at(t + 380 + i * 380, () => {
+          on(link(k));
+          on(node(k));
+        });
+      }
+      t += 380 * 3 + 500;
+
+      // 2. replay: no new records, just the existing chain re-read. The point is what does not
+      //    happen here, so nothing is appended and nothing is re-derived.
+      at(t, () =>
+        phase("replay", "Replay re-reads those records. The harness never runs, the provider is never called."),
+      );
+      for (const [i, k] of ["p1", "p2", "p3", "p4"].entries()) {
+        at(t + 120 + i * 150, () => node(k).classList.add("is-hot"));
+        at(t + 420 + i * 150, () => node(k).classList.remove("is-hot"));
+      }
+      t += 1400;
+
+      // 3. fork: the child inherits the prefix; its first new record is the LIFECYCLE at seq 5.
+      at(t, () => {
+        phase("fork", "A fork copies the prefix, so children start from identical state at zero model cost.");
+        on(childRail);
+        on(link("fork"));
+      });
+      at((t += 520), () => on(node("c5")));
+      at((t += 340), () => {
+        on(link("c6"));
+        on(node("c6"));
+      });
+      t += 700;
+
+      // 4. suspend: compute goes away, the log does not.
+      at(t, () => {
+        phase("suspend", "Compute is released. The log is the session, so nothing is lost by stopping.");
+        compute.textContent = "COLD";
+        compute.classList.add("is-cold");
+        root.classList.add("is-suspended");
+      });
+      t += 1600;
+
+      // 5. resume: compute returns and the same log keeps growing.
+      at(t, () => {
+        phase("resume", "Resume rehydrates from the snapshot or the log, and the same session continues.");
+        compute.textContent = "LIVE";
+        compute.classList.remove("is-cold");
+        root.classList.remove("is-suspended");
+      });
+      at((t += 620), () => {
+        on(link("p5"));
+        on(node("p5"));
+      });
+
+      at((t += 3200), play);
+    };
+
+    new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting && !running) {
+            running = true;
+            play();
+          } else if (!e.isIntersecting && running) {
+            running = false;
+            timers.forEach(clearTimeout);
+            timers = [];
+          }
+        }
+      },
+      { threshold: 0.2 },
+    ).observe(root);
+  }
+</script>
+
+<style>
+  .flow {
+    padding: 0;
+  }
+
+  .flow__step {
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    font-size: 0.78rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--p-accent);
+    padding: 0.1rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--p-accent) 45%, transparent);
+    border-radius: 999px;
+  }
+
+  .flow__compute {
+    margin-left: auto;
+    font-size: 0.7rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--p-dim);
+  }
+
+  .flow__compute b {
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    color: #3fb950;
+    transition: color 0.3s ease;
+  }
+
+  .flow__compute b.is-cold {
+    color: #6e7681;
+  }
+
+  .flow__svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    padding: 1rem 1rem 0.5rem;
+    overflow: visible;
+  }
+
+  .flow__link {
+    fill: none;
+    stroke: #484f58;
+    stroke-width: 2;
+  }
+
+  .flow__link--fork {
+    stroke-dasharray: 5 4;
+  }
+
+  .flow__node circle {
+    fill: #161b22;
+    stroke: var(--p-accent);
+    stroke-width: 2;
+    transition:
+      fill 0.25s ease,
+      stroke 0.25s ease,
+      filter 0.25s ease;
+  }
+
+  .flow__node text {
+    fill: var(--p-white);
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    font-size: 15px;
+    text-anchor: middle;
+  }
+
+  .flow__node .flow__cap {
+    fill: var(--p-dim);
+    font-size: 12px;
+    letter-spacing: 0.03em;
+  }
+
+  .flow__node--child circle {
+    stroke: #3fb950;
+  }
+
+  .flow__node--new circle {
+    stroke: #d29922;
+  }
+
+  /* Highlight used by the replay sweep: the same records, re-read, nothing new. */
+  .flow__node.is-hot circle {
+    fill: color-mix(in srgb, var(--p-accent) 35%, #161b22);
+    filter: drop-shadow(0 0 6px color-mix(in srgb, var(--p-accent) 70%, transparent));
+  }
+
+  .flow__rail {
+    fill: var(--p-dim);
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .flow__rail--child {
+    fill: #3fb950;
+  }
+
+  /* Suspended: compute is gone, but every record stays exactly where it was. That contrast is the
+     whole point, so the links dim and the nodes hold. */
+  .flow.is-suspended .flow__link {
+    opacity: 0.35;
+  }
+
+  .flow.is-suspended .flow__node circle {
+    fill: transparent;
+  }
+
+  .flow__caption {
+    min-height: 2.6em;
+    font-size: var(--sl-text-sm);
+    color: #9da7b3;
+    line-height: 1.5;
+  }
+
+  /* Animated: pieces start hidden and are revealed on the timeline. pathLength="1" makes the
+     draw-on trivial, since the dash maths is the same for every path length. */
+  .flow.is-animating .flow__node,
+  .flow.is-animating .flow__rail--child {
+    opacity: 0;
+  }
+
+  .flow.is-animating .flow__node.is-on,
+  .flow.is-animating .flow__rail--child.is-on {
+    opacity: 1;
+    transition: opacity 0.3s ease;
+  }
+
+  .flow.is-animating .flow__link:not(.flow__link--fork) {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+  }
+
+  .flow.is-animating .flow__link:not(.flow__link--fork).is-on {
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 0.45s ease;
+  }
+
+  /* The fork link keeps its dashed styling, and a repeating dash pattern cannot be drawn on with
+     stroke-dashoffset (that only shifts the dashes), so it fades in instead. */
+  .flow.is-animating .flow__link--fork {
+    opacity: 0;
+  }
+
+  .flow.is-animating .flow__link--fork.is-on {
+    opacity: 1;
+    transition: opacity 0.45s ease;
+  }
+
+  @media (max-width: 50rem) {
+    .flow__caption {
+      min-height: 4em;
+    }
+  }
+</style>

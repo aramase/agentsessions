@@ -1,0 +1,330 @@
+---
+// The request path for one turn, drawn across process boundaries.
+//
+// This exists to make the central claim visible rather than stated: the arrow to the provider
+// leaves the *host*, and the sandbox has no provider arrow at all. That is the whole reason a
+// replay needs no provider, and it is easier to see than to read.
+//
+// All three contracts appear, because leaving Runtime out made it look as though the Controller
+// talks to a sandbox that nothing created. The two gRPC streams carry arrowheads at both ends,
+// since Exec streams records back and the harness stream is bidirectional.
+//
+// Progressive enhancement: the SVG is complete without JS; the script only adds `is-animating`
+// to dim it and walk the steps.
+---
+
+<figure class="arch panel" data-arch>
+  <div class="panel__bar">
+    <span class="arch__step" data-step>1 / 7</span>
+    <span class="panel__note">one turn, across process boundaries</span>
+  </div>
+
+  <svg viewBox="0 0 1200 380" role="img" aria-labelledby="arch-title" class="arch__svg">
+    <title id="arch-title">
+      A turn flowing from your application into the agentsessions host, which provisions a sandbox
+      through the Runtime SPI and drives a harness inside it, while the host itself makes the model
+      call and appends the result to the journal.
+    </title>
+
+    <defs>
+      <marker id="arch-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6"
+        markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" class="arch__head-fill"></path>
+      </marker>
+    </defs>
+
+    <g class="arch__zone" data-zone="app">
+      <rect x="8" y="150" width="178" height="94" rx="8"></rect>
+      <text x="20" y="168">YOUR APPLICATION</text>
+    </g>
+    <g class="arch__zone" data-zone="host">
+      <rect x="206" y="20" width="794" height="340" rx="8"></rect>
+      <text x="218" y="38">AGENTSESSIONS HOST</text>
+    </g>
+    <g class="arch__zone arch__zone--sandbox" data-zone="sandbox">
+      <rect x="1020" y="150" width="172" height="94" rx="8"></rect>
+      <text x="1032" y="168">SANDBOX</text>
+    </g>
+
+    <path class="arch__edge" data-edge="e1" d="M 172 200 H 220" marker-start="url(#arch-arrow)"
+      marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge" data-edge="e2" d="M 364 200 H 386" marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge" data-edge="e3" d="M 528 200 H 550" marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge arch__edge--key" data-edge="e5" d="M 580 176 V 136"
+      marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge" data-edge="e6" d="M 620 224 V 264" marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge" data-edge="e7" d="M 692 200 H 714" marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge arch__edge--dashed" data-edge="e9" d="M 856 200 H 1016"
+      marker-end="url(#arch-arrow)"></path>
+    <path class="arch__edge" data-edge="e4" d="M 668 176 V 52 H 1106 V 174"
+      marker-start="url(#arch-arrow)" marker-end="url(#arch-arrow)"></path>
+
+    <text class="arch__elabel arch__elabel--key" data-elabel="e5" x="490" y="118" text-anchor="end">host makes the call</text>
+    <text class="arch__elabel" data-elabel="e6" x="630" y="252">append</text>
+    <text class="arch__elabel" data-elabel="e9" x="936" y="190" text-anchor="middle">create / restore</text>
+    <text class="arch__elabel" data-elabel="e4" x="880" y="44" text-anchor="middle">harness stream, bidirectional</text>
+
+    <g class="arch__node" data-node="client">
+      <rect x="22" y="178" width="150" height="44" rx="6"></rect>
+      <text x="97" y="205">client / SDK</text>
+    </g>
+    <g class="arch__node" data-node="api">
+      <rect x="224" y="178" width="140" height="44" rx="6"></rect>
+      <text x="294" y="205">Sessions API</text>
+    </g>
+    <g class="arch__node" data-node="placer">
+      <rect x="388" y="178" width="140" height="44" rx="6"></rect>
+      <text x="458" y="205">Placer</text>
+    </g>
+    <g class="arch__node" data-node="controller">
+      <rect x="552" y="178" width="140" height="44" rx="6"></rect>
+      <text x="622" y="205">Controller</text>
+    </g>
+    <g class="arch__node arch__node--key" data-node="model">
+      <rect x="500" y="92" width="160" height="44" rx="6"></rect>
+      <text x="580" y="119">Model provider</text>
+    </g>
+    <g class="arch__node arch__node--side" data-node="journal">
+      <rect x="550" y="264" width="160" height="44" rx="6"></rect>
+      <text x="630" y="291">Journal</text>
+    </g>
+    <g class="arch__node arch__node--runtime" data-node="runtime">
+      <rect x="716" y="178" width="140" height="44" rx="6"></rect>
+      <text x="786" y="205">Runtime</text>
+    </g>
+    <g class="arch__node arch__node--sandbox" data-node="harness">
+      <rect x="1034" y="178" width="144" height="44" rx="6"></rect>
+      <text x="1106" y="205">Harness</text>
+    </g>
+  </svg>
+
+  <figcaption class="panel__caption arch__caption" data-caption>
+    Your application calls <code>Exec</code>, and records stream back as they commit.
+  </figcaption>
+</figure>
+
+<script>
+  const root = document.querySelector<HTMLElement>("[data-arch]");
+
+  if (root && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const stepLabel = root.querySelector<HTMLElement>("[data-step]")!;
+    const caption = root.querySelector<HTMLElement>("[data-caption]")!;
+
+    type Frame = { on: string[]; text: string; hold?: number };
+
+    // Each frame lights only the parts involved in that step. Frame 6 is the one the diagram
+    // exists for: the provider arrow starts at the Controller, inside the host.
+    const frames: Frame[] = [
+      {
+        on: ['[data-zone="app"]', '[data-node="client"]', '[data-edge="e1"]', '[data-node="api"]'],
+        text: "Your application calls <code>Exec</code>, and records stream back as they commit.",
+      },
+      {
+        on: ['[data-node="api"]', '[data-edge="e2"]', '[data-node="placer"]'],
+        text: "The Placer checks the harness against the runtime's capabilities, before any compute exists.",
+      },
+      {
+        on: ['[data-node="placer"]', '[data-edge="e3"]', '[data-node="controller"]'],
+        text: "The Controller takes the turn and mints a fencing token, so a superseded incarnation cannot write.",
+      },
+      {
+        on: ['[data-node="controller"]', '[data-edge="e7"]', '[data-elabel="e7"]', '[data-node="runtime"]', '[data-edge="e9"]', '[data-elabel="e9"]', '[data-zone="sandbox"]'],
+        text: "The Runtime SPI creates or restores a sandbox. Swap the backend and nothing above this line changes.",
+      },
+      {
+        on: ['[data-node="controller"]', '[data-edge="e4"]', '[data-elabel="e4"]', '[data-zone="sandbox"]', '[data-node="harness"]'],
+        text: "The harness runs exactly one turn over a single bidirectional stream, emitting typed events.",
+      },
+      {
+        on: ['[data-node="controller"]', '[data-edge="e5"]', '[data-elabel="e5"]', '[data-node="model"]'],
+        text: "The harness asks for a completion, and the <strong>host</strong> makes the call. Notice the sandbox has no arrow to the provider.",
+        hold: 3600,
+      },
+      {
+        on: ['[data-node="controller"]', '[data-edge="e6"]', '[data-elabel="e6"]', '[data-node="journal"]'],
+        text: "The completion is journaled on the way back. That is why a replay never needs the provider again.",
+        hold: 3600,
+      },
+    ];
+
+    root.classList.add("is-animating");
+
+    let i = 0;
+    let timer = 0;
+    let running = false;
+
+    const tick = () => {
+      root
+        .querySelectorAll(".arch__node, .arch__edge, .arch__elabel, .arch__zone")
+        .forEach((e) => e.classList.remove("is-on"));
+      const frame = frames[i];
+      for (const sel of frame.on) root.querySelector(sel)?.classList.add("is-on");
+      caption.innerHTML = frame.text;
+      stepLabel.textContent = `${i + 1} / ${frames.length}`;
+
+      const hold = frame.hold ?? 2600;
+      i = (i + 1) % frames.length;
+      timer = window.setTimeout(tick, hold);
+    };
+
+    new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting && !running) {
+            running = true;
+            i = 0;
+            tick();
+          } else if (!e.isIntersecting && running) {
+            running = false;
+            clearTimeout(timer);
+          }
+        }
+      },
+      { threshold: 0.2 },
+    ).observe(root);
+  }
+</script>
+
+<style>
+  .arch {
+    padding: 0;
+  }
+
+  .arch__step {
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    font-size: 0.75rem;
+    color: var(--p-accent);
+    padding: 0.1rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--p-accent) 45%, transparent);
+    border-radius: 999px;
+  }
+
+  .arch__svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    padding: 0.9rem 1rem 0.6rem;
+  }
+
+  .arch__zone rect {
+    fill: rgb(255 255 255 / 0.02);
+    stroke: #3d444d;
+    stroke-width: 1;
+    stroke-dasharray: 5 4;
+  }
+
+  .arch__zone text {
+    fill: #484f58;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+  }
+
+  .arch__node rect {
+    fill: #161b22;
+    stroke: #484f58;
+    stroke-width: 1.5;
+  }
+
+  .arch__node text {
+    fill: var(--p-white);
+    font-size: 14px;
+    text-anchor: middle;
+  }
+
+  .arch__node--side rect {
+    stroke: #8957e5;
+  }
+
+  .arch__node--key rect {
+    stroke: #d29922;
+  }
+
+  .arch__node--runtime rect,
+  .arch__node--sandbox rect {
+    stroke: #3fb950;
+  }
+
+  .arch__edge {
+    fill: none;
+    stroke: #484f58;
+    stroke-width: 1.8;
+  }
+
+  .arch__edge--dashed {
+    stroke-dasharray: 5 4;
+  }
+
+  .arch__head-fill {
+    fill: #484f58;
+  }
+
+  .arch__elabel {
+    fill: var(--p-dim);
+    font-size: 11px;
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+  }
+
+  .arch__elabel--key {
+    fill: #d29922;
+  }
+
+  .arch__caption {
+    min-height: 3em;
+    font-size: var(--sl-text-sm);
+    line-height: 1.5;
+    color: #9da7b3;
+  }
+
+  .arch__caption code {
+    font-size: 0.9em;
+  }
+
+  /* Animated: everything dims, and only the parts in the current step light up. */
+  .arch.is-animating .arch__node rect,
+  .arch.is-animating .arch__edge,
+  .arch.is-animating .arch__elabel {
+    opacity: 0.4;
+    transition: opacity 0.35s ease;
+  }
+
+  .arch.is-animating .arch__zone {
+    opacity: 0.72;
+  }
+
+  .arch.is-animating .arch__node text {
+    opacity: 0.55;
+    transition: opacity 0.35s ease;
+  }
+
+  .arch.is-animating .arch__node.is-on rect,
+  .arch.is-animating .arch__node.is-on text,
+  .arch.is-animating .arch__edge.is-on,
+  .arch.is-animating .arch__elabel.is-on,
+  .arch.is-animating .arch__zone.is-on {
+    opacity: 1;
+  }
+
+  .arch.is-animating .arch__node.is-on rect {
+    fill: color-mix(in srgb, var(--p-accent) 22%, #161b22);
+  }
+
+  .arch.is-animating .arch__edge.is-on {
+    stroke: var(--p-accent);
+    stroke-width: 2.4;
+  }
+
+  .arch.is-animating .arch__edge--key.is-on {
+    stroke: #e3a008;
+  }
+
+  @media (max-width: 50rem) {
+    .arch__caption {
+      min-height: 4.5em;
+    }
+
+    .panel__note {
+      display: none;
+    }
+  }
+</style>

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="agentsessions">
+  <title>agentsessions</title>
+  <!-- A hash-chain: three records linked in order, the shape the whole project is built on.
+       Sized for legibility at 16px, so the links are bars rather than hairlines. -->
+  <rect width="32" height="32" rx="7" fill="#2d6cdf"/>
+  <g fill="#ffffff">
+    <rect x="5" y="13" width="6" height="6" rx="1.6"/>
+    <rect x="13" y="13" width="6" height="6" rx="1.6"/>
+    <rect x="21" y="13" width="6" height="6" rx="1.6"/>
+    <rect x="10.4" y="15.2" width="3.2" height="1.6"/>
+    <rect x="18.4" y="15.2" width="3.2" height="1.6"/>
+  </g>
+</svg>

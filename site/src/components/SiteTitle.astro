@@ -1,0 +1,76 @@
+---
+// Starlight hides the sidebar on splash pages, which left the landing page with no route into the
+// docs except the one hero button. This appends persistent nav links beside the site title so the
+// docs are reachable from anywhere, including the landing page and on mobile.
+import Default from "@astrojs/starlight/components/SiteTitle.astro";
+
+const base = "/agentsessions";
+const links = [
+  { label: "Quickstart", href: `${base}/quickstart/` },
+  { label: "Docs", href: `${base}/concepts/` },
+  { label: "API", href: `${base}/api-reference/` },
+];
+
+const path = Astro.url.pathname;
+---
+
+<Default {...Astro.props}><slot /></Default>
+
+<nav class="topnav" aria-label="Main">
+  {
+    links.map(({ label, href }) => (
+      <a href={href} aria-current={path.startsWith(href) ? "page" : undefined}>
+        {label}
+      </a>
+    ))
+  }
+</nav>
+
+<style>
+  .topnav {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-inline-start: 1.25rem;
+    padding-inline-start: 1.25rem;
+    border-inline-start: 1px solid var(--sl-color-gray-5);
+  }
+
+  .topnav a {
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-2);
+    text-decoration: none;
+    white-space: nowrap;
+    padding-block: 0.2rem;
+    border-bottom: 2px solid transparent;
+  }
+
+  .topnav a:hover {
+    color: var(--sl-color-white);
+  }
+
+  .topnav a[aria-current="page"] {
+    color: var(--sl-color-white);
+    border-bottom-color: var(--sl-color-accent);
+  }
+
+  /* The header is tight on small screens; drop the separator and shrink before hiding anything,
+     because on a splash page these links are the only navigation available. */
+  @media (max-width: 50rem) {
+    .topnav {
+      gap: 0.75rem;
+      margin-inline-start: 0.75rem;
+      padding-inline-start: 0.75rem;
+    }
+
+    .topnav a {
+      font-size: var(--sl-text-xs);
+    }
+  }
+
+  @media (max-width: 30rem) {
+    .topnav {
+      display: none;
+    }
+  }
+</style>
