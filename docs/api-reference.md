@@ -142,7 +142,7 @@ DataPart is structured JSON (A2A data part; MCP structuredContent).
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| data | [google.protobuf.Struct](#google-protobuf-Struct) |  |  |
+| data | [google.protobuf.Struct](https://protobuf.dev/reference/protobuf/google.protobuf/#struct) |  |  |
 
 
 
@@ -177,7 +177,7 @@ transport (see Delta in session.proto) and coalesce into the finalized event (§
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | execution_id | [string](#string) |  | which execution/turn produced this event |
-| ts | [google.protobuf.Timestamp](#google-protobuf-Timestamp) |  |  |
+| ts | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 | schema_version | [int32](#int32) |  | §7: versions the body; replay survives schema skew |
 | kind | [EventKind](#agentsessions-v1-EventKind) |  |  |
 | message | [Message](#agentsessions-v1-Message) |  |  |
@@ -442,8 +442,8 @@ ResourceMetadata is carried by every top-level resource.
 | name | [string](#string) |  |  |
 | uid | [string](#string) |  |  |
 | version | [int64](#int64) |  |  |
-| create_time | [google.protobuf.Timestamp](#google-protobuf-Timestamp) |  |  |
-| update_time | [google.protobuf.Timestamp](#google-protobuf-Timestamp) |  |  |
+| create_time | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| update_time | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
 
@@ -475,7 +475,7 @@ ToolCall aligns with an MCP tool call (name &#43; structured args).
 | ----- | ---- | ----- | ----------- |
 | id | [string](#string) |  |  |
 | tool | [string](#string) |  | tool name / MCP method |
-| args | [google.protobuf.Struct](#google-protobuf-Struct) |  |  |
+| args | [google.protobuf.Struct](https://protobuf.dev/reference/protobuf/google.protobuf/#struct) |  |  |
 | mediation | [Mediation](#agentsessions-v1-Mediation) |  |  |
 | idempotency_key | [string](#string) |  | §3/I3: dedups a retried side-effecting call tool-side |
 
@@ -493,7 +493,7 @@ ToolCall aligns with an MCP tool call (name &#43; structured args).
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [string](#string) |  |  |
-| output | [google.protobuf.Struct](#google-protobuf-Struct) |  |  |
+| output | [google.protobuf.Struct](https://protobuf.dev/reference/protobuf/google.protobuf/#struct) |  |  |
 | output_uri | [string](#string) |  | externalized large output (MCP resource_link), else inline `output` |
 | output_digest | [string](#string) |  | content digest of output_uri target (chain covers externalized bytes) |
 | is_error | [bool](#bool) |  |  |
