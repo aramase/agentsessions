@@ -104,7 +104,7 @@ Full docs live in [`docs/`](docs/README.md):
 | `harnesswire/` | Bridges the in-process `api.Harness` SPI and the out-of-process `Harness.Connect` gRPC stream. |
 | `placement/` | The `Placer`: wires Sessions to the `Runtime` SPI, mints/binds fences, gates via `CanPlace`. The `Registry` routes a session to the harness it names. |
 | `runtime/local`, `runtime/substrate` | `Runtime` backends: a filesystem-only local backend, and agent-substrate. |
-| `harness/echoagent`, `harness/counteragent` | Reference harnesses: `STATELESS_REPLAY` echo, `REQUIRES_MEMORY_SNAPSHOT` counter. |
+| `harness/echoagent`, `harness/counteragent`, `harness/chatagent` | Reference harnesses: `STATELESS_REPLAY` echo, `REQUIRES_MEMORY_SNAPSHOT` counter, and a history-aware chat harness. |
 | `model/openai` | Model provider for OpenAI-compatible endpoints; no vendor SDK, so any compatible service works. |
 | `session/` | The `Sessions` gRPC service: the client-facing seam over the log and the Placer. |
 | `client/` | Go client SDK: dialing, the session frame, pagination, and stream draining. |

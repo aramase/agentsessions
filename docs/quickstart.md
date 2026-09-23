@@ -262,6 +262,16 @@ The key is read from the environment, never a flag, so it stays out of your shel
 process list. `MODEL_API_KEY` works too, and an endpoint that needs no credential works with both
 unset.
 
+Configuring a model also registers a second harness, `chat`, alongside `echo`. `echo` stays the
+default, so ask for the conversational one when you create the session:
+
+```bash
+CHAT=$(agentctl create --server 127.0.0.1:8080 --harness chat | cut -d' ' -f2)
+agentctl exec --server 127.0.0.1:8080 --session "$CHAT" --input "name three primes"
+```
+
+The server logs which harnesses it registered at startup (`harnesses=[chat echo]`).
+
 `--model-base-url` points at any endpoint that accepts the chat-completions request body: a
 gateway, a self-hosted server, or a proxy fronting another provider. Endpoints that differ only in
 the envelope are reached with two more flags, rather than by rebuilding the server:

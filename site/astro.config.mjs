@@ -6,6 +6,9 @@ import mermaid from "astro-mermaid";
 // The docs under ../docs are the source of truth; hack/sync-docs.mjs copies them into
 // src/content/docs before a build, so the site cannot drift from the repository.
 export default defineConfig({
+  // The dev toolbar never ships in a build, but it sits over the bottom of every page while
+  // previewing, which gets in the way of judging the layout.
+  devToolbar: { enabled: false },
   // aramase.github.io carries a user-level custom domain, so project pages are served from
   // anishram.com and the github.io address only 301s there. Canonical links, og:url, and the
   // sitemap have to name the address people actually land on.
