@@ -4,10 +4,10 @@
 // socket torn down when the command exits, so agentctl's --server flag had nothing to dial and a
 // non-Go client had no way to reach a session at all. This is that missing entry point.
 //
-// Harnesses are registered at build time. This binary serves the reference echo harness on the
-// filesystem-only local backend; a deployment that needs others builds a server with a larger
-// registry, or with backends whose capabilities can satisfy them. A harness the registry does not
-// know is refused rather than silently substituted.
+// Harnesses are registered at build time. This binary serves the reference echo harness by default
+// and adds the conversational chat harness when -model is set, each on its own filesystem-only local
+// backend. A deployment that needs others builds a server with a larger registry, or with backends
+// whose capabilities can satisfy them. Unknown harnesses are refused rather than substituted.
 //
 // With -model set it drives a real OpenAI-compatible endpoint; without one it uses the built-in
 // echo model, so the quickstart runs with no key. The API key comes from the environment rather
@@ -27,14 +27,15 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"google.golang.org/grpc"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/controller"
+	"github.com/aramase/agentsessions/harness/chatagent"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/internal/modelconfig"
 	"github.com/aramase/agentsessions/internal/version"
 	"github.com/aramase/agentsessions/model/openai"
 	"github.com/aramase/agentsessions/observability"
@@ -80,18 +81,11 @@ func run() error {
 		return err
 	}
 
-	backend := local.New(echoagent.Harness{}, local.WithLogger(logger))
-	defer func() { _ = backend.Close() }()
-
-	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{
-		"echo": placement.New(backend, modelFn,
-			placement.WithLogger(logger),
-			placement.WithStreamingModel(streamFn),
-		),
-	})
+	registry, closeBackends, err := harnessRegistry(*model, modelFn, streamFn, logger)
 	if err != nil {
-		return fmt.Errorf("build harness registry: %w", err)
+		return err
 	}
+	defer closeBackends()
 
 	srv := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
@@ -134,6 +128,36 @@ func run() error {
 	}
 }
 
+// harnessRegistry owns the local backends as a group so every startup error and shutdown closes
+// all of them. Echo remains the default; chat requires an explicitly configured model.
+func harnessRegistry(model string, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger) (*placement.Registry, func(), error) {
+	echo := local.New(echoagent.Harness{}, local.WithLogger(logger))
+	backends := []*local.Backend{echo}
+	closeBackends := func() {
+		for _, backend := range backends {
+			_ = backend.Close()
+		}
+	}
+	opts := []placement.Option{
+		placement.WithLogger(logger),
+		placement.WithStreamingModel(streamFn),
+	}
+	placers := map[string]*placement.Placer{
+		"echo": placement.New(echo, modelFn, opts...),
+	}
+	if model != "" {
+		chat := local.New(chatagent.Harness{Model: model}, local.WithLogger(logger))
+		backends = append(backends, chat)
+		placers["chat"] = placement.New(chat, modelFn, opts...)
+	}
+	registry, err := placement.NewRegistry("echo", placers)
+	if err != nil {
+		closeBackends()
+		return nil, nil, fmt.Errorf("build harness registry: %w", err)
+	}
+	return registry, closeBackends, nil
+}
+
 // modelFunc selects the model the host mediates. Empty -model keeps the built-in echo model so the
 // quickstart runs with no key; otherwise it builds an OpenAI-compatible client.
 //
@@ -151,22 +175,13 @@ func modelFunc(model, baseURL, path, authHeader string) (controller.ModelFunc, c
 		// The built-in model answers instantly, so there is nothing to stream.
 		return echoagent.Model, nil, "echo (built-in)", nil
 	}
-	opts := []openai.Option{
-		openai.WithModel(model),
-		openai.WithBaseURL(baseURL),
-		openai.WithPath(path),
-	}
-	if key := modelAPIKey(); key != "" {
-		// Authorization carries a scheme; a bespoke credential header carries the raw value. Getting
-		// this wrong is a 401 that reads like a bad key, so it is derived rather than left to the
-		// operator to remember.
-		if strings.EqualFold(authHeader, "Authorization") {
-			opts = append(opts, openai.WithAPIKey(key))
-		} else {
-			opts = append(opts, openai.WithHeader(authHeader, key))
-		}
-	}
-	client, err := openai.New(opts...)
+	client, err := modelconfig.New(modelconfig.Config{
+		Model:      model,
+		BaseURL:    baseURL,
+		Path:       path,
+		AuthHeader: authHeader,
+		APIKey:     modelAPIKey(),
+	})
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("configure model: %w", err)
 	}

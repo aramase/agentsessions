@@ -164,6 +164,19 @@ export MODEL_API_KEY=...
 agentsessionsd --model gpt-4o-mini
 ```
 
+With `--model` configured, the server also registers the text-only conversational `chat` harness.
+Echo remains the default; select chat explicitly for a new session:
+
+```bash
+agentctl exec --server 127.0.0.1:8080 --harness chat --input "What is a prime number?"
+```
+
+Continue with `--session <uid>` using the UID printed by that command. Chat sends the full recorded
+conversation on each turn through `EventSink.Model`; the host handles provider communication.
+See the [chat harness example](harness-authoring.md#reference-harness-2-conversational-chat-harnesschatagent)
+for an end-to-end Ollama example and the current context-window and
+`Session.model` limitations.
+
 Endpoints that differ only in envelope (a model scoped into the path, a pinned API version, a
 credential header other than `Authorization`) are reached with `--model-path` and
 `--model-auth-header` rather than by rebuilding. An endpoint with its own request body or signing

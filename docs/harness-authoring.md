@@ -6,8 +6,8 @@ loop all plug in the same way: implement two methods, emit typed events through 
 you need from the runtime. In return you get durability, byte-identical replay, fork, suspend and resume,
 and a tamper-evident provenance chain, none of which your harness has to implement.
 
-This guide is the `api.Harness` (`api/harness.go`) contract, the rules that keep replay exact, and two
-reference harnesses walked through line by line. Read [`concepts.md`](concepts.md) first for the nouns.
+This guide is the `api.Harness` (`api/harness.go`) contract, the rules that keep replay exact, and
+three reference harnesses. Read [`concepts.md`](concepts.md) first for the nouns.
 
 ## The contract
 
@@ -202,7 +202,106 @@ Notes:
   host records the completion live and serves it from the journal on replay.
 - It does not call `sink.Output`. The mediated completion is already recorded as the output (Rule 2).
 
-## Reference harness 2: memory snapshot (`harness/counteragent`)
+## Reference harness 2: conversational chat (`harness/chatagent`)
+
+`chatagent.Harness{Model: "your-model-id"}` is a small, text-only `api.Harness` with descriptor ID
+`chat`. It declares `STATELESS_REPLAY` and `ForkSafe`, retaining no durable in-memory state.
+Each turn it retains the messages from prior `EVENT_INPUT` and `EVENT_OUTPUT` events in
+`Start.History`, in journal order, then appends every current `Start.Inputs` message exactly once.
+Audit and lifecycle events (`MODEL_CALL`, `END`, `ERROR`, `LIFECYCLE`, and other non-conversation
+events) do not enter model context.
+
+Inputs from failed turns are intentionally retained. If a model call fails before producing an
+output, the next turn includes that prior user message without an assistant reply; the harness
+neither discards the input nor invents a response. Controller replay preserves this same context
+when re-executing later completed turns.
+
+The harness calls only `EventSink.Model` with its configured model ID and this conversation.
+The host supplies the model implementation and records the completion; the harness does not
+import a provider SDK or re-emit the completion through `sink.Output`. It has no tools, provider
+adapter, model routing, or streaming logic.
+
+**The full recorded conversation is sent on every turn.** This is a simple reference context
+policy, not a scalable context-window strategy: there is no truncation or summarization, and long
+conversations can exceed a model's context window.
+
+### Run chat through the reference server
+
+Build both binaries from the repository root:
+
+```bash
+go build -o ./bin/agentsessionsd ./cmd/agentsessionsd
+go build -o ./bin/agentctl ./cmd/agentctl
+```
+
+Ollama is one compatible host-side endpoint, not a dependency of `chatagent`. With Ollama already
+running locally and `gemma3:1b` available (`ollama pull gemma3:1b`), start the server in one terminal:
+
+```bash
+./bin/agentsessionsd \
+  --model gemma3:1b \
+  --model-base-url http://127.0.0.1:11434/v1
+```
+
+In another terminal, create a chat session and run two turns:
+
+```bash
+SID=$(./bin/agentctl create --server 127.0.0.1:8080 --harness chat)
+./bin/agentctl exec --server 127.0.0.1:8080 --session "$SID" --input "What is a prime number?"
+./bin/agentctl exec --server 127.0.0.1:8080 --session "$SID" --input "Give me three examples."
+```
+
+Or create and run the first turn in one call:
+
+```bash
+./bin/agentctl exec --server 127.0.0.1:8080 --harness chat --input "What is a prime number?"
+```
+
+That prints `session <uid>`; use that UID with `--session` for subsequent turns. The Go client
+already supports the same selection with `client.ExecOptions{Harness: "chat", Inputs: ...}`.
+On an existing session, `exec --harness` overrides the harness for that turn only; omitting it
+uses the stored session harness.
+
+With `--model` set, `agentsessionsd` registers `chat` alongside `echo`, each on its own
+`runtime/local.Backend`, using the configured host-side `model/openai` client. Echo remains the
+registry default. Without `--model`, only echo is registered and the built-in echo model still
+provides the zero-configuration quickstart. The embedded `agentctl` server remains echo-only,
+so chat requires `--server`. The reference server is plaintext and unauthenticated; keep it on
+a trusted interface (see [security.md](security.md)).
+
+One current limitation matters:
+
+- `Session.model` is stored metadata, not effective model selection
+  ([aramase/agentsessions#31](https://github.com/aramase/agentsessions/issues/31)).
+  The example deliberately omits `agentctl create --model`; `agentsessionsd --model` configures
+  the model ID requested by chat for all its sessions.
+
+### Package chat for a remote runtime
+
+The existing `cmd/harnessnode` binary can serve the same harness over `harnesswire`:
+
+```bash
+go build -o ./bin/harnessnode ./cmd/harnessnode
+HARNESS_KIND=chat HARNESS_MODEL=gemma3:1b \
+  HARNESS_ADDR=127.0.0.1:8082 HARNESS_READYZ=127.0.0.1:8083 ./bin/harnessnode
+```
+
+This starts only the harness endpoint and readiness probe, not a Sessions server. A remote-runtime
+host must place and connect to it and supply the model implementation. `HARNESS_MODEL` is required
+for chat and is validated before listeners open. Echo remains the default; counter remains the
+memory-snapshot example.
+
+Only the model ID belongs in the harness environment. Keep provider URLs and credentials on the
+host. Repository-owned hosts can reuse `internal/modelconfig.New` with an explicit `Config`
+(`Model`, `BaseURL`, `Path`, `AuthHeader`, `APIKey`), then pass the returned client's `Model` and
+`StreamModel` methods to placement. `Authorization` uses a bearer credential; other header names
+carry the raw key. An empty header or key sends no credential.
+
+The constructor does not read environment variables or choose a fallback model. `agentsessionsd`
+still owns its flags, `MODEL_API_KEY` / `OPENAI_API_KEY` precedence, logging, and built-in echo
+fallback. This shared construction helper adds no provider routing or dynamic registration.
+
+## Reference harness 3: memory snapshot (`harness/counteragent`)
 
 The counterpart. Its state is an in-RAM integer that the log cannot reconstruct, so it needs a memory
 snapshot and demonstrates Rule 3 and I4.
