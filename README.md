@@ -77,7 +77,11 @@ determinism guarantees are exercised by a replay-conformance suite (`conformance
 
 ## Documentation
 
-Full docs live in [`docs/`](docs/README.md):
+The same docs are published, rendered and searchable, at
+**[anishram.com/agentsessions](https://anishram.com/agentsessions/)**, along with a walkthrough of
+how a turn runs and a recording of the full lifecycle on a real cluster.
+
+The sources live in [`docs/`](docs/README.md):
 
 - [**Concepts**](docs/concepts.md): the mental model: sessions, typed events, the log, fences, resumability.
 - [**How you use it**](docs/interaction-model.md): what you implement, what you call, and what it

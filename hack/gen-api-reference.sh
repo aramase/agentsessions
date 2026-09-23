@@ -40,6 +40,23 @@ while i < len(lines):
 open(path, "w").write("\n".join(out))
 PYFOLD
 
+# protoc-gen-doc links the well-known types to anchors it never emits, because those messages are
+# not part of this proto set. The links land nowhere, so point them at the upstream reference.
+python3 - "${out}" <<'PYWKT'
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path).read()
+text = re.sub(
+    r"\[google\.protobuf\.(\w+)\]\(#google-protobuf-\w+\)",
+    lambda m: f"[google.protobuf.{m.group(1)}]"
+    f"(https://protobuf.dev/reference/protobuf/google.protobuf/#{m.group(1).lower()})",
+    text,
+)
+open(path, "w").write(text)
+PYWKT
+
 # protoc-gen-doc emits no provenance header. A 1300-line file with no banner invites
 # hand-edits that the next regeneration silently reverts, so prepend one.
 tmp="$(mktemp)"

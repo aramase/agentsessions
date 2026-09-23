@@ -1,0 +1,26 @@
+name: docs
+
+# Deliberately has no paths filter. ci and substrate-e2e both skip markdown-only changes, which is
+# what makes a prose pull request fast, but it also left those pull requests with no checks at all:
+# nothing verified the README, and a required status check would never arrive if branch protection
+# were switched on. This runs everywhere and takes seconds.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: relative links and heading anchors resolve
+        run: python3 hack/check-doc-links.py
