@@ -227,3 +227,28 @@
 [data-has-hero] .sl-markdown-content .card-grid + figure.panel {
   margin-top: 1.75rem;
 }
+
+/* ---- hero heading ---------------------------------------------------------------------- */
+
+/* The heading carries a kicker and a claim rather than the project name, which the nav already
+   shows. Both live inside the h1 so the page still has exactly one top-level heading. */
+[data-has-hero] .hero h1 {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.hero-kicker {
+  font-size: var(--sl-text-sm);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--sl-color-accent-high);
+}
+
+.hero-claim {
+  font-size: clamp(2.2rem, 5.5vw, 3.4rem);
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
