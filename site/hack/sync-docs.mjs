@@ -110,11 +110,11 @@ function yamlQuote(value) {
 // the choice is made in the doc rather than silently shipped.
 const internalMarkers = /^.*\b(TODO|FIXME|XXX|HACK)\b(\(|:).*$/gm;
 
-function assertNoInternalMarkers(file, markdown) {
+function assertNoInternalMarkers(label, markdown) {
   const hits = markdown.match(internalMarkers);
   if (!hits) return;
   throw new Error(
-    `docs/${file} contains internal markers that would be published:\n` +
+    `${label} contains internal markers that would be published:\n` +
       hits.map((h) => `    ${h.trim()}`).join("\n") +
       `\n  Resolve the note, move it to an issue, or rewrite it as prose that a reader can use.`,
   );
@@ -135,7 +135,7 @@ for (const file of files) {
   }
 
   const source = await readFile(join(docsDir, file), "utf8");
-  assertNoInternalMarkers(file, source);
+  assertNoInternalMarkers(`docs/${file}`, source);
   const body = rewriteLinks(stripTitle(stripBanner(source)));
   const frontmatter = [
     "---",
@@ -150,7 +150,10 @@ for (const file of files) {
 
 // The landing page is hand-written rather than synced from a doc, so it lives outside the generated
 // directory and is copied in last. Everything under src/content/docs is generated, which is what
-// makes wiping it safe.
-await copyFile(join(here, "..", "src", "landing", "index.mdx"), join(outDir, "index.mdx"));
+// makes wiping it safe. It is copied rather than rewritten, but it still has to clear the marker
+// check: it is the most-read page on the site, and it was the one page the guard did not cover.
+const landing = join(here, "..", "src", "landing", "index.mdx");
+assertNoInternalMarkers("site/src/landing/index.mdx", await readFile(landing, "utf8"));
+await copyFile(landing, join(outDir, "index.mdx"));
 
 console.log(`synced ${files.length} docs + the landing page into src/content/docs`);
