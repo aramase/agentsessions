@@ -113,10 +113,12 @@ harness stream, so what is journaled is exactly what the harness emitted.
   </Card>
 </CardGrid>
 
-Two runtimes ship. **`runtime/local`** is filesystem-only and refuses a memory-snapshot harness
-rather than resuming it wrongly. **`runtime/substrate`** runs both capability tiers against a real
-cluster on every pull request, on gVisor and on a micro-VM. Kata, Cloud Hypervisor, and plain pods
-fit the same SPI. No provider SDK appears anywhere, and CI asserts the core links no backend vendor.
+Three runtimes ship. **`runtime/local`** is filesystem-only and refuses a memory-snapshot harness
+rather than resuming it wrongly. **`runtime/remote`** attaches to a harness you are already running,
+so your agent is registered by address rather than compiled into the server. **`runtime/substrate`**
+runs both capability tiers against a real cluster on every pull request, on gVisor and on a micro-VM.
+Kata, Cloud Hypervisor, and plain pods fit the same SPI. No provider SDK appears anywhere, and CI
+asserts the core links no backend vendor.
 
 ```bash
 go install github.com/aramase/agentsessions/cmd/agentctl@latest

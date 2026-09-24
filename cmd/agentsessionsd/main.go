@@ -4,7 +4,8 @@
 // socket torn down when the command exits, so agentctl's --server flag had nothing to dial and a
 // non-Go client had no way to reach a session at all. This is that missing entry point.
 //
-// Harnesses are registered at build time. This binary serves the reference echo harness by default
+// Harnesses compiled into this binary are fixed at build time; -harness name=address registers one
+// running elsewhere without rebuilding. This binary serves the reference echo harness by default
 // and adds the conversational chat harness when -model is set, each on its own filesystem-only local
 // backend. A deployment that needs others builds a server with a larger registry, or with backends
 // whose capabilities can satisfy them. Unknown harnesses are refused rather than substituted.

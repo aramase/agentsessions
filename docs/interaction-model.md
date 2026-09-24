@@ -203,7 +203,9 @@ Being explicit here is part of the contract.
 
 Real today, and worth knowing before you build on it:
 
-- **Harnesses register at build time.** Adding one means building a server with a larger registry.
+- **A harness registered by address is stateless-replay only.** `runtime/remote` attaches to a
+  harness it did not start, so it cannot capture that process's memory and `CanPlace` refuses a
+  `REQUIRES_MEMORY_SNAPSHOT` harness on it. Run those on a backend that owns the sandbox.
 - **History is pushed whole on every turn.** The controller hands the harness the full log each
   time, which is fine for demos and does not scale to long sessions.
 - **`exec_state` does not distinguish an interrupted turn** from a completed one. Recovery keys off

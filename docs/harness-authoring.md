@@ -345,6 +345,43 @@ two. The `EventSink` you code against is identical whether you are in-process or
 model mediation and record-before-effect hold across the process boundary unchanged. You never see the
 gRPC stream or sequence numbers; the SDK handles them.
 
+Serve it the way `cmd/harnessnode` does, registering your harness on a listener of your own:
+
+```go
+lis, err := net.Listen("tcp", "0.0.0.0:8090")
+if err != nil {
+    return err
+}
+srv := grpc.NewServer()
+v1.RegisterHarnessServer(srv, harnesswire.NewServer(myHarness{}))
+return srv.Serve(lis)
+```
+
+Then point a host at it. `agentsessionsd` takes a repeatable `--harness name=address`, so registering
+your harness does not mean rebuilding the server:
+
+```bash
+agentsessionsd --addr 127.0.0.1:8080 --harness mine=127.0.0.1:8090
+```
+
+```
+agentsessionsd listening harnesses="[echo mine]" default_harness=echo
+```
+
+Sessions choose it by name, and everything else behaves as it does for a built-in harness:
+
+```bash
+SID=$(agentctl create --server 127.0.0.1:8080 --harness mine)
+agentctl exec --server 127.0.0.1:8080 --session "$SID" --input "hello"
+agentctl replay --server 127.0.0.1:8080 --session "$SID"
+```
+
+Two consequences of the host not owning your process. It cannot capture your memory, so a harness
+registered this way must be `STATELESS_REPLAY`; a `REQUIRES_MEMORY_SNAPSHOT` harness is refused by
+`CanPlace` and belongs on a backend that owns the sandbox, such as `runtime/substrate`. And stopping
+a session does not stop your harness, because other sessions are using it: its lifetime is yours to
+manage.
+
 ## Capability matching
 
 When you declare `Capabilities`, the host matches them against the runtime's `RuntimeCapabilities`
