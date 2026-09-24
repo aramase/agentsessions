@@ -20,6 +20,12 @@ from pathlib import Path
 
 SKIP_DIRS = {".git", "node_modules", "dist", ".astro", "_substrate", "vendor"}
 
+# Generated trees, named by path rather than by directory name so the real docs/ is still checked.
+# site/src/content/docs is written by the site's sync step, which rewrites links into site routes
+# like /agentsessions/faq/. Those are correct for the rendered site and meaningless as file paths,
+# and the site has its own checker for them.
+SKIP_PREFIXES = (("site", "src", "content", "docs"),)
+
 # Inline links, but not images, and not autolinks. Reference-style links are not used here.
 LINK = re.compile(r"(?<!\!)\[(?P<text>[^\]]*)\]\((?P<target>[^)\s]+)(?:\s+\"[^\"]*\")?\)")
 ATX_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*$", re.MULTILINE)
@@ -50,11 +56,12 @@ def anchors_of(path: Path) -> set[str]:
 
 
 def markdown_files(root: Path) -> list[Path]:
-    return sorted(
-        p
-        for p in root.rglob("*.md")
-        if not any(part in SKIP_DIRS for part in p.relative_to(root).parts)
-    )
+    def skipped(rel: Path) -> bool:
+        if any(part in SKIP_DIRS for part in rel.parts):
+            return True
+        return any(rel.parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
+
+    return sorted(p for p in root.rglob("*.md") if not skipped(p.relative_to(root)))
 
 
 def main() -> int:

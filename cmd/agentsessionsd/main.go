@@ -4,7 +4,8 @@
 // socket torn down when the command exits, so agentctl's --server flag had nothing to dial and a
 // non-Go client had no way to reach a session at all. This is that missing entry point.
 //
-// Harnesses are registered at build time. This binary serves the reference echo harness by default
+// Harnesses compiled into this binary are fixed at build time; -harness name=address registers one
+// running elsewhere without rebuilding. This binary serves the reference echo harness by default
 // and adds the conversational chat harness when -model is set, each on its own filesystem-only local
 // backend. A deployment that needs others builds a server with a larger registry, or with backends
 // whose capabilities can satisfy them. Unknown harnesses are refused rather than substituted.
@@ -27,6 +28,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -41,6 +44,7 @@ import (
 	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
+	"github.com/aramase/agentsessions/runtime/remote"
 	"github.com/aramase/agentsessions/session"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
@@ -60,6 +64,8 @@ func run() error {
 	modelBaseURL := flag.String("model-base-url", openai.DefaultBaseURL, "base URL of the OpenAI-compatible endpoint")
 	modelPath := flag.String("model-path", openai.DefaultPath, "completions path under the base URL; may carry a query string")
 	modelAuthHeader := flag.String("model-auth-header", "Authorization", "header carrying the credential from MODEL_API_KEY")
+	remotes := remoteHarnesses{}
+	flag.Var(remotes, "harness", "register a harness already running elsewhere, as name=address; repeatable")
 	showVersion := flag.Bool("version", false, "print the build version and exit")
 	flag.Parse()
 
@@ -81,7 +87,7 @@ func run() error {
 		return err
 	}
 
-	registry, closeBackends, err := harnessRegistry(*model, modelFn, streamFn, logger)
+	registry, closeBackends, err := harnessRegistry(*model, remotes, modelFn, streamFn, logger)
 	if err != nil {
 		return err
 	}
@@ -128,13 +134,44 @@ func run() error {
 	}
 }
 
+// remoteHarnesses collects repeated -harness name=address flags. Registering a harness this way is
+// the difference between adding one and rebuilding the server: the address points at a harness
+// somebody else is already running, and the harness itself declares its resumability tier.
+type remoteHarnesses map[string]string
+
+func (r remoteHarnesses) String() string {
+	names := make([]string, 0, len(r))
+	for name := range r {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
+func (r remoteHarnesses) Set(value string) error {
+	name, addr, ok := strings.Cut(value, "=")
+	name, addr = strings.TrimSpace(name), strings.TrimSpace(addr)
+	if !ok || name == "" || addr == "" {
+		return fmt.Errorf("want name=address, got %q", value)
+	}
+	if _, exists := r[name]; exists {
+		return fmt.Errorf("harness %q already registered", name)
+	}
+	r[name] = addr
+	return nil
+}
+
 // harnessRegistry owns the local backends as a group so every startup error and shutdown closes
 // all of them. Echo remains the default; chat requires an explicitly configured model.
-func harnessRegistry(model string, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger) (*placement.Registry, func(), error) {
+func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.ModelFunc, streamFn controller.StreamFunc, logger *slog.Logger) (*placement.Registry, func(), error) {
 	echo := local.New(echoagent.Harness{}, local.WithLogger(logger))
 	backends := []*local.Backend{echo}
+	var remoteBackends []*remote.Backend
 	closeBackends := func() {
 		for _, backend := range backends {
+			_ = backend.Close()
+		}
+		for _, backend := range remoteBackends {
 			_ = backend.Close()
 		}
 	}
@@ -149,6 +186,15 @@ func harnessRegistry(model string, modelFn controller.ModelFunc, streamFn contro
 		chat := local.New(chatagent.Harness{Model: model}, local.WithLogger(logger))
 		backends = append(backends, chat)
 		placers["chat"] = placement.New(chat, modelFn, opts...)
+	}
+	for name, addr := range remotes {
+		if _, taken := placers[name]; taken {
+			closeBackends()
+			return nil, nil, fmt.Errorf("harness %q is already served by this binary; pick another name", name)
+		}
+		backend := remote.New(addr, remote.WithLogger(logger))
+		remoteBackends = append(remoteBackends, backend)
+		placers[name] = placement.New(backend, modelFn, opts...)
 	}
 	registry, err := placement.NewRegistry("echo", placers)
 	if err != nil {

@@ -61,7 +61,7 @@ func TestHarnessRegistry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			registry, closeBackends, err := harnessRegistry(tt.model, modelFn, streamFn, nil)
+			registry, closeBackends, err := harnessRegistry(tt.model, nil, modelFn, streamFn, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -125,7 +125,7 @@ func TestHarnessRegistry(t *testing.T) {
 }
 
 func TestHarnessRegistryClosesBackends(t *testing.T) {
-	registry, closeBackends, err := harnessRegistry("test-model", echoagent.Model, nil, nil)
+	registry, closeBackends, err := harnessRegistry("test-model", nil, echoagent.Model, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestChatSessionConversation(t *testing.T) {
 					return resp, err
 				}
 			}
-			registry, closeBackends, err := harnessRegistry("test-model", modelFn, streamFn, nil)
+			registry, closeBackends, err := harnessRegistry("test-model", nil, modelFn, streamFn, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -274,7 +274,7 @@ func TestChatSessionModelFailure(t *testing.T) {
 	modelFn := func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 		return api.ModelResponse{}, modelErr
 	}
-	registry, closeBackends, err := harnessRegistry("test-model", modelFn, nil, nil)
+	registry, closeBackends, err := harnessRegistry("test-model", nil, modelFn, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,4 +329,60 @@ func newTestClient(t *testing.T, registry *placement.Registry) *client.Client {
 	}
 	t.Cleanup(func() { _ = c.Close() })
 	return c
+}
+
+func TestRemoteHarnessFlagParsing(t *testing.T) {
+	tests := []struct {
+		name    string
+		values  []string
+		want    map[string]string
+		wantErr bool
+	}{
+		{name: "name and address", values: []string{"shouty=127.0.0.1:9000"}, want: map[string]string{"shouty": "127.0.0.1:9000"}},
+		{name: "repeatable", values: []string{"a=host:1", "b=host:2"}, want: map[string]string{"a": "host:1", "b": "host:2"}},
+		{name: "surrounding space is trimmed", values: []string{" a = host:1 "}, want: map[string]string{"a": "host:1"}},
+		{name: "address may carry a scheme-less host name", values: []string{"a=harness.svc.cluster.local:80"}, want: map[string]string{"a": "harness.svc.cluster.local:80"}},
+		{name: "no separator", values: []string{"shouty"}, wantErr: true},
+		{name: "empty name", values: []string{"=host:1"}, wantErr: true},
+		{name: "empty address", values: []string{"a="}, wantErr: true},
+		{name: "duplicate name", values: []string{"a=host:1", "a=host:2"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remotes := remoteHarnesses{}
+			var err error
+			for _, v := range tt.values {
+				if err = remotes.Set(v); err != nil {
+					break
+				}
+			}
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Set(%q) accepted an invalid value", tt.values)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Set(%q): %v", tt.values, err)
+			}
+			if len(remotes) != len(tt.want) {
+				t.Fatalf("got %d harnesses, want %d", len(remotes), len(tt.want))
+			}
+			for name, addr := range tt.want {
+				if remotes[name] != addr {
+					t.Fatalf("harness %q = %q, want %q", name, remotes[name], addr)
+				}
+			}
+		})
+	}
+}
+
+// A remote harness must not silently displace one this binary serves itself.
+func TestRemoteHarnessCannotShadowABuiltInName(t *testing.T) {
+	remotes := remoteHarnesses{"echo": "127.0.0.1:9000"}
+	_, closeBackends, err := harnessRegistry("", remotes, echoagent.Model, nil, nil)
+	if err == nil {
+		closeBackends()
+		t.Fatal("registry accepted a remote harness named echo, shadowing the built-in")
+	}
 }
