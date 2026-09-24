@@ -214,8 +214,8 @@ Real today, and worth knowing before you build on it:
 ## Stability
 
 `agentsessions.v1` is a proto namespace, not a stability promise. The Go module is pre-1.0 and makes
-no backward-compatibility guarantee. See the README's API stability section for what CI enforces and
-when the compatibility gate arms itself.
+no backward-compatibility guarantee. See the README's API stability section for what CI enforces,
+including the compatibility gate that runs against the most recent release tag.
 
 ## Where next
 
