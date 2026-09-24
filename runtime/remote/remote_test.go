@@ -141,3 +141,77 @@ func TestStopLeavesTheHarnessRunning(t *testing.T) {
 		t.Fatalf("harness unreachable after stopping a session: %v", err)
 	}
 }
+
+// The four below mirror runtime/local's direct unit tests, so the claim that this backend has the
+// same filesystem-only semantics is asserted rather than implied by the end-to-end test.
+
+func TestSnapshotIsExternalOnly(t *testing.T) {
+	backend := remote.New("127.0.0.1:1")
+	t.Cleanup(func() { _ = backend.Close() })
+	ctx := context.Background()
+	inc := api.Incarnation{ID: "sess-a"}
+
+	ref, err := backend.Snapshot(ctx, inc, api.SnapshotExternal)
+	if err != nil {
+		t.Fatalf("external snapshot: %v", err)
+	}
+	if ref.Local != "sess-a" {
+		t.Fatalf("ref.Local = %q, want the session handle %q", ref.Local, "sess-a")
+	}
+	if ref.Memory {
+		t.Fatal("ref.Memory is true; this backend owns no sandbox and cannot capture memory")
+	}
+	if _, err := backend.Snapshot(ctx, inc, api.SnapshotLocal); err == nil {
+		t.Fatal("warm (LOCAL) snapshot was accepted; the journal is the durable state")
+	}
+}
+
+func TestRestoreReattachesToTheSameAddress(t *testing.T) {
+	backend := remote.New("127.0.0.1:9999")
+	t.Cleanup(func() { _ = backend.Close() })
+	ctx := context.Background()
+
+	inc, err := backend.Restore(ctx, api.SnapshotRef{Local: "sess-a"})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if inc.ID != "sess-a" || inc.Address != "127.0.0.1:9999" || inc.Runtime != "remote" {
+		t.Fatalf("restored incarnation = %+v, want the session at the configured address", inc)
+	}
+	if _, err := backend.Restore(ctx, api.SnapshotRef{}); err == nil {
+		t.Fatal("restore accepted a ref with no session handle")
+	}
+}
+
+func TestForkGivesTheChildItsOwnIncarnation(t *testing.T) {
+	backend := remote.New("127.0.0.1:9999")
+	t.Cleanup(func() { _ = backend.Close() })
+	ctx := context.Background()
+
+	inc, err := backend.Fork(ctx, api.SnapshotRef{Local: "sess-parent"}, api.ForkOpts{ChildSessionUID: "sess-child"})
+	if err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	if inc.ID != "sess-child" {
+		t.Fatalf("forked incarnation id = %q, want the child uid", inc.ID)
+	}
+	if inc.Address != "127.0.0.1:9999" {
+		t.Fatalf("child address = %q, want the same harness", inc.Address)
+	}
+	if _, err := backend.Fork(ctx, api.SnapshotRef{Local: "sess-parent"}, api.ForkOpts{}); err == nil {
+		t.Fatal("fork accepted opts with no child session uid")
+	}
+}
+
+func TestStatusReportsLive(t *testing.T) {
+	backend := remote.New("127.0.0.1:1")
+	t.Cleanup(func() { _ = backend.Close() })
+
+	state, err := backend.Status(context.Background(), api.Incarnation{ID: "sess-a"})
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if state != api.ComputeLive {
+		t.Fatalf("state = %v, want %v", state, api.ComputeLive)
+	}
+}

@@ -71,6 +71,11 @@ func New(addr string, opts ...Option) *Backend {
 
 // connect dials the harness once and reuses the connection. gRPC reconnects underneath, so a
 // harness that restarts is picked up again without this backend tracking its lifecycle.
+//
+// This is deliberately a second connection to the same harness: the Placer dials Incarnation.Address
+// itself to run a turn, and that dial belongs to the Placer because it owns the execution stream and
+// its interceptors. Collapsing the two would mean handing a connection across that boundary for no
+// gain, so the backend keeps its own for Describe.
 func (b *Backend) connect() (api.Harness, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
