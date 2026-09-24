@@ -179,21 +179,22 @@ stability today.
 What CI does enforce:
 
 - `buf lint` on every change.
-- `buf breaking` against the **most recent release tag**. There is no tag yet, so it currently reports
-  that it is inactive and passes. It arms itself at the first release, which is when compatibility
-  starts being a promise to anyone.
+- `buf breaking` against the **most recent release tag**. This armed itself at the first release and
+  now fails the build when the schema breaks against that tag.
 - The checked-in generated code and the API reference must match the protos, so the published contract
   cannot drift from the schema.
 
-At v0.1.0 that becomes: breaking changes are called out in [`CHANGELOG.md`](CHANGELOG.md), and the
-gate fails the build when the schema breaks against the last release. Until then, treat the contract as being designed
-rather than maintained.
+Breaking changes are called out in [`CHANGELOG.md`](CHANGELOG.md). The contract is still pre-1.0, so
+it can break between releases; what the gate buys you is that it cannot break silently.
 
 ## Status
 
 Working reference implementation (Go 1.26). The Sessions API, the single-writer event-sourced controller,
 the durable hash-chained log, BYOH over `Harness.Connect`, the `Runtime` SPI with local + substrate
-backends, the replay-conformance suite, and real-substrate conformance across both capability tiers all
-run today. Productization (managed control plane, enterprise identity/provenance, confidential/GPU
-snapshots) and session-level suspend/resume *orchestrated through the `Placer`* (the conformance driver
-exercises the raw SPI today) are in progress.
+backends, the replay-conformance suite, and real-substrate conformance across both capability tiers
+all run today. Session-level suspend and resume run through the `Placer` for stateless-replay
+harnesses; a memory-snapshot harness still suspends through the raw `Runtime` SPI, because
+`Placer.Suspend` stops the incarnation after snapshotting and a memory suspend must not.
+
+Not built: authentication, authorization, and transport security; a managed control plane;
+enterprise identity and provenance; and confidential or GPU snapshots.

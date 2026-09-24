@@ -144,9 +144,11 @@ does not yet expose.
 It is a working reference implementation (Go 1.26), not yet a productized service. The Sessions API, the
 single-writer event-sourced controller, the durable hash-chained log, bring-your-own-harness over
 `Harness.Connect`, the `Runtime` SPI with local and substrate backends, the replay-conformance suite, and
-real-substrate conformance across both capability tiers all run today. Productization (managed control
-plane, enterprise identity and provenance, confidential and GPU snapshots) and session-level suspend and
-resume orchestrated through the `Placer` are in progress. See the Status section of the root README.
+real-substrate conformance across both capability tiers all run today. Session-level suspend and resume
+run through the `Placer` for stateless-replay harnesses, while a memory-snapshot harness still suspends
+through the raw `Runtime` SPI. There is no authentication, authorization, or transport security, and no
+managed control plane, enterprise identity and provenance, or confidential and GPU snapshots. See the
+Status section of the root README.
 
 ## Where is the wire format?
 
