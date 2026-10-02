@@ -71,6 +71,20 @@ Two fields carry rules worth internalizing now:
 - `Inputs` is **empty when the host is re-driving an interrupted turn**. An `Exec` with no inputs means
   "continue the last execution", not "start a new one".
 
+`Config` is opaque per-execution data, not session metadata: the host journals non-empty bytes before
+calling the harness and restores them verbatim for controller replay, interrupted-turn resume, and
+inherited fork executions. `ResumeFromSeq` is journaled at the same boundary; it is a harness cursor,
+not the append CAS cursor. Reconstructed values come from the journal, not a replacement caller's
+config. The current execution's host-owned `EXECUTION_START` is excluded from `History`; prior
+executions' start markers remain in the exact history prefix. Harnesses should not treat those
+markers as conversation messages or emit start markers themselves.
+
+Executions without a start marker use empty config and a zero cursor. This includes legacy logs:
+older discarded non-empty config/cursors are irrecoverable, so those executions may fail deterministic
+reconstruction if their original behavior depended on the missing values. See
+[durable execution invocation](concepts.md#durable-execution-invocation) for the journal layout.
+Do not put credentials in config: it is durable journal content, not a secret channel.
+
 ## The event sink
 
 Everything your harness does that the world should see, it does through the sink (`api.EventSink`). The

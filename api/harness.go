@@ -63,11 +63,11 @@ type Capabilities struct {
 // Start is the per-execution invocation the host sends to the harness.
 type Start struct {
 	ExecutionID   string    // host-assigned identity of this Run; shared by its events and deltas
-	Config        []byte    // opaque per-execution config
+	Config        []byte    // opaque per-execution config; journaled verbatim and restored on replay/resume
 	History       []Event   // replay context; empty if the sandbox was memory-restored
 	Inputs        []Message // new input(s); empty = resume/re-drive an interrupted execution
 	Identity      IdentityContext
-	ResumeFromSeq int64
+	ResumeFromSeq int64 // opaque harness cursor, journaled with Config; distinct from the append CAS cursor
 }
 
 // IdentityContext carries the session principal and, optionally, a minter so the

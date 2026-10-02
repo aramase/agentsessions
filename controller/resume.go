@@ -55,9 +55,11 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	}
 	recordedEffectCount = len(execution.stream)
 	start := &api.Start{
-		ExecutionID: execution.id,
-		Inputs:      execution.inputs,
-		History:     events[:execution.start],
+		ExecutionID:   execution.id,
+		Inputs:        execution.inputs,
+		History:       events[:execution.start],
+		Config:        execution.config,
+		ResumeFromSeq: execution.resumeFromSeq,
 	}
 	if err := har.Run(ctx, start, sink); err != nil {
 		_, _ = c.appendSeq(execution.id, api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})

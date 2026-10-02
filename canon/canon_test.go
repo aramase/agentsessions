@@ -6,6 +6,7 @@ import (
 
 	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/canon"
+	"github.com/aramase/agentsessions/wire"
 )
 
 // goldenEvent is a fixed event whose canonical hash is published below as an interop golden
@@ -28,6 +29,43 @@ func goldenEvent() api.Event {
 // goldenHash is content_hash for goldenEvent() at prev_hash="" seq=1. Published interop vector:
 // an independent JCS-over-proto3-JSON implementation must reproduce this exact value.
 const goldenHash = "551bd146050c8d630b0c3b999a4445f3792a470db9bca443d8d4a67706283fcc"
+
+func TestExecutionStartCanonicalBytes(t *testing.T) {
+	event := api.Event{
+		ExecutionID: "exec-config", Kind: api.EventExecutionStart,
+		ExecutionStart: &api.ExecutionStart{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993},
+	}
+	got, err := canon.Record("", 1, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Opaque bytes use proto3-JSON base64; the int64 cursor must not lose precision via a JSON number.
+	want := `{"event":{"execution_id":"exec-config","execution_start":{"config":"AP8gCgk=","resume_from_seq":"9007199254740993"},"kind":"EVENT_EXECUTION_START"},"prev_hash":"","seq":"1"}`
+	if string(got) != want {
+		t.Fatalf("canonical execution start = %s, want %s", got, want)
+	}
+	roundTrip, err := canon.Record("", 1, wire.EventFromProto(wire.EventToProto(event)))
+	if err != nil || string(roundTrip) != want {
+		t.Fatalf("wire canonical bytes = %s, %v", roundTrip, err)
+	}
+	original, err := canon.HashRecord("", 1, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, changed := range []api.ExecutionStart{
+		{Config: []byte{0, 255, ' ', '\n'}, ResumeFromSeq: 9007199254740993},
+		{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740992},
+	} {
+		event.ExecutionStart = &changed
+		hash, err := canon.HashRecord("", 1, event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hash == original {
+			t.Fatal("execution config/cursor is not bound into the hash")
+		}
+	}
+}
 
 func TestGoldenVector(t *testing.T) {
 	got, err := canon.HashRecord("", 1, goldenEvent())

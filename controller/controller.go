@@ -10,6 +10,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -109,8 +110,8 @@ func WithStreamingModel(fn StreamFunc) Option { return func(c *Controller) { c.s
 func WithObserver(o Observer) Option { return func(c *Controller) { c.observer = o } }
 
 // WithStart carries per-execution values the caller supplied straight through to the harness: the
-// opaque config and the resume cursor. They are passed rather than interpreted, since only the
-// harness knows what they mean.
+// opaque config and the resume cursor. Exec journals them before running the harness; Replay and
+// Resume use the recorded values, not this option. Only the harness knows what they mean.
 func WithStart(config []byte, resumeFromSeq int64) Option {
 	return func(c *Controller) {
 		c.startConfig = config
@@ -165,8 +166,8 @@ func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, erro
 	return c, nil
 }
 
-// Exec runs one live execution/turn. The first INPUT append is guarded by the caller's
-// expectedLastSeq (the single-writer CAS at the session boundary); the harness then runs
+// Exec runs one live execution/turn. The first append (EXECUTION_START when needed, else INPUT)
+// is guarded by expectedLastSeq (the single-writer CAS at the session boundary); the harness runs
 // host-mediated, and the turn ends with an END event.
 func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
@@ -203,11 +204,26 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		history = append(history, r.Event)
 	}
 
+	// Preserve the default/inputful layout, but record non-default invocation state before any
+	// harness code runs. An inputless execution also needs a durable boundary and initial CAS.
+	config := bytes.Clone(c.startConfig)
 	last := expectedLastSeq
+	if len(config) > 0 || c.startResumeFromSeq != 0 || len(inputs) == 0 {
+		rec, err := c.log.Append(last, c.fence, api.Event{
+			ExecutionID:    executionID,
+			Kind:           api.EventExecutionStart,
+			ExecutionStart: &api.ExecutionStart{Config: bytes.Clone(config), ResumeFromSeq: c.startResumeFromSeq},
+		})
+		if err != nil {
+			return err
+		}
+		c.observe(rec)
+		last = rec.Seq
+	}
 	for i := range inputs {
 		in := inputs[i]
-		// This is the CAS-guarded append, so it cannot go through appendSeq (which reads the head
-		// itself). It still has to be observed, or a caller watching the turn would never see the
+		// The first record uses the caller's CAS; subsequent inputs use the committed seq. Do
+		// not use appendSeq (which reads the head itself). Observe so a watching caller sees the
 		// input that started it.
 		rec, err := c.log.Append(last, c.fence, api.Event{
 			ExecutionID: executionID,
@@ -229,7 +245,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		ExecutionID:   executionID,
 		History:       history,
 		Inputs:        inputs,
-		Config:        c.startConfig,
+		Config:        config,
 		ResumeFromSeq: c.startResumeFromSeq,
 	}
 	if err := har.Run(ctx, start, &liveSink{c: c, executionID: executionID}); err != nil {
@@ -283,9 +299,11 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 		effectCount += len(execution.stream)
 		sink := &replaySink{stream: execution.stream}
 		start := &api.Start{
-			ExecutionID: execution.id,
-			History:     events[:execution.start],
-			Inputs:      execution.inputs,
+			ExecutionID:   execution.id,
+			History:       events[:execution.start],
+			Inputs:        execution.inputs,
+			Config:        execution.config,
+			ResumeFromSeq: execution.resumeFromSeq,
 		}
 		if err := har.Run(ctx, start, sink); err != nil {
 			return nil, err

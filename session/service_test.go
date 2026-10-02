@@ -109,6 +109,7 @@ func TestRequestFlowLogsAreCorrelated(t *testing.T) {
 	stream, err := client.Exec(context.Background(), &v1.ExecRequest{
 		Session: uid,
 		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "do-not-log-this"))},
+		Config:  []byte("do-not-log-config"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -121,8 +122,8 @@ func TestRequestFlowLogsAreCorrelated(t *testing.T) {
 		}
 	}
 
-	if strings.Contains(output.String(), "do-not-log-this") {
-		t.Fatalf("logs contain input contents: %s", output.String())
+	if strings.Contains(output.String(), "do-not-log-this") || strings.Contains(output.String(), "do-not-log-config") {
+		t.Fatalf("logs contain input/config contents: %s", output.String())
 	}
 	required := map[string]bool{
 		"grpc/request":                     false,
@@ -825,28 +826,56 @@ func (h *configHarness) Run(ctx context.Context, s *api.Start, sink api.EventSin
 	return err
 }
 
-// config and resume_from_seq are opaque to the host and meaningful only to the harness, so the test
-// that they are honored is that they arrive there.
+// Opaque request values must reach both the real placed harness and the durable stream, unchanged.
 func TestExecPassesConfigAndCursorToHarness(t *testing.T) {
 	var got api.Start
 	c := newClientWith(t, local.New(&configHarness{got: &got}))
-
+	uid := mustCreate(t, c)
+	config := []byte{0, 255, ' ', '\n', '\t'}
 	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
-		Session:       mustCreate(t, c),
+		Session:       uid,
 		Inputs:        []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
-		Config:        []byte(`{"temperature":0}`),
+		Config:        config,
 		ResumeFromSeq: 7,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := drainExec(stream); err != nil {
+	var first *v1.LogRecord
+	for {
+		update, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first == nil && update.GetRecord() != nil {
+			first = update.GetRecord()
+		}
+	}
+	if !bytes.Equal(got.Config, config) || got.ResumeFromSeq != 7 {
+		t.Fatalf("harness saw config %q cursor %d, want request's", got.Config, got.ResumeFromSeq)
+	}
+	if first == nil || first.GetSeq() != 1 || first.GetEvent().GetKind() != v1.EventKind_EVENT_EXECUTION_START {
+		t.Fatalf("first record = %v, want execution start", first)
+	}
+	body := first.GetEvent().GetExecutionStart()
+	if body == nil || !bytes.Equal(body.GetConfig(), config) || body.GetResumeFromSeq() != 7 {
+		t.Fatalf("recorded start = %v, want request's", body)
+	}
+	replayed, err := c.Replay(t.Context(), &v1.ReplayRequest{Session: uid, ToSeq: 1})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got.Config) != `{"temperature":0}` {
-		t.Fatalf("harness saw config %q, want the request's", got.Config)
+	record, err := replayed.Recv()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got.ResumeFromSeq != 7 {
-		t.Fatalf("harness saw resume_from_seq %d, want 7", got.ResumeFromSeq)
+	if !proto.Equal(record, first) {
+		t.Fatal("record changed between Exec and read-only Replay")
+	}
+	if _, err := replayed.Recv(); err != io.EOF {
+		t.Fatalf("expected Replay EOF, got %v", err)
 	}
 }

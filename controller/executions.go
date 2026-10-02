@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/aramase/agentsessions/api"
@@ -10,11 +11,13 @@ import (
 // exact History boundary; every execution-scoped event carries id, so no content-based inference
 // is needed.
 type recordedExecution struct {
-	id        string
-	start     int
-	inputs    []api.Message
-	stream    []api.Event
-	completed bool
+	id            string
+	start         int
+	inputs        []api.Message
+	stream        []api.Event
+	completed     bool
+	config        []byte
+	resumeFromSeq int64
 }
 
 // recordedExecutions groups execution-scoped events by ID in first-seen journal order. Lifecycle
@@ -44,6 +47,12 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 
 		execution := &executions[executionIndex]
 		switch event.Kind {
+		case api.EventExecutionStart:
+			if execution.start != i || event.ExecutionStart == nil {
+				return nil, fmt.Errorf("%w: execution %q has an invalid start event", ErrInvalidExecutionLog, execution.id)
+			}
+			execution.config = bytes.Clone(event.ExecutionStart.Config)
+			execution.resumeFromSeq = event.ExecutionStart.ResumeFromSeq
 		case api.EventInput:
 			if event.Message != nil {
 				execution.inputs = append(execution.inputs, *event.Message)
