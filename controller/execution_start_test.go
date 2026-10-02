@@ -486,10 +486,11 @@ func TestExecutionStartFailedFirstAppendNeverRunsHarness(t *testing.T) {
 					t.Fatal(err)
 				}
 				expected := int64(0)
-				if failure == "CAS" {
+				switch failure {
+				case "CAS":
 					expected = 1
 					wantErr = eventlog.ErrConflict
-				} else if failure == "fence" {
+				case "fence":
 					if _, err := log.NewFence(); err != nil {
 						t.Fatal(err)
 					}
