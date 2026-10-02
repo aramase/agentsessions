@@ -482,6 +482,10 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		finish(err, "error_kind", serviceErrorKind(err), "children_created", childrenCreated)
 	}()
 
+	if req.GetIdentity() != nil {
+		return nil, status.Error(codes.InvalidArgument, "ForkRequest.identity is unsupported: per-child principals are not enforced")
+	}
+
 	placer, err := s.placerFor(req.GetSession(), "")
 	if err != nil {
 		return nil, err
@@ -534,10 +538,6 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "fork labels: %v", err)
 	}
-	childIdentity, err := encodeMessage(req.GetIdentity())
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "fork identity: %v", err)
-	}
 	out := make([]*v1.Session, 0, len(children))
 	for i, child := range children {
 		var name string
@@ -553,14 +553,12 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 			ParentUID: req.GetSession(),
 			ForkSeq:   atSeq,
 			// A child inherits the parent's annotations and origin, because it is the same
-			// workload branched and its external context did not change. Labels and identity come
-			// from the request instead: labels are how a caller tells branches apart, so copying
-			// them would make a fan-out indistinguishable, and identity names who the child runs
-			// for, which a fork is entitled to change.
+			// workload branched and its external context did not change. Labels come from the
+			// request instead, so callers can distinguish branches. Identity is not inherited;
+			// per-child principals are unsupported and rejected before placement.
 			Annotations: parentInfo.Annotations,
 			Origin:      parentInfo.Origin,
 			Labels:      childLabels,
-			Identity:    childIdentity,
 		}); err != nil {
 			return nil, status.Errorf(codes.Internal, "fork: record child %q: %v", child.UID, err)
 		}

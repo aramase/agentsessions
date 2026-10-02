@@ -57,7 +57,9 @@ that tries. A session goes from live to a cold snapshot and back.
 
 The log holds what happened. It does not hold what the session *is* — the project that owns it, its
 display name, the configured harness and model — because none of that is an event. That lives in a
-metadata row alongside the log, written by `CreateSession` before any event exists.
+metadata row alongside the log, written by `CreateSession` before any event exists. Caller-supplied
+`labels` and `annotations` are stored there as JSON and returned by `CreateSession`, `GetSession` and
+`ListSessions`, including after the journal is reopened.
 
 This is why a session that was just created, with no turns and no compute, still shows up in
 `ListSessions`. A listing derived from the event table alone would drop exactly the sessions a user
@@ -90,6 +92,18 @@ So a child is unnamed unless the caller names it with `ForkRequest.child_names`,
 entries or exactly `count` of them. Lineage is not lost by this: `parent_uid` and `fork_seq` are
 stored on the child, so a caller that wants to show "branched from X" has the structured data to
 build it from and does not need the server to flatten it into a string.
+
+Map metadata follows a separate rule: each child gets exactly `ForkRequest.labels`, never a merge
+with or copy of the parent's labels. Leaving request labels unset or empty gives children an empty
+label map. The parent's `annotations` and `origin` are inherited unchanged. Both maps are persisted
+and returned in the fork response and subsequent `GetSession` and `ListSessions` calls.
+
+`ForkRequest.identity` is unsupported because per-child principals are not enforced. Any supplied
+identity, even an empty message, is rejected with `INVALID_ARGUMENT` and the fixed error
+`ForkRequest.identity is unsupported: per-child principals are not enforced` before placement,
+provisioning, or journal mutation. Leave it unset to fork; children do not inherit the parent's
+identity. This does not change `Session.identity`, which remains recorded provenance rather than
+authorization (see [security posture](security.md)).
 
 ## Event and the typed log
 
