@@ -766,7 +766,7 @@ func (*ReasoningPart_OpaqueUri) isReasoningPart_Opaque() {}
 // Message is a role-tagged sequence of content parts (A2A Message = role + Part[]).
 type Message struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Role          string                 `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"` // system | user | assistant | tool
+	Role          string                 `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"` // system, user, assistant, or tool
 	Parts         []*Part                `protobuf:"bytes,2,rep,name=parts,proto3" json:"parts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
