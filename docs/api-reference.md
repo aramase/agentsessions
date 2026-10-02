@@ -213,6 +213,7 @@ non-empty values cannot be recovered. Config is opaque: preserve bytes verbatim,
 | ----- | ---- | ----- | ----------- |
 | config | [bytes](#bytes) |  |  |
 | resume_from_seq | [int64](#int64) |  | harness cursor, distinct from the append CAS cursor |
+| input_count | [int64](#int64) | optional | Expected number of INPUT events for this invocation, always set by new writers (including zero). Replay/resume reject a completed or selected invocation with a missing/negative count or a different committed INPUT count before running the harness. An incomplete trailing invocation is skipped by completed replay. Count-less experimental start markers fail closed; truly markerless legacy executions retain their existing reconstruction behavior. |
 
 
 
@@ -565,7 +566,7 @@ ToolCall aligns with an MCP tool call (name &#43; structured args).
 | EVENT_LIFECYCLE | 9 |  |
 | EVENT_END | 10 |  |
 | EVENT_ERROR | 11 |  |
-| EVENT_EXECUTION_START | 12 | host-owned config/cursor, before inputs and harness effects |
+| EVENT_EXECUTION_START | 12 | host-owned config/cursor/input count, before inputs and harness effects |
 
 
 
@@ -747,7 +748,7 @@ addition); it is empty when the sandbox was memory-restored.
 | ----- | ---- | ----- | ----------- |
 | config | [bytes](#bytes) |  |  |
 | history | [Event](#agentsessions-v1-Event) | repeated |  |
-| inputs | [Message](#agentsessions-v1-Message) | repeated | New input messages for this execution. Empty = resume/re-drive an interrupted execution from history with no new input. |
+| inputs | [Message](#agentsessions-v1-Message) | repeated | Invocation input messages. Controller replay and interrupted recovery restore the original messages from the journal; empty inputs describe an intentionally inputless invocation. |
 | identity | [IdentityContext](#agentsessions-v1-IdentityContext) |  |  |
 | resume_from_seq | [int64](#int64) |  |  |
 

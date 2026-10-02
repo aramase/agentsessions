@@ -99,7 +99,7 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 
 | Kind | Meaning |
 |---|---|
-| `EXECUTION_START` | Host-owned opaque execution config and harness resume cursor, recorded before the harness runs when needed. |
+| `EXECUTION_START` | Host-owned opaque execution config, harness resume cursor, and expected input count, recorded before the harness runs when needed. |
 | `INPUT` | A user or producer input message. |
 | `MODEL_CALL` | A call to a model was made (records the model, params, and an input hash for the replay check). |
 | `OUTPUT` | Assistant output (a delta or a full message). |
@@ -119,11 +119,22 @@ opaque reasoning block).
 
 For a non-empty `ExecRequest.config` or non-zero `resume_from_seq`, the controller commits an
 `EXECUTION_START` before inputs or harness execution. It preserves opaque config bytes verbatim,
-including binary data and whitespace, and records the harness cursor at the same boundary. A direct
-`Controller.Exec` with no inputs also emits this marker to establish a durable turn and initial CAS.
+including binary data and whitespace, and records the harness cursor and expected `INPUT` count at
+the same boundary. A direct `Controller.Exec` with no inputs also emits this marker, with an explicit
+zero count, to establish a durable turn and initial CAS.
 Default-config, zero-cursor executions with inputs retain their existing `INPUT`-first layout.
 The caller's `expected_last_seq` guards the first committed record, whether it is a start or an input;
 if that append fails, neither the harness nor the model runs.
+
+The marker and inputs are separate appends. If an input append fails, or the process dies before all
+inputs commit, the marker's count prevents recovery from running a different invocation. Before any
+harness runs, controller Replay validates every completed invocation's count, and Resume validates
+the last interrupted invocation. Missing/negative counts, mismatched committed input counts, and
+payloadless `INPUT` records return `ErrInvalidExecutionLog` without running the harness/model/tool or
+appending execution records. Explicit zero permits genuinely inputless invocations; all inputs
+committed before a crash permits resume even if the harness has not run yet. Completed Replay skips
+an incomplete trailing invocation and remains read-only. A historical fork cut before all expected
+inputs likewise cannot resume, but completed prefixes and complete invocation boundaries still work.
 
 Controller replay and interrupted-turn resume reconstruct each `Start` from its own recorded values,
 including in inherited fork prefixes. `History` is the exact prior journal prefix: it excludes the
@@ -134,8 +145,11 @@ is opaque and distinct from the append CAS cursor.
 **Legacy logs:** an execution without an `EXECUTION_START` reconstructs with empty config and a zero
 cursor, regardless of a new controller's `WithStart` option. Older builds discarded these values;
 non-empty config or non-zero cursors from those executions cannot be recovered retroactively. No
-SQLite schema migration or rewriting of existing records is needed. Older readers that do not
-understand the new event cannot faithfully reconstruct non-default executions.
+SQLite schema migration or rewriting of existing records is needed. Experimental start markers
+without `input_count` fail closed when their invocation is selected for resume or is completed for
+replay: absence cannot distinguish a genuine inputless turn from lost inputs. Markerless logs retain
+their prior behavior; this completeness check does not add markers to default inputful turns. Older
+readers that do not understand the new event/count cannot faithfully reconstruct these executions.
 
 ## The event log: single writer, append-only, tamper-evident
 

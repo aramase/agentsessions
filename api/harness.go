@@ -65,7 +65,7 @@ type Start struct {
 	ExecutionID   string    // host-assigned identity of this Run; shared by its events and deltas
 	Config        []byte    // opaque per-execution config; journaled verbatim and restored on replay/resume
 	History       []Event   // replay context; empty if the sandbox was memory-restored
-	Inputs        []Message // new input(s); empty = resume/re-drive an interrupted execution
+	Inputs        []Message // invocation inputs; originals are restored on controller replay/resume
 	Identity      IdentityContext
 	ResumeFromSeq int64 // opaque harness cursor, journaled with Config; distinct from the append CAS cursor
 }

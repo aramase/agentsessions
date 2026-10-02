@@ -18,6 +18,9 @@ type recordedExecution struct {
 	completed     bool
 	config        []byte
 	resumeFromSeq int64
+	hasStart      bool
+	inputCount    *int64
+	inputRecords  int
 }
 
 // recordedExecutions groups execution-scoped events by ID in first-seen journal order. Lifecycle
@@ -53,7 +56,10 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 			}
 			execution.config = bytes.Clone(event.ExecutionStart.Config)
 			execution.resumeFromSeq = event.ExecutionStart.ResumeFromSeq
+			execution.hasStart = true
+			execution.inputCount = event.ExecutionStart.InputCount
 		case api.EventInput:
+			execution.inputRecords++
 			if event.Message != nil {
 				execution.inputs = append(execution.inputs, *event.Message)
 			}
@@ -64,5 +70,34 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 		}
 	}
 
+	// Validate every completed invocation before any harness runs. Incomplete invocations are
+	// skipped by Replay; Resume validates its selected invocation separately.
+	for _, execution := range executions {
+		if execution.completed {
+			if err := execution.validateInputs(); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return executions, nil
+}
+
+func (e recordedExecution) validateInputs() error {
+	if !e.hasStart {
+		return nil // Markerless legacy logs have no recorded completeness information.
+	}
+	if e.inputCount == nil {
+		return fmt.Errorf("%w: execution %q start has no input_count", ErrInvalidExecutionLog, e.id)
+	}
+	if *e.inputCount < 0 {
+		return fmt.Errorf("%w: execution %q has negative input_count %d", ErrInvalidExecutionLog, e.id, *e.inputCount)
+	}
+	if e.inputRecords != len(e.inputs) {
+		return fmt.Errorf("%w: execution %q has an INPUT without a message", ErrInvalidExecutionLog, e.id)
+	}
+	if int64(e.inputRecords) != *e.inputCount {
+		return fmt.Errorf("%w: execution %q expected %d INPUT events, committed %d",
+			ErrInvalidExecutionLog, e.id, *e.inputCount, e.inputRecords)
+	}
+	return nil
 }

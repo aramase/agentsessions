@@ -13,7 +13,8 @@ import (
 // did not complete (no END), Resume re-runs the harness with a hybrid sink that SERVES the
 // already-recorded effects — never re-invoking a recorded model/tool call (at-most-once, I3) — and
 // switches to LIVE (invoke + record) for anything past the crash point, then appends END. If the
-// last turn is complete or the log is empty, it is a no-op (returns false).
+// last turn is complete or the log is empty, it is a no-op (returns false). A start marker with
+// missing or inconsistent input completeness information is rejected before the harness runs.
 func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, recordedEffectCount int
@@ -49,6 +50,9 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	}
 
 	execution := executions[len(executions)-1]
+	if err := execution.validateInputs(); err != nil {
+		return false, err
+	}
 	sink := &resumeSink{
 		live:   liveSink{c: c, executionID: execution.id},
 		stream: execution.stream,

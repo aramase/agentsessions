@@ -57,7 +57,7 @@ The host hands you a `Start` and an `EventSink`.
 type Start struct {
     Config        []byte    // opaque per-execution config
     History       []Event   // replay context; EMPTY if the sandbox was memory-restored
-    Inputs        []Message // new input(s); EMPTY = resume/re-drive an interrupted execution
+    Inputs        []Message // invocation inputs, restored from the journal on controller recovery
     Identity      IdentityContext
     ResumeFromSeq int64
 }
@@ -68,8 +68,9 @@ Two fields carry rules worth internalizing now:
 - `History` is your replay context on the `STATELESS_REPLAY` path. It is **empty after a memory
   restore**, because a memory-snapshot harness already holds its state in RAM. Never rebuild in-RAM
   state from `History` (invariant I4, [below](#rule-3-choose-resumability-honestly)).
-- `Inputs` is **empty when the host is re-driving an interrupted turn**. An `Exec` with no inputs means
-  "continue the last execution", not "start a new one".
+- `Inputs` contains the invocation's messages. Controller replay and interrupted recovery restore
+  the original `Start.Inputs` from the journal. For a marked invocation, an empty slice is valid only
+  when its recorded input count is explicitly zero.
 
 `Config` is opaque per-execution data, not session metadata: the host journals non-empty bytes before
 calling the harness and restores them verbatim for controller replay, interrupted-turn resume, and
@@ -78,6 +79,15 @@ not the append CAS cursor. Reconstructed values come from the journal, not a rep
 config. The current execution's host-owned `EXECUTION_START` is excluded from `History`; prior
 executions' start markers remain in the exact history prefix. Harnesses should not treat those
 markers as conversation messages or emit start markers themselves.
+
+Each new start marker also records the expected input count, including an explicit zero for an
+inputless invocation. The controller checks completeness before replaying a completed invocation or
+resuming an interrupted one. A crash or fork cut before all inputs commit returns
+`ErrInvalidExecutionLog` without calling `Run`, the model, or tools, and without appending execution
+records; it does not silently turn missing inputs into an inputless turn. Once all inputs commit,
+resume is valid even if the crash preceded `Run`. Completed replay skips incomplete trailing turns.
+Experimental markers lacking the count fail closed when reconstructed; markerless logs retain their
+legacy behavior. Placement/runtime restoration can still precede controller validation.
 
 Executions without a start marker use empty config and a zero cursor. This includes legacy logs:
 older discarded non-empty config/cursors are irrecoverable, so those executions may fail deterministic

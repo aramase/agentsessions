@@ -325,7 +325,8 @@ func TestExecutionStartBoundaryAndLegacyDefaults(t *testing.T) {
 				}
 				if tc.wantMarker {
 					body := recs[0].Event.ExecutionStart
-					if body == nil || !bytes.Equal(body.Config, tc.config) || body.ResumeFromSeq != tc.cursor {
+					if body == nil || !bytes.Equal(body.Config, tc.config) || body.ResumeFromSeq != tc.cursor ||
+						body.InputCount == nil || *body.InputCount != int64(len(tc.inputs)) {
 						t.Fatal("start values not durable before harness ran")
 					}
 				}
@@ -380,39 +381,60 @@ func TestExecutionStartConfigDoesNotAliasHarnessBytes(t *testing.T) {
 	}
 }
 
-func TestForkExecutionStartOnlyPrefixCanResume(t *testing.T) {
-	store, err := sqlitelog.Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	parent, child := store.Session("parent"), store.Session("child")
-	config := []byte{0, 255, ' ', '\n'}
-	live, err := controller.New(parent, echoModel, controller.WithStart(config, 5))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := live.Exec(t.Context(), executionConfigHarness{}, []api.Message{msg("not inherited")}, 0); err != nil {
-		t.Fatal(err)
-	}
-	// A historical prefix ending at the invocation marker is interrupted, with no inputs/effects.
-	if err := controller.Fork(parent, child, 1); err != nil {
-		t.Fatal(err)
-	}
-	resume, err := controller.New(child, echoModel)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var starts []api.Start
-	if resumed, err := resume.Resume(t.Context(), executionConfigHarness{&starts}); err != nil || !resumed {
-		t.Fatalf("marker-only prefix Resume = %v, %v", resumed, err)
-	}
-	if len(starts) != 1 || !bytes.Equal(starts[0].Config, config) || starts[0].ResumeFromSeq != 5 ||
-		len(starts[0].History) != 0 || len(starts[0].Inputs) != 0 {
-		t.Fatalf("marker-only resumed Start = %#v", starts)
-	}
-	if err := child.Verify(); err != nil {
-		t.Fatal(err)
+func TestForkExecutionStartInputCompleteness(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		inputs []api.Message
+		atSeq  int64
+		valid  bool
+	}{
+		{"marker only", []api.Message{msg("first"), msg("second")}, 1, false},
+		{"partial inputs", []api.Message{msg("first"), msg("second")}, 2, false},
+		{"all inputs", []api.Message{msg("first"), msg("second")}, 3, true},
+		{"explicit zero", nil, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			parent, child := store.Session("parent"), store.Session("child")
+			config := []byte{0, 255, ' ', '\n'}
+			live, err := controller.New(parent, echoModel, controller.WithStart(config, 5))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := live.Exec(t.Context(), executionConfigHarness{}, tc.inputs, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := controller.Fork(parent, child, tc.atSeq); err != nil {
+				t.Fatal(err)
+			}
+			resume, err := controller.New(child, echoModel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var starts []api.Start
+			har := executionConfigHarness{&starts}
+			if tc.valid {
+				if resumed, err := resume.Resume(t.Context(), har); err != nil || !resumed {
+					t.Fatalf("complete prefix Resume = %v, %v", resumed, err)
+				}
+				if len(starts) != 1 || !bytes.Equal(starts[0].Config, config) || starts[0].ResumeFromSeq != 5 ||
+					len(starts[0].History) != 0 || !reflect.DeepEqual(messageTexts(starts[0].Inputs), messageTexts(tc.inputs)) {
+					t.Fatalf("fork changed Start = %#v", starts)
+				}
+			} else {
+				assertIncompleteInvocation(t, child, resume, har)
+				if len(starts) != 0 {
+					t.Fatal("ran incomplete fork invocation")
+				}
+			}
+			if err := child.Verify(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

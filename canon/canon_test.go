@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/canon"
 	"github.com/aramase/agentsessions/wire"
@@ -33,14 +35,14 @@ const goldenHash = "551bd146050c8d630b0c3b999a4445f3792a470db9bca443d8d4a6770628
 func TestExecutionStartCanonicalBytes(t *testing.T) {
 	event := api.Event{
 		ExecutionID: "exec-config", Kind: api.EventExecutionStart,
-		ExecutionStart: &api.ExecutionStart{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993},
+		ExecutionStart: &api.ExecutionStart{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993, InputCount: proto.Int64(2)},
 	}
 	got, err := canon.Record("", 1, event)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Opaque bytes use proto3-JSON base64; the int64 cursor must not lose precision via a JSON number.
-	want := `{"event":{"execution_id":"exec-config","execution_start":{"config":"AP8gCgk=","resume_from_seq":"9007199254740993"},"kind":"EVENT_EXECUTION_START"},"prev_hash":"","seq":"1"}`
+	want := `{"event":{"execution_id":"exec-config","execution_start":{"config":"AP8gCgk=","input_count":"2","resume_from_seq":"9007199254740993"},"kind":"EVENT_EXECUTION_START"},"prev_hash":"","seq":"1"}`
 	if string(got) != want {
 		t.Fatalf("canonical execution start = %s, want %s", got, want)
 	}
@@ -53,8 +55,10 @@ func TestExecutionStartCanonicalBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, changed := range []api.ExecutionStart{
-		{Config: []byte{0, 255, ' ', '\n'}, ResumeFromSeq: 9007199254740993},
-		{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740992},
+		{Config: []byte{0, 255, ' ', '\n'}, ResumeFromSeq: 9007199254740993, InputCount: proto.Int64(2)},
+		{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740992, InputCount: proto.Int64(2)},
+		{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993, InputCount: proto.Int64(1)},
+		{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993},
 	} {
 		event.ExecutionStart = &changed
 		hash, err := canon.HashRecord("", 1, event)
@@ -62,8 +66,28 @@ func TestExecutionStartCanonicalBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if hash == original {
-			t.Fatal("execution config/cursor is not bound into the hash")
+			t.Fatal("execution config/cursor/input count is not bound into the hash")
 		}
+	}
+}
+
+func TestExecutionStartCanonicalInputCountPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		count *int64
+		want  string
+	}{
+		{"absent", nil, `{"event":{"execution_start":{},"kind":"EVENT_EXECUTION_START"},"prev_hash":"","seq":"1"}`},
+		{"zero", proto.Int64(0), `{"event":{"execution_start":{"input_count":"0"},"kind":"EVENT_EXECUTION_START"},"prev_hash":"","seq":"1"}`},
+		{"large", proto.Int64(9007199254740993), `{"event":{"execution_start":{"input_count":"9007199254740993"},"kind":"EVENT_EXECUTION_START"},"prev_hash":"","seq":"1"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := api.Event{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: tc.count}}
+			got, err := canon.Record("", 1, event)
+			if err != nil || string(got) != tc.want {
+				t.Fatalf("canonical count presence = %s, %v; want %s", got, err, tc.want)
+			}
+		})
 	}
 }
 

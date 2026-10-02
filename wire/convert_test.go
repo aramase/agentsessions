@@ -50,13 +50,16 @@ func TestEventRoundTrip(t *testing.T) {
 	cases := map[string]api.Event{
 		"execution_start": {
 			ExecutionID: "e1", Kind: api.EventExecutionStart,
-			ExecutionStart: &api.ExecutionStart{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993},
+			ExecutionStart: &api.ExecutionStart{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993, InputCount: proto.Int64(2)},
 		},
 		"execution_start_cursor_only": {
 			ExecutionID: "e1", Kind: api.EventExecutionStart,
-			ExecutionStart: &api.ExecutionStart{ResumeFromSeq: -7},
+			ExecutionStart: &api.ExecutionStart{ResumeFromSeq: -7, InputCount: proto.Int64(1)},
 		},
-		"execution_start_default": {
+		"execution_start_inputless": {
+			ExecutionID: "e1", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(0)},
+		},
+		"execution_start_legacy_absent_count": {
 			ExecutionID: "e1", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{},
 		},
 		"input": {
@@ -130,7 +133,8 @@ func TestEventRoundTrip(t *testing.T) {
 // proto3-JSON, contract §7) and is used by both the in-memory and sqlite logs.
 func TestHashStableAcrossWire(t *testing.T) {
 	events := []api.Event{
-		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993}},
+		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993, InputCount: proto.Int64(2)}},
+		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(0)}},
 		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{}},
 		{Kind: api.EventInput, Message: api.TextMessage("user", "drive")},
 		{Kind: api.EventModelCall, ModelCall: &api.ModelCall{Model: "m", Params: map[string]string{"a": "b"}, InputHash: "h", ID: "c1"}},

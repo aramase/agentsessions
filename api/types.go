@@ -121,10 +121,13 @@ type Event struct {
 
 // ExecutionStart is host-owned invocation state, recorded before the harness runs. Config is
 // opaque and preserved verbatim; ResumeFromSeq is the harness's cursor, not the log's CAS cursor.
+// InputCount records the expected number of INPUT events; zero explicitly permits inputless turns.
+// A nil count cannot establish completeness and is rejected when reconstructing this invocation.
 // Executions without this event reconstruct with empty config and a zero cursor (legacy defaults).
 type ExecutionStart struct {
 	Config        []byte
 	ResumeFromSeq int64
+	InputCount    *int64
 }
 
 // Lifecycle marks a compute/session transition in the log (§7). Baseline is a replay /

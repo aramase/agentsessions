@@ -100,7 +100,7 @@ const (
 	EventKind_EVENT_LIFECYCLE        EventKind = 9
 	EventKind_EVENT_END              EventKind = 10
 	EventKind_EVENT_ERROR            EventKind = 11
-	EventKind_EVENT_EXECUTION_START  EventKind = 12 // host-owned config/cursor, before inputs and harness effects
+	EventKind_EVENT_EXECUTION_START  EventKind = 12 // host-owned config/cursor/input count, before inputs and harness effects
 )
 
 // Enum value maps for EventKind.
@@ -1577,6 +1577,12 @@ type ExecutionStart struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Config        []byte                 `protobuf:"bytes,1,opt,name=config,proto3" json:"config,omitempty"`
 	ResumeFromSeq int64                  `protobuf:"varint,2,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"` // harness cursor, distinct from the append CAS cursor
+	// Expected number of INPUT events for this invocation, always set by new writers (including zero).
+	// Replay/resume reject a completed or selected invocation with a missing/negative count or a
+	// different committed INPUT count before running the harness. An incomplete trailing invocation
+	// is skipped by completed replay. Count-less experimental start markers fail closed; truly
+	// markerless legacy executions retain their existing reconstruction behavior.
+	InputCount    *int64 `protobuf:"varint,3,opt,name=input_count,json=inputCount,proto3,oneof" json:"input_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1621,6 +1627,13 @@ func (x *ExecutionStart) GetConfig() []byte {
 func (x *ExecutionStart) GetResumeFromSeq() int64 {
 	if x != nil {
 		return x.ResumeFromSeq
+	}
+	return 0
+}
+
+func (x *ExecutionStart) GetInputCount() int64 {
+	if x != nil && x.InputCount != nil {
+		return *x.InputCount
 	}
 	return 0
 }
@@ -2096,10 +2109,13 @@ const file_common_proto_rawDesc = "" +
 	"\x10LIFECYCLE_RESUME\x10\x02\x12\x12\n" +
 	"\x0eLIFECYCLE_FORK\x10\x03\x12\x16\n" +
 	"\x12LIFECYCLE_BASELINE\x10\x04\x12\x14\n" +
-	"\x10LIFECYCLE_CANCEL\x10\x05\"P\n" +
+	"\x10LIFECYCLE_CANCEL\x10\x05\"\x86\x01\n" +
 	"\x0eExecutionStart\x12\x16\n" +
 	"\x06config\x18\x01 \x01(\fR\x06config\x12&\n" +
-	"\x0fresume_from_seq\x18\x02 \x01(\x03R\rresumeFromSeq\"\xff\x06\n" +
+	"\x0fresume_from_seq\x18\x02 \x01(\x03R\rresumeFromSeq\x12$\n" +
+	"\vinput_count\x18\x03 \x01(\x03H\x00R\n" +
+	"inputCount\x88\x01\x01B\x0e\n" +
+	"\f_input_count\"\xff\x06\n" +
 	"\x05Event\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12*\n" +
 	"\x02ts\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x02ts\x12%\n" +
@@ -2249,6 +2265,7 @@ func file_common_proto_init() {
 		(*ReasoningPart_OpaqueBytes)(nil),
 		(*ReasoningPart_OpaqueUri)(nil),
 	}
+	file_common_proto_msgTypes[18].OneofWrappers = []any{}
 	file_common_proto_msgTypes[19].OneofWrappers = []any{
 		(*Event_Message)(nil),
 		(*Event_Model)(nil),

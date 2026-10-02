@@ -33,8 +33,9 @@ var ErrReplayInvokedModel = errors.New("controller: replay invoked the model (I1
 // the log was written (a determinism violation, symmetric to the I0 input-hash check).
 var ErrReplayDiverged = errors.New("controller: replay diverged from the journal")
 
-// ErrInvalidExecutionLog is returned when execution-scoped events do not carry a valid, contiguous
-// execution ID. Replay and resume require this durable identity to recover exact turn boundaries.
+// ErrInvalidExecutionLog is returned when execution-scoped events lack valid execution identity
+// or a start marker cannot establish a complete invocation. Replay and resume reject such turns
+// before running the harness.
 var ErrInvalidExecutionLog = errors.New("controller: invalid execution log")
 
 // ErrMissingIdempotencyKey rejects a CONTROLLER_MEDIATED tool call that omits the idempotency key
@@ -209,10 +210,13 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 	config := bytes.Clone(c.startConfig)
 	last := expectedLastSeq
 	if len(config) > 0 || c.startResumeFromSeq != 0 || len(inputs) == 0 {
+		inputCount := int64(len(inputs))
 		rec, err := c.log.Append(last, c.fence, api.Event{
-			ExecutionID:    executionID,
-			Kind:           api.EventExecutionStart,
-			ExecutionStart: &api.ExecutionStart{Config: bytes.Clone(config), ResumeFromSeq: c.startResumeFromSeq},
+			ExecutionID: executionID,
+			Kind:        api.EventExecutionStart,
+			ExecutionStart: &api.ExecutionStart{
+				Config: bytes.Clone(config), ResumeFromSeq: c.startResumeFromSeq, InputCount: &inputCount,
+			},
 		})
 		if err != nil {
 			return err
