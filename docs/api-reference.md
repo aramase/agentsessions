@@ -326,7 +326,7 @@ Message is a role-tagged sequence of content parts (A2A Message = role &#43; Par
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| role | [string](#string) |  | system | user | assistant | tool |
+| role | [string](#string) |  | system, user, assistant, or tool |
 | parts | [Part](#agentsessions-v1-Part) | repeated |  |
 
 
