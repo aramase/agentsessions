@@ -1569,8 +1569,8 @@ func (x *Lifecycle) GetSnapshotSealed() bool {
 	return false
 }
 
-// ExecutionStart is host-owned invocation state, committed before the harness runs. The host
-// emits it for non-default config/cursor or when there are no INPUT events to establish the turn.
+// ExecutionStart is host-owned invocation state, committed before inputs and harness execution.
+// The host emits it for every new execution, including default-config and inputless turns.
 // Logs without this event reconstruct with empty config and a zero cursor. Older discarded
 // non-empty values cannot be recovered. Config is opaque: preserve bytes verbatim, never parse it.
 type ExecutionStart struct {

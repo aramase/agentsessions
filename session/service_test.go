@@ -372,7 +372,7 @@ func TestSessionsServiceEndToEnd(t *testing.T) {
 		t.Fatalf("turn 1 outputs=%v", outs)
 	}
 
-	// replay re-delivers the 4 committed records of turn 1.
+	// replay re-delivers the 5 committed records of turn 1, including EXECUTION_START.
 	rs, err := c.Replay(ctx, &v1.ReplayRequest{Session: sess})
 	if err != nil {
 		t.Fatal(err)
@@ -391,8 +391,8 @@ func TestSessionsServiceEndToEnd(t *testing.T) {
 			t.Fatalf("record seq=%d missing content_hash", r.GetSeq())
 		}
 	}
-	if n != 4 {
-		t.Fatalf("replay delivered %d records, want 4", n)
+	if n != 5 {
+		t.Fatalf("replay delivered %d records, want 5", n)
 	}
 
 	// fork at head → a child sharing the prefix.
@@ -622,8 +622,8 @@ func TestExecWithoutCASAppendsAtHead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.GetLastSeq() != 12 { // 3 turns x (INPUT, MODEL_CALL, OUTPUT, END)
-		t.Fatalf("last_seq = %d after 3 turns, want 12", got.GetLastSeq())
+	if got.GetLastSeq() != 15 { // 3 turns x (EXECUTION_START, INPUT, MODEL_CALL, OUTPUT, END)
+		t.Fatalf("last_seq = %d after 3 turns, want 15", got.GetLastSeq())
 	}
 }
 

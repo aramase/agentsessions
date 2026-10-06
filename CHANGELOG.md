@@ -7,6 +7,15 @@ provide.
 
 ## Unreleased
 
+### Compatibility
+
+- Every new execution records `EXECUTION_START`, including default-config turns, so interrupted
+  recovery can reject partially committed inputs. Binaries older than this release fail chain
+  verification with a `content_hash` mismatch for sessions containing this event. This affects
+  every new session that executes a turn: an older binary cannot verify it after rollback.
+  Existing markerless sessions remain verifiable; no SQLite schema migration or log rewrite is
+  required.
+
 ## v0.1.2
 
 A patch release. No API change; it exists because the v0.1.1 images were unusable.

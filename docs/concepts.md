@@ -99,7 +99,7 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 
 | Kind | Meaning |
 |---|---|
-| `EXECUTION_START` | Host-owned opaque execution config, harness resume cursor, and expected input count, recorded before the harness runs when needed. |
+| `EXECUTION_START` | Host-owned opaque execution config, harness resume cursor, and expected input count, recorded before inputs for every new execution. |
 | `INPUT` | A user or producer input message. |
 | `MODEL_CALL` | A call to a model was made (records the model, params, and an input hash for the replay check). |
 | `OUTPUT` | Assistant output (a delta or a full message). |
@@ -117,14 +117,12 @@ opaque reasoning block).
 
 ### Durable execution invocation
 
-For a non-empty `ExecRequest.config` or non-zero `resume_from_seq`, the controller commits an
-`EXECUTION_START` before inputs or harness execution. It preserves opaque config bytes verbatim,
+The controller commits an `EXECUTION_START` before inputs or harness execution for every new
+execution, including default-config, zero-cursor turns. It preserves opaque config bytes verbatim,
 including binary data and whitespace, and records the harness cursor and expected `INPUT` count at
-the same boundary. A direct `Controller.Exec` with no inputs also emits this marker, with an explicit
-zero count, to establish a durable turn and initial CAS.
-Default-config, zero-cursor executions with inputs retain their existing `INPUT`-first layout.
-The caller's `expected_last_seq` guards the first committed record, whether it is a start or an input;
-if that append fails, neither the harness nor the model runs.
+the same boundary. A direct `Controller.Exec` with no inputs records an explicit zero count.
+The caller's `expected_last_seq` guards this first committed record; if that append fails, neither
+the harness nor the model runs.
 
 The marker and inputs are separate appends. If an input append fails, or the process dies before all
 inputs commit, the marker's count prevents recovery from running a different invocation. Before any
@@ -148,8 +146,12 @@ non-empty config or non-zero cursors from those executions cannot be recovered r
 SQLite schema migration or rewriting of existing records is needed. Experimental start markers
 without `input_count` fail closed when their invocation is selected for resume or is completed for
 replay: absence cannot distinguish a genuine inputless turn from lost inputs. Markerless logs retain
-their prior behavior; this completeness check does not add markers to default inputful turns. Older
-readers that do not understand the new event/count cannot faithfully reconstruct these executions.
+their prior behavior and lack completeness information; only older writers omit the marker.
+
+**Rollback compatibility:** binaries older than this release fail chain verification for sessions
+containing `EXECUTION_START`, reporting a `content_hash` mismatch. Every new session that executes
+a turn now contains this event, including default-config turns, so it cannot be verified by an older
+binary after rollback. Existing markerless sessions remain verifiable by older binaries.
 
 ## The event log: single writer, append-only, tamper-evident
 
@@ -242,9 +244,7 @@ sequenceDiagram
   participant M as Model
 
   C->>Ctrl: Exec(input, expectedLastSeq)
-  opt Non-default config/cursor or direct inputless execution
-    Ctrl->>Log: append EXECUTION_START (CAS + fence + hash)
-  end
+  Ctrl->>Log: append EXECUTION_START (CAS + fence + hash)
   Ctrl->>Log: append INPUT (CAS + fence + hash)
   Ctrl->>H: Run(Start{Config, ResumeFromSeq, Inputs, History})
   H->>Ctrl: sink.Model(request)

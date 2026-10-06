@@ -84,7 +84,8 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 
 func (e recordedExecution) validateInputs() error {
 	if !e.hasStart {
-		return nil // Markerless legacy logs have no recorded completeness information.
+		// Only older writers omit the start marker; their logs have no completeness count.
+		return nil
 	}
 	if e.inputCount == nil {
 		return fmt.Errorf("%w: execution %q start has no input_count", ErrInvalidExecutionLog, e.id)

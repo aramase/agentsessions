@@ -195,7 +195,7 @@ func TestResumeRestoresExecutionStartAfterSQLiteReopen(t *testing.T) {
 	}{
 		{"inputful config", true, []byte{255, 0, '\n', '\t', ' '}, -7},
 		{"inputless config", false, []byte{255, 0, '\n', '\t', ' '}, -7},
-		{"legacy defaults", true, nil, 0},
+		{"default config", true, nil, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "journal.db")
@@ -286,7 +286,7 @@ func (h checkedStartHarness) Run(ctx context.Context, start *api.Start, sink api
 	return h.executionConfigHarness.Run(ctx, start, sink)
 }
 
-func TestExecutionStartBoundaryAndLegacyDefaults(t *testing.T) {
+func TestExecutionStartBoundaryAndDefaults(t *testing.T) {
 	cases := []struct {
 		name       string
 		config     []byte
@@ -294,8 +294,8 @@ func TestExecutionStartBoundaryAndLegacyDefaults(t *testing.T) {
 		inputs     []api.Message
 		wantMarker bool
 	}{
-		{"legacy defaults", nil, 0, []api.Message{msg("hello")}, false},
-		{"empty config", []byte{}, 0, []api.Message{msg("hello")}, false},
+		{"default config", nil, 0, []api.Message{msg("hello")}, true},
+		{"empty config", []byte{}, 0, []api.Message{msg("hello")}, true},
 		{"config only", []byte(" \t\nprivate-config"), 0, []api.Message{msg("hello")}, true},
 		{"cursor only", nil, 23, []api.Message{msg("hello")}, true},
 		{"inputless defaults", nil, 0, nil, true},
@@ -346,7 +346,7 @@ func TestExecutionStartBoundaryAndLegacyDefaults(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !reflect.DeepEqual(liveStarts, replayStarts) {
-				t.Fatal("reconstructed Start differs, including legacy defaults")
+				t.Fatal("reconstructed Start differs, including default config")
 			}
 			if strings.Contains(operational.String(), "private-config") || strings.Contains(operational.String(), "config\":") {
 				t.Fatal("config leaked into operational logs")

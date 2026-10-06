@@ -57,6 +57,7 @@ func TestResumeRejectsFailedInputAppendAfterSQLiteReopen(t *testing.T) {
 		config []byte
 		cursor int64
 	}{
+		{"default", nil, 0},
 		{"config", []byte("opaque"), 0},
 		{"cursor", nil, 7},
 	} {
@@ -153,7 +154,7 @@ func TestResumeInputCompletenessFromTruncatedSQLiteSnapshot(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			live, err := controller.New(store.Session("session"), echoModel, controller.WithStart([]byte("opaque"), 0))
+			live, err := controller.New(store.Session("session"), echoModel)
 			if err != nil {
 				t.Fatal(err)
 			}

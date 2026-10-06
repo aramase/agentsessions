@@ -54,6 +54,10 @@ func TestExecutionStartCanonicalBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	const wantHash = "aa1f42a26b7a227836d32d31608ebb69c59f3b1c57eadd8537b6faf88a01c790"
+	if original != wantHash {
+		t.Fatalf("execution start hash = %s, want %s (also update hack/verify_chain.py)", original, wantHash)
+	}
 	for _, changed := range []api.ExecutionStart{
 		{Config: []byte{0, 255, ' ', '\n'}, ResumeFromSeq: 9007199254740993, InputCount: proto.Int64(2)},
 		{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740992, InputCount: proto.Int64(2)},
@@ -88,6 +92,23 @@ func TestExecutionStartCanonicalInputCountPresence(t *testing.T) {
 				t.Fatalf("canonical count presence = %s, %v; want %s", got, err, tc.want)
 			}
 		})
+	}
+}
+
+func TestDefaultExecutionStartGoldenVectors(t *testing.T) {
+	for _, tc := range []struct {
+		count int64
+		hash  string
+	}{
+		{0, "b09cbff45d5a30990c3b72be8b06af6bc509d5a29a849aab5fd42153ef10ec65"},
+		{2, "f06c25ee5b3673ee23b8f91883c7f1c6c5682d94986caf5bc067908a61b2ac4f"},
+	} {
+		event := api.Event{ExecutionID: "exec-default", Kind: api.EventExecutionStart,
+			ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(tc.count)}}
+		got, err := canon.HashRecord("", 1, event)
+		if err != nil || got != tc.hash {
+			t.Fatalf("default start count %d hash = %s, %v; want %s (also update hack/verify_chain.py)", tc.count, got, err, tc.hash)
+		}
 	}
 }
 
