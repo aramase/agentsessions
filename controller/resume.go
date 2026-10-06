@@ -65,9 +65,16 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		Config:        execution.config,
 		ResumeFromSeq: execution.resumeFromSeq,
 	}
-	if err := har.Run(ctx, start, sink); err != nil {
-		_, _ = c.appendSeq(execution.id, api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
-		return true, err
+	runErr := har.Run(ctx, start, sink)
+	if sink.failure != nil {
+		runErr = sink.failure
+	}
+	if runErr == nil && sink.i != len(sink.stream) {
+		runErr = fmt.Errorf("%w: recovery consumed %d of %d recorded effects", ErrReplayDiverged, sink.i, len(sink.stream))
+	}
+	if runErr != nil {
+		_, _ = c.appendSeq(execution.id, api.Event{Kind: api.EventError, Err: &api.Error{Description: runErr.Error()}})
+		return true, runErr
 	}
 	_, err = c.appendSeq(execution.id, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	return true, err
@@ -77,9 +84,10 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 // a liveSink to invoke-and-record the remainder. Serving never invokes the underlying op, so a
 // recorded effect is executed at most once across a crash (I3).
 type resumeSink struct {
-	live   liveSink
-	stream []api.Event
-	i      int
+	live    liveSink
+	stream  []api.Event
+	i       int
+	failure error // Rejecting a recorded tool prefix must never unlock the live path.
 }
 
 var _ api.EventSink = (*resumeSink)(nil)
@@ -94,6 +102,9 @@ func (s *resumeSink) recordedNext(kind api.EventKind) (api.Event, bool) {
 }
 
 func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	if s.failure != nil {
+		return api.ModelResponse{}, s.failure
+	}
 	if s.i < len(s.stream) {
 		mc, ok := s.recordedNext(api.EventModelCall)
 		if !ok {
@@ -116,6 +127,9 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 }
 
 func (s *resumeSink) Output(ctx context.Context, delta string) error {
+	if s.failure != nil {
+		return s.failure
+	}
 	if s.i < len(s.stream) {
 		out, ok := s.recordedNext(api.EventOutput)
 		if !ok {
@@ -133,32 +147,44 @@ func (s *resumeSink) Output(ctx context.Context, delta string) error {
 	return s.live.Output(ctx, delta)
 }
 
-func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
+func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (_ api.ToolResult, err error) {
+	if s.failure != nil {
+		return api.ToolResult{}, s.failure
+	}
 	if s.i < len(s.stream) {
+		defer func() {
+			if err != nil {
+				s.failure = err
+			}
+		}()
 		call, ok := s.recordedNext(api.EventToolCall)
 		if !ok {
 			return api.ToolResult{}, errors.New("resume: recorded stream diverged (expected tool call)")
 		}
+		if err := matchToolCall(tc, call.ToolCall); err != nil {
+			return api.ToolResult{}, err
+		}
 		if tr, ok := s.recordedNext(api.EventToolResult); ok {
-			// Intent AND result recorded: served, the tool is NOT re-executed (at-most-once, I3).
-			if tr.Result == nil {
-				return api.ToolResult{}, nil
-			}
-			return *tr.Result, nil
+			return recordedToolResult(call.ToolCall, tr.Result)
 		}
-		// Intent recorded but no result: the crash fell between execute and result-append. Re-drive
-		// the effect under the SAME recorded idempotency key (§3) — an idempotent tool dedups it —
-		// and write-ahead the result. This closes the tool half of I3, symmetric to the model
-		// re-drive above.
-		if call.ToolCall == nil {
-			return api.ToolResult{}, errors.New("resume: recorded tool call missing its payload")
+		// Only a terminal intent is a crash window. A different following effect is malformed
+		// evidence, not permission to re-drive this call under its recorded key.
+		if s.i != len(s.stream) {
+			return api.ToolResult{}, fmt.Errorf("%w: tool intent has no result before the next recorded effect", ErrReplayDiverged)
 		}
-		return s.live.execTool(ctx, *call.ToolCall)
+		validated, err := validateLiveToolCall(*call.ToolCall)
+		if err != nil {
+			return api.ToolResult{}, err
+		}
+		return s.live.execTool(ctx, validated)
 	}
 	return s.live.ToolCall(ctx, tc)
 }
 
 func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
+	if s.failure != nil {
+		return s.failure
+	}
 	if s.i < len(s.stream) {
 		if _, ok := s.recordedNext(api.EventToolResult); !ok {
 			return errors.New("resume: recorded stream diverged (expected tool result)")
@@ -169,6 +195,9 @@ func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
 }
 
 func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
+	if s.failure != nil {
+		return s.failure
+	}
 	if s.i < len(s.stream) {
 		ev, ok := s.recordedNext(api.EventUsage)
 		if !ok {

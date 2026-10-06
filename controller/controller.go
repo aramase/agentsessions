@@ -28,9 +28,9 @@ import (
 // ErrReplayInvokedModel is returned when a replay caused a live model call — an I1 violation.
 var ErrReplayInvokedModel = errors.New("controller: replay invoked the model (I1 violated)")
 
-// ErrReplayDiverged is returned when a replay does not consume the recorded effect stream exactly:
-// the harness requested fewer effects than were journaled, so it took a different path than when
-// the log was written (a determinism violation, symmetric to the I0 input-hash check).
+// ErrReplayDiverged is returned when replay or recorded-prefix recovery diverges from the journal:
+// tool request identity or result correlation differs, required tool evidence is missing, or the
+// harness leaves recorded effects unconsumed.
 var ErrReplayDiverged = errors.New("controller: replay diverged from the journal")
 
 // ErrInvalidExecutionLog is returned when execution-scoped events lack valid execution identity
@@ -310,8 +310,12 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 			Config:        execution.config,
 			ResumeFromSeq: execution.resumeFromSeq,
 		}
-		if err := har.Run(ctx, start, sink); err != nil {
-			return nil, err
+		runErr := har.Run(ctx, start, sink)
+		if sink.failure != nil {
+			return nil, sink.failure
+		}
+		if runErr != nil {
+			return nil, runErr
 		}
 		if c.liveModelCalls != before {
 			return nil, ErrReplayInvokedModel

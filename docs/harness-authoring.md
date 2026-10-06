@@ -180,6 +180,36 @@ Each tool declares how it executes (`api.Mediation`):
 For any side-effecting tool, set `ToolCall.IdempotencyKey`. If a crash forces an at-most-once re-drive
 (I3), the key lets the tool side dedup so the effect happens once, not twice.
 
+For the same recorded call, re-emit the same `ToolCall.ID`, tool name, arguments, mediation and key.
+Replay and recorded-prefix recovery compare that identity before serving a result or re-driving an
+intent. IDs need to be deterministic within the turn; no globally unique ID format is imposed.
+Arguments compare in the existing protobuf Struct domain: object key order is ignored, and Go
+numeric/container types are interchangeable only when conversion yields the same values. List
+order, missing versus null, and absent versus empty arguments remain distinct. The existing
+whole-map JSON fallback can turn nested nil containers into null when typed values are present;
+that is a different recorded request from an empty object/list. Use explicit JSON-native values in
+new harnesses to avoid this legacy conversion ambiguity. Existing recorded null/empty distinctions
+are not reinterpreted. Accepted arguments are normalized to that same transport representation
+before recording and execution, so a direct Go executor receives the values it would receive after
+journal recovery.
+
+Tool-call arguments must be JSON-shaped: booleans, strings, null, numbers, string-keyed objects and
+lists (including typed Go containers that preserve that shape, but not custom serializers).
+Numbers must be finite; integers
+must stay within −9,007,199,254,740,991 to +9,007,199,254,740,991 so conversion cannot round them to
+another integer. Unsupported values, cycles and invalid UTF-8 return a bounded error at the call
+boundary, before tool intent or execution. This deliberately replaces drop-to-nil conversion for
+invalid **tool arguments**; other content maps retain their existing conversion behavior. Historical
+arguments already lost during conversion cannot be recovered or certified as their original values.
+
+A recorded result must have a payload and reference its recorded call ID. Only a valid terminal
+controller-mediated intent with a nonempty key may be re-driven without a recorded result; a
+following unrelated effect is malformed evidence, not a retry opportunity. Recovery refuses a
+successful END if the harness leaves recorded effects unconsumed. A tool-prefix rejection stays
+fatal even if the harness catches the sink error; later calls cannot unlock the live path or certify
+replay. The executor still owns durable key deduplication. These checks do not enforce effects performed inside an `IN_HARNESS_REPORTED`
+harness, and `REQUIRES_APPROVAL` remains unimplemented and fails closed.
+
 ### Rule 5: pass reasoning parts back verbatim
 
 If your provider returns opaque reasoning parts, return them inside `ModelResponse.Message` unchanged and

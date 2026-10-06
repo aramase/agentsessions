@@ -1,0 +1,157 @@
+package conformance_test
+
+import (
+	"context"
+	"errors"
+	"math"
+	"net"
+	"testing"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/types/known/structpb"
+
+	"github.com/aramase/agentsessions/api"
+	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/controller"
+	"github.com/aramase/agentsessions/eventlog"
+	"github.com/aramase/agentsessions/harnesswire"
+)
+
+type argumentHarness struct{ args map[string]any }
+
+func (argumentHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "tool-args", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, nil
+}
+
+func (h argumentHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	_, err := sink.ToolCall(ctx, api.ToolCall{ID: "call-1", Tool: "read", Args: h.args, Mediation: api.MediationControllerMediated, IdempotencyKey: "key-1"})
+	return err
+}
+
+// A permissive wire conversion would drop a channel to nil or turn a NaN into a string before
+// the controller could validate it. The real gRPC bridge must fail before intent or execution.
+func TestWireToolArgumentsRejectedBeforeEffects(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value any
+	}{
+		{"channel", make(chan int)},
+		{"nonfinite", math.NaN()},
+		{"struct", struct{ Name string }{"private"}},
+		{"unsafe integer", int64(9007199254740993)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log := eventlog.AsStore(eventlog.New())
+			attempts := 0
+			c, err := controller.New(log, nil, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+				attempts++
+				return api.ToolResult{}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := wireHarnessFrom(t, argumentHarness{args: map[string]any{"secret": test.value}})
+			err = c.Exec(t.Context(), h, []api.Message{*api.TextMessage("user", "read")}, 0)
+			if err == nil || attempts != 0 {
+				t.Fatalf("invalid remote args accepted: attempts=%d err=%v", attempts, err)
+			}
+			recs, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, rec := range recs {
+				if rec.Event.Kind == api.EventToolCall || rec.Event.Kind == api.EventToolResult || rec.Event.Kind == api.EventEnd {
+					t.Fatal("invalid args recorded tool effects or successful END")
+				}
+			}
+		})
+	}
+}
+
+// A raw remote harness can bypass streamSink validation. Reject invalid protobuf numbers before
+// AsMap turns them into ordinary strings at the receiving call boundary.
+func TestRawWireToolArgumentsRejectedBeforeEffects(t *testing.T) {
+	for _, value := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		t.Run(structpb.NewNumberValue(value).String(), func(t *testing.T) {
+			lis := bufconn.Listen(1 << 20)
+			server := grpc.NewServer()
+			v1.RegisterHarnessServer(server, rawToolServer{value: value})
+			go server.Serve(lis)
+			t.Cleanup(server.Stop)
+			conn, err := grpc.NewClient("passthrough:///raw-harness", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { conn.Close() })
+			attempts := 0
+			c, err := controller.New(eventlog.AsStore(eventlog.New()), nil, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) { attempts++; return api.ToolResult{}, nil }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.Exec(t.Context(), harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), []api.Message{*api.TextMessage("user", "read")}, 0)
+			if err == nil || attempts != 0 {
+				t.Fatalf("invalid raw args accepted: attempts=%d err=%v", attempts, err)
+			}
+		})
+	}
+}
+
+type rawToolServer struct {
+	v1.UnimplementedHarnessServer
+	value float64
+}
+
+func (s rawToolServer) Connect(stream v1.Harness_ConnectServer) error {
+	start, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	err = stream.Send(&v1.Event{
+		ExecutionId: start.GetExecutionId(), Kind: v1.EventKind_EVENT_TOOL_CALL,
+		Body: &v1.Event_Tool{Tool: &v1.ToolCall{Id: "call-1", Tool: "read", Mediation: v1.Mediation_MEDIATION_CONTROLLER_MEDIATED, IdempotencyKey: "key-1", Args: &structpb.Struct{Fields: map[string]*structpb.Value{"number": structpb.NewNumberValue(s.value)}}}},
+	})
+	if err != nil {
+		return err
+	}
+	if _, err = stream.Recv(); err != nil {
+		return err
+	}
+	return stream.Send(&v1.Event{ExecutionId: start.GetExecutionId(), Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}})
+}
+
+func TestWireToolRequestChangesFailReplayAndRecovery(t *testing.T) {
+	for _, recovery := range []bool{false, true} {
+		t.Run(map[bool]string{false: "replay", true: "resume"}[recovery], func(t *testing.T) {
+			log := eventlog.AsStore(eventlog.New())
+			c, err := controller.New(log, nil, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+				if recovery {
+					return api.ToolResult{}, errors.New("interrupted")
+				}
+				return api.ToolResult{Output: map[string]any{"receipt": "recorded"}}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.Exec(t.Context(), wireHarnessFrom(t, argumentHarness{args: map[string]any{"count": 2}}), []api.Message{*api.TextMessage("user", "read")}, 0)
+			if !recovery && err != nil || recovery && err == nil {
+				t.Fatalf("fixture: %v", err)
+			}
+			attempts := 0
+			fresh, err := controller.New(log, nil, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) { attempts++; return api.ToolResult{}, nil }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := wireHarnessFrom(t, argumentHarness{args: map[string]any{"count": 3}})
+			if recovery {
+				_, err = fresh.Resume(t.Context(), h)
+			} else {
+				_, err = fresh.Replay(t.Context(), h)
+			}
+			if !errors.Is(err, controller.ErrReplayDiverged) || attempts != 0 {
+				t.Fatalf("remote divergence accepted: attempts=%d err=%v", attempts, err)
+			}
+		})
+	}
+}

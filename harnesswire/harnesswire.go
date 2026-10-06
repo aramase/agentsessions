@@ -171,7 +171,12 @@ func (s *streamSink) Output(_ context.Context, delta string) error {
 // host — not the harness — executes and records the tool (record-before-effect, §3), exactly as it
 // mediates a model call, so the load-bearing rule holds across the process boundary.
 func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
+	args, err := wire.NormalizeToolArgs(tc.Args)
+	if err != nil {
+		return api.ToolResult{}, err
+	}
 	call := tc
+	call.Args = args
 	if err := s.stream.Send(&v1.Event{
 		ExecutionId: s.executionID,
 		Kind:        v1.EventKind_EVENT_TOOL_CALL,
@@ -293,9 +298,19 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 				}
 			}
 		case v1.EventKind_EVENT_TOOL_CALL:
-			tc := wire.ToolCallFromProto(ev.GetTool())
+			tool := ev.GetTool()
+			// Validate raw Struct values before AsMap can turn nonfinite numbers into strings.
+			if tool != nil && tool.GetArgs() != nil {
+				if _, err := tool.GetArgs().MarshalJSON(); err != nil {
+					return wire.ErrInvalidToolArgs
+				}
+			}
+			tc := wire.ToolCallFromProto(tool)
 			if tc == nil {
 				return errors.New("harnesswire: EVENT_TOOL_CALL missing its payload")
+			}
+			if _, err := wire.NormalizeToolArgs(tc.Args); err != nil {
+				return err
 			}
 			res, err := sink.ToolCall(ctx, *tc)
 			if err != nil {
