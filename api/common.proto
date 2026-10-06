@@ -1,7 +1,7 @@
 // Shared wire types for the agentsessions Session and Harness services.
 //
 // The Event message is used by BOTH the session log (Sessions.Exec / Replay) and the
-// harness stream (Harness.Connect) — the harness's events become the session log.
+// harness stream (Harness.Connect) — harness events become the log alongside host-owned records.
 //
 // The content model (Part) is aligned with A2A `Part` + MCP content for interop; the
 // event/log model is native. Derived from the durable-log & replay contract §7 (record
@@ -199,6 +199,21 @@ message Lifecycle {
   bool snapshot_sealed = 6;
 }
 
+// ExecutionStart is host-owned invocation state, committed before inputs and harness execution.
+// The host emits it for every new execution, including default-config and inputless turns.
+// Logs without this event reconstruct with empty config and a zero cursor. Older discarded
+// non-empty values cannot be recovered. Config is opaque: preserve bytes verbatim, never parse it.
+message ExecutionStart {
+  bytes config = 1;
+  int64 resume_from_seq = 2; // harness cursor, distinct from the append CAS cursor
+  // Expected number of INPUT events for this invocation, always set by new writers (including zero).
+  // Replay/resume reject a completed or selected invocation with a missing/negative count or a
+  // different committed INPUT count before running the harness. An incomplete trailing invocation
+  // is skipped by completed replay. Count-less experimental start markers fail closed; truly
+  // markerless legacy executions retain their existing reconstruction behavior.
+  optional int64 input_count = 3;
+}
+
 // ---- Event ----
 
 enum EventKind {
@@ -214,9 +229,11 @@ enum EventKind {
   EVENT_LIFECYCLE = 9;
   EVENT_END = 10;
   EVENT_ERROR = 11;
+  EVENT_EXECUTION_START = 12; // host-owned config/cursor/input count, before inputs and harness effects
 }
 
-// Event is the harness-emitted content unit. Ordering (seq) and integrity (prev_hash /
+// Event is the shared journal/stream content unit; EXECUTION_START is emitted only by the host.
+// Ordering (seq) and integrity (prev_hash /
 // content_hash) are host-assigned and live on LogRecord — the harness, which does not know
 // seq/prev, emits a hash-free Event, so there is no circular hashing. Streaming deltas are
 // transport (see Delta in session.proto) and coalesce into the finalized event (§3).
@@ -239,6 +256,7 @@ message Event {
     Lifecycle lifecycle = 15;
     HarnessEnd end = 16;
     Error error = 17;
+    ExecutionStart execution_start = 19;
   }
 
   IdentityRef actor = 18; // emitter principal -> provenance

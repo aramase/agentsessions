@@ -16,6 +16,7 @@ Source of truth: api/*.proto. Edit the proto comments, not this file.
     - [DataPart](#agentsessions-v1-DataPart)
     - [Error](#agentsessions-v1-Error)
     - [Event](#agentsessions-v1-Event)
+    - [ExecutionStart](#agentsessions-v1-ExecutionStart)
     - [FilePart](#agentsessions-v1-FilePart)
     - [HarnessEnd](#agentsessions-v1-HarnessEnd)
     - [IdentityRef](#agentsessions-v1-IdentityRef)
@@ -93,7 +94,7 @@ Source of truth: api/*.proto. Edit the proto comments, not this file.
 Shared wire types for the agentsessions Session and Harness services.
 
 The Event message is used by BOTH the session log (Sessions.Exec / Replay) and the
-harness stream (Harness.Connect) — the harness&#39;s events become the session log.
+harness stream (Harness.Connect) — harness events become the log alongside host-owned records.
 
 The content model (Part) is aligned with A2A `Part` &#43; MCP content for interop; the
 event/log model is native. Derived from the durable-log &amp; replay contract §7 (record
@@ -168,7 +169,8 @@ DataPart is structured JSON (A2A data part; MCP structuredContent).
 <a name="agentsessions-v1-Event"></a>
 
 ### Event
-Event is the harness-emitted content unit. Ordering (seq) and integrity (prev_hash /
+Event is the shared journal/stream content unit; EXECUTION_START is emitted only by the host.
+Ordering (seq) and integrity (prev_hash /
 content_hash) are host-assigned and live on LogRecord — the harness, which does not know
 seq/prev, emits a hash-free Event, so there is no circular hashing. Streaming deltas are
 transport (see Delta in session.proto) and coalesce into the finalized event (§3).
@@ -190,7 +192,28 @@ transport (see Delta in session.proto) and coalesce into the finalized event (§
 | lifecycle | [Lifecycle](#agentsessions-v1-Lifecycle) |  |  |
 | end | [HarnessEnd](#agentsessions-v1-HarnessEnd) |  |  |
 | error | [Error](#agentsessions-v1-Error) |  |  |
+| execution_start | [ExecutionStart](#agentsessions-v1-ExecutionStart) |  |  |
 | actor | [IdentityRef](#agentsessions-v1-IdentityRef) |  | emitter principal -&gt; provenance |
+
+
+
+
+
+
+<a name="agentsessions-v1-ExecutionStart"></a>
+
+### ExecutionStart
+ExecutionStart is host-owned invocation state, committed before inputs and harness execution.
+The host emits it for every new execution, including default-config and inputless turns.
+Logs without this event reconstruct with empty config and a zero cursor. Older discarded
+non-empty values cannot be recovered. Config is opaque: preserve bytes verbatim, never parse it.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| config | [bytes](#bytes) |  |  |
+| resume_from_seq | [int64](#int64) |  | harness cursor, distinct from the append CAS cursor |
+| input_count | [int64](#int64) | optional | Expected number of INPUT events for this invocation, always set by new writers (including zero). Replay/resume reject a completed or selected invocation with a missing/negative count or a different committed INPUT count before running the harness. An incomplete trailing invocation is skipped by completed replay. Count-less experimental start markers fail closed; truly markerless legacy executions retain their existing reconstruction behavior. |
 
 
 
@@ -543,6 +566,7 @@ ToolCall aligns with an MCP tool call (name &#43; structured args).
 | EVENT_LIFECYCLE | 9 |  |
 | EVENT_END | 10 |  |
 | EVENT_ERROR | 11 |  |
+| EVENT_EXECUTION_START | 12 | host-owned config/cursor/input count, before inputs and harness effects |
 
 
 
@@ -724,7 +748,7 @@ addition); it is empty when the sandbox was memory-restored.
 | ----- | ---- | ----- | ----------- |
 | config | [bytes](#bytes) |  |  |
 | history | [Event](#agentsessions-v1-Event) | repeated |  |
-| inputs | [Message](#agentsessions-v1-Message) | repeated | New input messages for this execution. Empty = resume/re-drive an interrupted execution from history with no new input. |
+| inputs | [Message](#agentsessions-v1-Message) | repeated | Invocation input messages. Controller replay and interrupted recovery restore the original messages from the journal; empty inputs describe an intentionally inputless invocation. |
 | identity | [IdentityContext](#agentsessions-v1-IdentityContext) |  |  |
 | resume_from_seq | [int64](#int64) |  |  |
 
@@ -906,9 +930,9 @@ reasoning) part. No seq; never hash-chained (§8, A2A TaskArtifactUpdateEvent).
 | ----- | ---- | ----- | ----------- |
 | session | [string](#string) |  | The session to run against. Empty creates one first, using the server defaults and the harness below, and returns it as the stream&#39;s first frame. A caller that wants to set a project, name, or model still calls CreateSession; this exists so the common case is one call rather than three (create, read the cursor, exec). |
 | inputs | [Message](#agentsessions-v1-Message) | repeated | Input messages for this turn. Empty = resume/re-drive the last non-terminal execution with no new input (recovery after a crash/interruption). |
-| resume_from_seq | [int64](#int64) |  | Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a harness knows what resuming from a sequence means for its own state. To re-read committed records after a disconnect, use Replay, which is the read path for exactly that. |
+| resume_from_seq | [int64](#int64) |  | Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a harness knows what resuming from a sequence means for its own state. To re-read committed records after a disconnect, use Replay, which is the read path for exactly that. Non-zero cursors are journaled in EXECUTION_START and restored during controller replay/interrupted resume. |
 | harness | [string](#string) |  | empty = session default |
-| config | [bytes](#bytes) |  | opaque per-execution config, passed through to Start.config |
+| config | [bytes](#bytes) |  | Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume. Do not put credentials here: config is durable journal content exposed by Replay. |
 | expected_last_seq | [int64](#int64) | optional | Single-writer CAS: the host commits this execution&#39;s first event only if the log head equals expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log. It is optional because the guarantee should be opt-in rather than the price of a simple call. Unset means &#34;append at whatever the head is now&#34;, which is what a caller with a single writer wants. Set means the strict check, and 0 is a real value there: it asserts the session has no events yet. That distinction is why this carries explicit presence instead of treating 0 as &#34;unset&#34; -- a caller could not otherwise say &#34;this must be the first turn&#34;. |
 | deadline_unix | [int64](#int64) |  | optional execution deadline (unix seconds); host cancels past it |
 
