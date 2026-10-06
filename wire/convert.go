@@ -273,7 +273,7 @@ func toolCallToProto(t *api.ToolCall) *v1.ToolCall {
 		Id:             t.ID,
 		Tool:           t.Tool,
 		Args:           toStruct(t.Args),
-		Mediation:      mediationToProto(t.Mediation),
+		Mediation:      MediationToProto(t.Mediation),
 		IdempotencyKey: t.IdempotencyKey,
 	}
 }
@@ -286,7 +286,7 @@ func toolCallFromProto(t *v1.ToolCall) *api.ToolCall {
 		ID:             t.GetId(),
 		Tool:           t.GetTool(),
 		Args:           fromStruct(t.GetArgs()),
-		Mediation:      mediationFromProto(t.GetMediation()),
+		Mediation:      MediationFromProto(t.GetMediation()),
 		IdempotencyKey: t.GetIdempotencyKey(),
 	}
 }
@@ -514,7 +514,8 @@ func kindFromProto(k v1.EventKind) api.EventKind {
 	}
 }
 
-func mediationToProto(m api.Mediation) v1.Mediation {
+// MediationToProto converts a mediation value to its wire representation.
+func MediationToProto(m api.Mediation) v1.Mediation {
 	switch m {
 	case api.MediationInHarnessReported:
 		return v1.Mediation_MEDIATION_IN_HARNESS_REPORTED
@@ -527,7 +528,8 @@ func mediationToProto(m api.Mediation) v1.Mediation {
 	}
 }
 
-func mediationFromProto(m v1.Mediation) api.Mediation {
+// MediationFromProto converts a wire mediation value to its in-process representation.
+func MediationFromProto(m v1.Mediation) api.Mediation {
 	switch m {
 	case v1.Mediation_MEDIATION_IN_HARNESS_REPORTED:
 		return api.MediationInHarnessReported

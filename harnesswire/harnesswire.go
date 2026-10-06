@@ -396,19 +396,35 @@ func startFromProto(p *v1.Start) *api.Start {
 }
 
 func descriptorToProto(d api.Descriptor) *v1.HarnessDescriptor {
-	return &v1.HarnessDescriptor{
+	out := &v1.HarnessDescriptor{
 		Id:           d.ID,
 		Models:       d.Models,
 		Capabilities: capabilitiesToProto(d.Capabilities),
 	}
+	for _, tool := range d.Tools {
+		out.Tools = append(out.Tools, &v1.ToolSpec{
+			Name:        tool.Name,
+			Description: tool.Description,
+			Mediation:   wire.MediationToProto(tool.Mediation),
+		})
+	}
+	return out
 }
 
 func descriptorFromProto(p *v1.HarnessDescriptor) api.Descriptor {
-	return api.Descriptor{
+	out := api.Descriptor{
 		ID:           p.GetId(),
 		Models:       p.GetModels(),
 		Capabilities: capabilitiesFromProto(p.GetCapabilities()),
 	}
+	for _, tool := range p.GetTools() {
+		out.Tools = append(out.Tools, api.ToolSpec{
+			Name:        tool.GetName(),
+			Description: tool.GetDescription(),
+			Mediation:   wire.MediationFromProto(tool.GetMediation()),
+		})
+	}
+	return out
 }
 
 func capabilitiesToProto(c api.Capabilities) *v1.Capabilities {
