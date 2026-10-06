@@ -270,9 +270,10 @@ func tcpDial(address string) (api.Harness, func() error, error) {
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 
-// Suspend snapshots the incarnation to external storage, records the SnapshotRef in a SUSPEND
-// lifecycle event so Resume can recover it from the tamper-evident chain (§5.1), then frees the
-// worker via Stop. Snapshot and Stop key on the session id, so a minimal incarnation suffices.
+// Suspend transitions the incarnation to cold via SnapshotExternal, then records the SnapshotRef
+// in a SUSPEND lifecycle event so Resume can recover it from the tamper-evident chain (§5.1).
+// Snapshot owns dedicated compute release and retains the handles Restore needs; Stop would
+// destructively tear them down. Snapshot keys on the session id, so a minimal incarnation suffices.
 func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID string) (ref api.SnapshotRef, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.StartDebug(ctx, p.logger, "placement", "suspend", "session_uid", sessionUID)
@@ -289,9 +290,6 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 		return api.SnapshotRef{}, err
 	}
 	appendFinished(nil)
-	if err := p.backend.Stop(ctx, inc); err != nil {
-		return api.SnapshotRef{}, err
-	}
 	return ref, nil
 }
 
@@ -488,8 +486,8 @@ const rollbackTimeout = 30 * time.Second
 // For a stateless harness that is just the parent's handle (nothing to clone). For a memory harness
 // it is a FRESH snapshot of the parent, recorded as a SUSPEND lifecycle event so the ref stays
 // recoverable from the tamper-evident chain — the same shape Suspend records. It deliberately calls
-// backend.Snapshot rather than Placer.Suspend, because Suspend also Stops (deletes) the actor, which
-// a fork's parent must survive.
+// backend.Snapshot rather than Placer.Suspend so the fork can fence before checkpointing and commit
+// the SUSPEND event with a CAS on the validated fork point.
 //
 // Checkpointing the parent is not undoable, so this is where a stateful fork commits: once it
 // returns, the parent is cold with a SUSPEND event on its chain whether or not the children go on to

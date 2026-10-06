@@ -239,24 +239,36 @@ direct pod-IP dial, then re-dials and replays. Asserts: replay is **byte-identic
 are **0** (I1), and the hash chain verifies. Same determinism triple as the unit conformance suite, now
 over the substrate mesh.
 
+### `TestSessionSuspendResumeOnGVisor` — session-level stateless suspension
+
+Places the echo harness through the `Placer`, executes a turn, calls `Placer.Suspend` and explicit
+`Placer.Resume`, then executes another turn. The recorded snapshot retains the actor handle required
+by Restore, and both lifecycle markers and subsequent output remain on a valid hash chain. This
+regression is selected alongside stateless replay in the gVisor CI pass.
+
+Cold suspension is not teardown: `Snapshot(EXTERNAL)` releases the worker and keeps the actor
+SUSPENDED; `Stop` deletes it. Calling Stop after the snapshot would make explicit Resume fail with
+NotFound, even for a stateless harness.
+
 ### `TestMemorySnapshotSuspendResume` — memory continuity
 
 Places the in-RAM counter (`harness/counteragent`, `REQUIRES_MEMORY_SNAPSHOT`) on the micro-VM class:
 
 1. Drive to N through the `Placer` (count=N lives in **guest RAM**, not the journal).
-2. `Snapshot(EXTERNAL)` → memory snapshot to storage, worker freed (`SuspendActor`), SUSPEND recorded
-   on the chain.
-3. Drive one more turn. The actor is SUSPENDED, so placing it **restores** rather than boots over it.
+2. `Placer.Suspend` → `Snapshot(EXTERNAL)`: memory snapshot to storage, worker freed (`SuspendActor`),
+   actor retained, and SUSPEND recorded on the chain.
+3. Explicit `Placer.Resume` restores the actor and records RESUME.
+4. Drive one more turn through the Placer without booting over the restored RAM.
 
 Asserts:
 
 - **Continuity** — the counter returns **N+1**: the in-RAM state survived the snapshot round-trip.
 - **No double-application** — the value is N+1, not 2N+1: the journal was **not** replayed into restored
   RAM (I4 — the counter never reconstructs state from `Start.History`).
-- **Provenance** — the hash chain still verifies **across the SUSPEND boundary**.
+- **Provenance** — the hash chain still verifies **across the SUSPEND and RESUME boundary**.
 
-It suspends through the `Runtime` SPI rather than `Placer.Suspend`, which also `Stop`s (deletes) the
-actor — correct for a stateless session, fatal for one whose RAM is meant to come back.
+Both lifecycle operations use the Placer, rather than bypassing it with a raw Runtime snapshot and
+manually appended SUSPEND. Neither operation tears down the actor needed to restore its RAM.
 
 ### `TestForkFanOutFromMemorySnapshot` — branching a fleet from a base session
 
@@ -306,14 +318,21 @@ gh run watch "$(gh run list --workflow=substrate-e2e.yml --limit 1 --json databa
 Local reproduction needs a Linux host with `/dev/kvm` (micro-VM); the recipe mirrors the CI steps against
 `hack/` in an agent-substrate checkout.
 
+### Verification boundary
+
+The session-level stateless regression and explicit memory Resume are selected by the respective
+live CI passes. Ordinary local `go test` runs compile them but skip them unless `AGENTSESSIONS_E2E=1`;
+a skipped test is not live verification. The added Placer coverage has not been freshly run against a
+live cluster in this change. Earlier raw-Runtime memory results do not establish a pass for the new
+Placer sequence.
+
+Root placement tests separately exercise a lifecycle-faithful control fake: deletion removes actors,
+missing-actor Resume returns NotFound, Suspend retains established fork-child pins, and destructive
+Stop removes only the child's own pin while its sibling remains usable. These tests prove orchestration
+and retention behavior, not real RAM snapshot continuity.
+
 ## In progress
 
-- **Placer-orchestrated suspend/resume.** `TestMemorySnapshotSuspendResume` suspends through the raw
-  `Runtime` SPI because `Placer.Suspend` currently also `Stop`s (deletes) the actor, which a memory
-  suspend must not. Dropping the `Stop` (Snapshot already frees the worker via `SuspendActor`) makes
-  session-level suspend/resume work through the `Placer` for the general memory harness. `Placer.Fork`
-  sidesteps this today by calling `Runtime.Snapshot` directly, because a fork's parent must survive as
-  the branch point.
 - **Fork tag lifecycle.** A fork tags the parent snapshot (`fork-<child-uid>`) so `CreateActor` can
   reference it, and a tag is a retention pin. The tag name is derived from the child session UID, so
   `Stop` releases it when the child is torn down and a failed fork releases it on the way out. A

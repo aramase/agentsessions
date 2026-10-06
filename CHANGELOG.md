@@ -7,6 +7,20 @@ provide.
 
 ## Unreleased
 
+### Fixed
+
+- Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
+  and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
+  remains destructive teardown.
+
+### Compatibility
+
+- `Runtime.Snapshot(..., SnapshotExternal)` owns the cold transition: capture state, release dedicated
+  compute where applicable, and retain any handle needed by `Restore`. Out-of-tree runtimes that only
+  capture state must implement that transition themselves; the Placer no longer calls `Stop` afterward.
+  Suspended actors and fork-child snapshot pins remain until explicit teardown. No signatures or wire
+  formats change, and restoring a snapshot after destructive `Stop` is not guaranteed.
+
 ## v0.1.2
 
 A patch release. No API change; it exists because the v0.1.1 images were unusable.

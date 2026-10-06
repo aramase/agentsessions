@@ -192,9 +192,11 @@ it can break between releases; what the gate buys you is that it cannot break si
 Working reference implementation (Go 1.26). The Sessions API, the single-writer event-sourced controller,
 the durable hash-chained log, BYOH over `Harness.Connect`, the `Runtime` SPI with local + substrate
 backends, the replay-conformance suite, and real-substrate conformance across both capability tiers
-all run today. Session-level suspend and resume run through the `Placer` for stateless-replay
-harnesses; a memory-snapshot harness still suspends through the raw `Runtime` SPI, because
-`Placer.Suspend` stops the incarnation after snapshotting and a memory suspend must not.
+all run today. Session-level suspend and resume use the `Placer` for both resumability tiers.
+`Snapshot(EXTERNAL)` makes compute cold while retaining the handle needed to restore it;
+`Stop` remains destructive teardown, not part of suspension. The conformance suite exercises
+both Placer roundtrips; see the [Substrate test coverage](docs/substrate-conformance.md#the-suite-integrationssubstratee2e)
+for the live tests and verification boundaries.
 
 Not built: authentication, authorization, and transport security; a managed control plane;
 enterprise identity and provenance; and confidential or GPU snapshots.
