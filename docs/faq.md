@@ -145,10 +145,11 @@ It is a working reference implementation (Go 1.26), not yet a productized servic
 single-writer event-sourced controller, the durable hash-chained log, bring-your-own-harness over
 `Harness.Connect`, the `Runtime` SPI with local and substrate backends, the replay-conformance suite, and
 real-substrate conformance across both capability tiers all run today. Session-level suspend and resume
-run through the `Placer` for stateless-replay harnesses, while a memory-snapshot harness still suspends
-through the raw `Runtime` SPI. There is no authentication, authorization, or transport security, and no
-managed control plane, enterprise identity and provenance, or confidential and GPU snapshots. See the
-Status section of the root README.
+use the `Placer` for both resumability tiers. See the
+[Substrate verification boundary](substrate-conformance.md#verification-boundary) for live-test coverage
+and limitations. There is no authentication, authorization, or transport security, and no managed
+control plane, enterprise identity and provenance, or confidential and GPU snapshots. See the Status
+section of the root README.
 
 ## Where is the wire format?
 
