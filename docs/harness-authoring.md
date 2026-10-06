@@ -156,6 +156,45 @@ Each tool declares how it executes (`api.Mediation`):
 For any side-effecting tool, set `ToolCall.IdempotencyKey`. If a crash forces an at-most-once re-drive
 (I3), the key lets the tool side dedup so the effect happens once, not twice.
 
+#### Host composition for controller-mediated tools
+
+A custom Sessions host supplies its executor on the Placer registered for that harness. The same
+executor is used for live `Exec` and interrupted-turn `Resume`; no Sessions RPC field is needed.
+Given a backend serving your harness, a model, and your host executor:
+
+```go
+import (
+    "github.com/aramase/agentsessions/controller"
+    "github.com/aramase/agentsessions/placement"
+    "github.com/aramase/agentsessions/session"
+    "github.com/aramase/agentsessions/sqlitelog"
+)
+
+func newToolService(store *sqlitelog.Store, backend placement.Backend,
+    model controller.ModelFunc, executeTool controller.ToolFunc) (*session.Service, error) {
+    placer := placement.New(backend, model, placement.WithToolExecutor(executeTool))
+    registry, err := placement.NewRegistry("my-agent", map[string]*placement.Placer{
+        "my-agent": placer,
+    })
+    if err != nil {
+        return nil, err
+    }
+    return session.NewService(store, registry), nil
+}
+```
+
+Without an executor, controller-mediated calls fail closed after recording intent and perform no
+host effect. Every such call requires a nonempty idempotency key, rejected before intent if absent.
+The controller records intent before invoking the executor and stamps the result ID with the call
+ID. Completed intent/result pairs are served during recovery without invoking an executor; intent
+without a result is re-driven using the **original recorded key**.
+
+The executor owns tool/resource authorization and durable deduplication. If an effect succeeds but
+its journal result append fails, recovery must retrieve the original receipt rather than repeat the
+effect. Keep that receipt/dedup state durable across host restarts; an in-memory cache is insufficient.
+Journaling alone does not provide exactly-once external delivery. `REQUIRES_APPROVAL` still fails
+closed because its approval gate is unimplemented. The stock daemon does not configure a tool executor.
+
 ### Rule 5: pass reasoning parts back verbatim
 
 If your provider returns opaque reasoning parts, return them inside `ModelResponse.Message` unchanged and

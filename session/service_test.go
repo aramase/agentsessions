@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/observability"
 	"github.com/aramase/agentsessions/placement"
@@ -46,22 +48,7 @@ func newClientWith(t *testing.T, backend placement.Backend) v1.SessionsClient {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	lis := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer()
-	v1.RegisterSessionsServer(srv, session.NewService(store, echoRegistry(t, backend)))
-	go srv.Serve(lis)
-	t.Cleanup(srv.Stop)
-
-	conn, err := grpc.NewClient(
-		"passthrough:///bufnet",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { conn.Close() })
-	return v1.NewSessionsClient(conn)
+	return serveRegistry(t, store, echoRegistry(t, backend))
 }
 
 func TestRequestFlowLogsAreCorrelated(t *testing.T) {
@@ -849,4 +836,177 @@ func TestExecPassesConfigAndCursorToHarness(t *testing.T) {
 	if got.ResumeFromSeq != 7 {
 		t.Fatalf("harness saw resume_from_seq %d, want 7", got.ResumeFromSeq)
 	}
+}
+
+// registryToolHarness exposes the actual result delivered over the local harnesswire bridge.
+type registryToolHarness struct{ key string }
+
+func (registryToolHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, nil
+}
+
+func (h registryToolHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	res, err := sink.ToolCall(ctx, api.ToolCall{
+		ID: "service-call", Tool: "charge", Args: map[string]any{"account": "a1"},
+		Mediation: api.MediationControllerMediated, IdempotencyKey: h.key,
+	})
+	if err != nil {
+		return err
+	}
+	return sink.Output(ctx, fmt.Sprintf("%s:%v", res.ID, res.Output["receipt"]))
+}
+
+// Dropping the placement option at registry construction must fail configured/error cases;
+// bypassing the key/default-denial guards must fail before an effect can be produced.
+func TestSessionsRegistryHostToolExec(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, wantError string
+		configured, fail     bool
+		wantIntent           bool
+	}{
+		{name: "configured", key: "service-key", configured: true, wantIntent: true},
+		{name: "missing executor", key: "service-key", wantError: "no tool executor configured", wantIntent: true},
+		{name: "empty key", configured: true, wantError: controller.ErrMissingIdempotencyKey.Error()},
+		{name: "executor error", key: "service-key", configured: true, fail: true, wantError: "host refused charge", wantIntent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openStore(t, ":memory:")
+			backend := local.New(registryToolHarness{key: tc.key})
+			t.Cleanup(func() { _ = backend.Close() })
+			var uid string
+			var opts []placement.Option
+			if tc.configured {
+				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, call api.ToolCall) (api.ToolResult, error) {
+					log := store.Session(uid)
+					recs, err := log.Read(1)
+					if err != nil {
+						return api.ToolResult{}, err
+					}
+					if len(recs) != 2 || recs[1].Event.ToolCall == nil || recs[1].Event.ToolCall.IdempotencyKey != "service-key" {
+						return api.ToolResult{}, fmt.Errorf("host effect preceded durable intent: %+v", recs)
+					}
+					if err := log.Verify(); err != nil {
+						return api.ToolResult{}, err
+					}
+					if call.ID != "service-call" || call.Tool != "charge" || call.Args["account"] != "a1" || call.Mediation != api.MediationControllerMediated || call.IdempotencyKey != "service-key" {
+						return api.ToolResult{}, fmt.Errorf("unexpected host call: %+v", call)
+					}
+					if tc.fail {
+						return api.ToolResult{}, errors.New("host refused charge")
+					}
+					return api.ToolResult{ID: "host-id", Output: map[string]any{"receipt": "service-receipt"}}, nil
+				}))
+			}
+			client := serveRegistry(t, store, echoRegistry(t, backend, opts...))
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			uid = mustCreate(t, client)
+			stream, err := client.Exec(ctx, &v1.ExecRequest{Session: uid, Inputs: []*v1.Message{wire.MessageToProto(api.TextMessage("user", "charge"))}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var kinds []api.EventKind
+			var output string
+			var result *api.ToolResult
+			for {
+				update, recvErr := stream.Recv()
+				if recvErr != nil {
+					err = recvErr
+					break
+				}
+				if rec := update.GetRecord(); rec != nil {
+					ev := wire.EventFromProto(rec.GetEvent())
+					kinds = append(kinds, ev.Kind)
+					if ev.Kind == api.EventOutput {
+						output = ev.Message.Text()
+					}
+					if ev.Kind == api.EventToolResult {
+						result = ev.Result
+					}
+				}
+			}
+			if tc.wantError == "" {
+				if err != io.EOF || result == nil || result.ID != "service-call" || result.Output["receipt"] != "service-receipt" || output != "service-call:service-receipt" {
+					t.Fatalf("gRPC roundtrip: err=%v result=%+v output=%q", err, result, output)
+				}
+			} else if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), tc.wantError) || result != nil || output != "" {
+				t.Fatalf("gRPC failure: err=%v result=%+v output=%q, want %q", err, result, output, tc.wantError)
+			}
+			intent := false
+			for _, kind := range kinds {
+				intent = intent || kind == api.EventToolCall
+			}
+			if intent != tc.wantIntent {
+				t.Fatalf("intent=%v want %v, records=%v", intent, tc.wantIntent, kinds)
+			}
+		})
+	}
+}
+
+func TestSessionsRegistryHostToolResume(t *testing.T) {
+	for _, completedPrefix := range []bool{false, true} {
+		t.Run(fmt.Sprintf("completed-prefix=%v", completedPrefix), func(t *testing.T) {
+			store := openStore(t, ":memory:")
+			backend := local.New(registryToolHarness{key: "original-service-key"})
+			t.Cleanup(func() { _ = backend.Close() })
+			var opts []placement.Option
+			if !completedPrefix {
+				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, call api.ToolCall) (api.ToolResult, error) {
+					if call.ID != "service-call" || call.IdempotencyKey != "original-service-key" || call.Tool != "charge" || call.Args["account"] != "a1" {
+						return api.ToolResult{}, fmt.Errorf("resume lost recorded intent: %+v", call)
+					}
+					return api.ToolResult{ID: "wrong-id", Output: map[string]any{"receipt": "original-receipt"}}, nil
+				}))
+			}
+			// No executor for the completed prefix: the recorded result must suffice.
+			client := serveRegistry(t, store, echoRegistry(t, backend, opts...))
+			uid := mustCreate(t, client)
+			log := store.Session(uid)
+			fence, err := log.NewFence()
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := api.ToolCall{ID: "service-call", Tool: "charge", Args: map[string]any{"account": "a1"}, Mediation: api.MediationControllerMediated, IdempotencyKey: "original-service-key"}
+			events := []api.Event{{Kind: api.EventInput, Message: api.TextMessage("user", "charge")}, {Kind: api.EventToolCall, ToolCall: &call}}
+			if completedPrefix {
+				events = append(events, api.Event{Kind: api.EventToolResult, Result: &api.ToolResult{ID: "service-call", Output: map[string]any{"receipt": "original-receipt"}}})
+			}
+			for i, ev := range events {
+				ev.ExecutionID = "service-interrupted"
+				if _, err := log.Append(int64(i), fence, ev); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := client.Resume(ctx, &v1.ResumeRequest{Session: uid}); err != nil {
+				t.Fatalf("Sessions.Resume through registered placer: %v", err)
+			}
+			recs, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(recs) != 6 || recs[2].Event.Result == nil || recs[2].Event.Result.ID != "service-call" || recs[3].Event.Message.Text() != "service-call:original-receipt" || recs[4].Event.Kind != api.EventEnd || recs[5].Event.Lifecycle == nil || recs[5].Event.Lifecycle.Kind != api.LifecycleResume {
+				t.Fatalf("resume did not complete the tool turn: %+v", recs)
+			}
+			if err := log.Verify(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func serveRegistry(t *testing.T, store *sqlitelog.Store, registry *placement.Registry) v1.SessionsClient {
+	t.Helper()
+	lis := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	v1.RegisterSessionsServer(srv, session.NewService(store, registry))
+	go srv.Serve(lis)
+	t.Cleanup(srv.Stop)
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return v1.NewSessionsClient(conn)
 }

@@ -45,6 +45,7 @@ type Placer struct {
 	backend Backend
 	model   controller.ModelFunc
 	stream  controller.StreamFunc
+	tool    controller.ToolFunc
 	dial    Dialer
 	logger  *slog.Logger
 }
@@ -94,7 +95,7 @@ func WithDeadline(t time.Time) ExecOption {
 }
 
 // controllerOpts is the shared controller configuration, so the exec and resume paths cannot drift
-// apart on fencing, logging, or which model they drive.
+// apart on fencing, logging, or which model and tool executor they drive.
 func (p *Placer) controllerOpts(fence int64, sessionUID string, observer controller.Observer) []controller.Option {
 	opts := []controller.Option{
 		controller.WithFence(fence),
@@ -105,12 +106,19 @@ func (p *Placer) controllerOpts(fence int64, sessionUID string, observer control
 	if p.stream != nil {
 		opts = append(opts, controller.WithStreamingModel(p.stream))
 	}
+	if p.tool != nil {
+		opts = append(opts, controller.WithToolExecutor(p.tool))
+	}
 	return opts
 }
 
 // WithStreamingModel supplies a model that reports partial output, which the controller relays as
 // ephemeral deltas. Without it a turn still runs; the caller just sees the finalized output only.
 func WithStreamingModel(fn controller.StreamFunc) Option { return func(p *Placer) { p.stream = fn } }
+
+// WithToolExecutor supplies the host executor for controller-mediated tools in Exec and Resume.
+// Without one, tool calls fail closed. The host owns authorization and durable idempotency.
+func WithToolExecutor(fn controller.ToolFunc) Option { return func(p *Placer) { p.tool = fn } }
 
 // WithLogger enables structured operational logs. Message contents and fence tokens are never logged.
 func WithLogger(logger *slog.Logger) Option { return func(p *Placer) { p.logger = logger } }
