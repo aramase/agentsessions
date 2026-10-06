@@ -630,10 +630,8 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	}
 	log := s.store.Session(req.GetSession())
 	if err := placer.Resume(ctx, log, req.GetSession()); err != nil {
-		if errors.Is(err, controller.ErrInvalidExecutionLog) {
-			// Invalid identity or completed records can also cause this error, so qualify
-			// the recovery hint rather than assuming every invalid log has lost inputs.
-			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; if inputs were not fully committed, the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
+		if errors.Is(err, controller.ErrIncompleteInvocation) {
+			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
 		}
 		return nil, status.Errorf(codes.Internal, "resume: %v", err)
 	}

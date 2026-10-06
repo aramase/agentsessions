@@ -97,8 +97,12 @@ func (e recordedExecution) validateInputs() error {
 		return fmt.Errorf("%w: execution %q has an INPUT without a message", ErrInvalidExecutionLog, e.id)
 	}
 	if int64(e.inputRecords) != *e.inputCount {
+		errKind := ErrInvalidExecutionLog
+		if !e.completed && int64(e.inputRecords) < *e.inputCount {
+			errKind = ErrIncompleteInvocation
+		}
 		return fmt.Errorf("%w: execution %q expected %d INPUT events, committed %d",
-			ErrInvalidExecutionLog, e.id, *e.inputCount, e.inputRecords)
+			errKind, e.id, *e.inputCount, e.inputRecords)
 	}
 	return nil
 }

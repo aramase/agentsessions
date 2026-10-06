@@ -11,10 +11,11 @@ provide.
 
 - Every new execution records `EXECUTION_START`, including default-config turns, so interrupted
   recovery can reject partially committed inputs. Binaries older than this release fail chain
-  verification with a `content_hash` mismatch for sessions containing this event. This affects
-  every new session that executes a turn: an older binary cannot verify it after rollback.
-  Existing markerless sessions remain verifiable; no SQLite schema migration or log rewrite is
-  required.
+  verification with a `content_hash` mismatch for sessions containing this event. Rollback is not
+  supported for any session that executed a turn on this release, including existing markerless
+  sessions that execute another turn after upgrading. No SQLite schema migration or log rewrite is
+  required. Replay streams and harness `History` now carry one extra `EXECUTION_START` event per
+  turn (in `History`, only prior turns).
 
 ## v0.1.2
 

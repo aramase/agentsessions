@@ -149,9 +149,10 @@ replay: absence cannot distinguish a genuine inputless turn from lost inputs. Ma
 their prior behavior and lack completeness information; only older writers omit the marker.
 
 **Rollback compatibility:** binaries older than this release fail chain verification for sessions
-containing `EXECUTION_START`, reporting a `content_hash` mismatch. Every new session that executes
-a turn now contains this event, including default-config turns, so it cannot be verified by an older
-binary after rollback. Existing markerless sessions remain verifiable by older binaries.
+containing `EXECUTION_START`, reporting a `content_hash` mismatch. Rollback is not supported for any
+session that executed a turn on this release, including existing markerless sessions that execute
+another turn after upgrading. Replay streams and harness `History` now carry one extra
+`EXECUTION_START` event per turn (in `History`, only prior turns).
 
 ## The event log: single writer, append-only, tamper-evident
 

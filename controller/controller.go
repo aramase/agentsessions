@@ -38,6 +38,10 @@ var ErrReplayDiverged = errors.New("controller: replay diverged from the journal
 // before running the harness.
 var ErrInvalidExecutionLog = errors.New("controller: invalid execution log")
 
+// ErrIncompleteInvocation identifies an unfinished trailing turn whose inputs were only partly
+// committed. It wraps ErrInvalidExecutionLog; the caller can retry with Exec and all inputs.
+var ErrIncompleteInvocation = fmt.Errorf("%w: incomplete invocation", ErrInvalidExecutionLog)
+
 // ErrMissingIdempotencyKey rejects a CONTROLLER_MEDIATED tool call that omits the idempotency key
 // the crash-recovery re-drive needs to dedup its side effect (I3). Without a key, at-most-once
 // silently would not hold, so the host fails loud rather than record an unrecoverable intent. The

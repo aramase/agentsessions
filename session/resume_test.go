@@ -128,27 +128,50 @@ func TestResumeIncompleteInvocationCanExecAgain(t *testing.T) {
 }
 
 func TestResumeInvalidExecutionLogDoesNotAssumeIncompleteInputs(t *testing.T) {
-	store := openStore(t, ":memory:")
-	client := serve(t, store)
-	uid := mustCreate(t, client)
-	log := store.Session(uid)
-	fence, err := log.NewFence()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A missing execution identity is invalid, but does not prove an incomplete input commit.
-	if _, err := log.Append(0, fence, api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}); err != nil {
-		t.Fatal(err)
-	}
-	_, err = client.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Errorf("invalid execution identity Resume = %v, want FailedPrecondition", err)
-	}
-	message := status.Convert(err).Message()
-	if !strings.Contains(message, "no execution_id") {
-		t.Errorf("Resume lost invalid-log detail: %q", message)
-	}
-	if !strings.Contains(message, "if inputs were not fully committed") {
-		t.Errorf("Resume should qualify incomplete-input guidance: %q", message)
+	for _, tc := range []struct {
+		name   string
+		events []api.Event
+		detail string
+	}{
+		{
+			name:   "missing execution identity",
+			events: []api.Event{{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}},
+			detail: "no execution_id",
+		},
+		{
+			name: "count-short completed turn",
+			events: []api.Event{
+				{Kind: api.EventExecutionStart, ExecutionID: "completed", ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(1)}},
+				{Kind: api.EventEnd, ExecutionID: "completed", End: &api.HarnessEnd{State: "COMPLETED"}},
+			},
+			detail: "expected 1 INPUT events, committed 0",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openStore(t, ":memory:")
+			client := serve(t, store)
+			uid := mustCreate(t, client)
+			log := store.Session(uid)
+			fence, err := log.NewFence()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, event := range tc.events {
+				if _, err := log.Append(int64(i), fence, event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err = client.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
+			if status.Code(err) != codes.Internal {
+				t.Errorf("invalid-log Resume = %v, want Internal", err)
+			}
+			message := status.Convert(err).Message()
+			if !strings.Contains(message, tc.detail) {
+				t.Errorf("Resume lost invalid-log detail: %q", message)
+			}
+			if strings.Contains(message, "Exec again") || strings.Contains(message, "never reached the harness") {
+				t.Errorf("invalid log received incomplete-input guidance: %q", message)
+			}
+		})
 	}
 }

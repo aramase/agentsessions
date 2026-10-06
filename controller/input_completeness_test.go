@@ -216,18 +216,19 @@ func TestResumeInputCompletenessFromTruncatedSQLiteSnapshot(t *testing.T) {
 
 func TestReconstructionRejectsInvalidInputCountsBeforeHarness(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		count  *int64
-		inputs []*api.Message
+		name           string
+		count          *int64
+		inputs         []*api.Message
+		incompleteTail bool
 	}{
-		{"absent with input", nil, []*api.Message{api.TextMessage("user", "hi")}},
-		{"absent inputless", nil, nil},
-		{"negative", inputCount(-1), nil},
-		{"missing single", inputCount(1), nil},
-		{"partial multiple", inputCount(2), []*api.Message{api.TextMessage("user", "hi")}},
-		{"excess", inputCount(0), []*api.Message{api.TextMessage("user", "hi")}},
-		{"missing payload", inputCount(1), []*api.Message{nil}},
-		{"unexpected missing payload", inputCount(0), []*api.Message{nil}},
+		{"absent with input", nil, []*api.Message{api.TextMessage("user", "hi")}, false},
+		{"absent inputless", nil, nil, false},
+		{"negative", inputCount(-1), nil, false},
+		{"missing single", inputCount(1), nil, true},
+		{"partial multiple", inputCount(2), []*api.Message{api.TextMessage("user", "hi")}, true},
+		{"excess", inputCount(0), []*api.Message{api.TextMessage("user", "hi")}, false},
+		{"missing payload", inputCount(1), []*api.Message{nil}, false},
+		{"unexpected missing payload", inputCount(0), []*api.Message{nil}, false},
 	} {
 		for _, completed := range []bool{false, true} {
 			t.Run(tc.name+"/completed-"+strconv.FormatBool(completed), func(t *testing.T) {
@@ -269,6 +270,11 @@ func TestReconstructionRejectsInvalidInputCountsBeforeHarness(t *testing.T) {
 				runs := 0
 				har := checkedStartHarness{executionConfigHarness{}, func(*api.Start) { runs++ }}
 				assertIncompleteInvocation(t, log, c, har)
+				_, resumeErr := c.Resume(t.Context(), har)
+				wantIncomplete := !completed && tc.incompleteTail
+				if got := errors.Is(resumeErr, controller.ErrIncompleteInvocation); got != wantIncomplete {
+					t.Errorf("Resume incomplete classification = %v, want %v (err: %v)", got, wantIncomplete, resumeErr)
+				}
 				before, err := log.Read(1)
 				if err != nil {
 					t.Fatal(err)

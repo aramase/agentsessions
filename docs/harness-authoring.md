@@ -72,7 +72,7 @@ Two fields carry rules worth internalizing now:
   the original `Start.Inputs` from the journal. For a marked invocation, an empty slice is valid only
   when its recorded input count is explicitly zero.
 
-`Config` is opaque per-execution data, not session metadata: the host journals non-empty bytes before
+`Config` is opaque per-execution data, not session metadata: the host always journals it before
 calling the harness and restores them verbatim for controller replay, interrupted-turn resume, and
 inherited fork executions. `ResumeFromSeq` is journaled at the same boundary; it is a harness cursor,
 not the append CAS cursor. Reconstructed values come from the journal, not a replacement caller's
