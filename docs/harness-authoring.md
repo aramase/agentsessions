@@ -195,8 +195,8 @@ journal recovery.
 
 Tool-call arguments must be JSON-shaped: booleans, strings, null, numbers, string-keyed objects and
 lists (including typed Go containers that preserve that shape, but not custom serializers).
-Numbers must be finite; integers
-must stay within −9,007,199,254,740,991 to +9,007,199,254,740,991 so conversion cannot round them to
+Numbers must be finite; integers must stay within −9,007,199,254,740,991 to
++9,007,199,254,740,991 so conversion cannot round them to
 another integer. Unsupported values, cycles and invalid UTF-8 return a bounded error at the call
 boundary, before tool intent or execution. This deliberately replaces drop-to-nil conversion for
 invalid **tool arguments**; other content maps retain their existing conversion behavior. Historical
@@ -207,8 +207,9 @@ controller-mediated intent with a nonempty key may be re-driven without a record
 following unrelated effect is malformed evidence, not a retry opportunity. Recovery refuses a
 successful END if the harness leaves recorded effects unconsumed. A tool-prefix rejection stays
 fatal even if the harness catches the sink error; later calls cannot unlock the live path or certify
-replay. The executor still owns durable key deduplication. These checks do not enforce effects performed inside an `IN_HARNESS_REPORTED`
-harness, and `REQUIRES_APPROVAL` remains unimplemented and fails closed.
+replay. The executor still owns durable key deduplication. These checks do not enforce effects
+performed inside an `IN_HARNESS_REPORTED` harness, and `REQUIRES_APPROVAL` remains unimplemented
+and fails closed.
 
 ### Rule 5: pass reasoning parts back verbatim
 
