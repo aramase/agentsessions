@@ -524,7 +524,11 @@ func TestLiveToolExecutorReceivesRecordedArgumentRepresentation(t *testing.T) {
 		if err != nil {
 			return api.ToolResult{}, err
 		}
-		if len(recs) != 2 || recs[1].Event.ToolCall.Args["number"] != got.Args["number"] {
+		if len(recs) == 0 {
+			return api.ToolResult{}, errors.New("executor invoked before durable intent")
+		}
+		intent := recs[len(recs)-1].Event
+		if intent.Kind != api.EventToolCall || intent.ToolCall == nil || intent.ToolCall.Args["number"] != got.Args["number"] {
 			return api.ToolResult{}, errors.New("executor args differ from durable intent")
 		}
 		return api.ToolResult{}, nil
