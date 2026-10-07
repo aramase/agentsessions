@@ -20,6 +20,7 @@ func TestNormalizeToolArgs(t *testing.T) {
 		{"nil", nil, nil},
 		{"empty object", map[string]any{}, map[string]any{}},
 		{"numeric types", map[string]any{"int": int(2), "signed": int64(-2), "unsigned": uint64(2), "float": 2.0, "number": json.Number("2.0")}, map[string]any{"int": float64(2), "signed": float64(-2), "unsigned": float64(2), "float": float64(2), "number": float64(2)}},
+		{"fractional decimal normalization", map[string]any{"number": json.Number("2.00000000000000000001")}, map[string]any{"number": float64(2)}},
 		{"nested", map[string]any{"b": true, "s": "fixture", "null": nil, "nested": map[string]any{"items": []any{1, "a", nil}}}, map[string]any{"b": true, "s": "fixture", "null": nil, "nested": map[string]any{"items": []any{float64(1), "a", nil}}}},
 		{"typed containers", map[string]any{"items": []string{"a", "b"}, "values": map[string]int{"x": 2}}, map[string]any{"items": []any{"a", "b"}, "values": map[string]any{"x": float64(2)}}},
 		{"numeric boundary", map[string]any{"max": int64(9007199254740991), "min": int64(-9007199254740991)}, map[string]any{"max": float64(9007199254740991), "min": float64(-9007199254740991)}},

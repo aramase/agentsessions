@@ -195,9 +195,9 @@ journal recovery.
 
 Tool-call arguments must be JSON-shaped: booleans, strings, null, numbers, string-keyed objects and
 lists (including typed Go containers that preserve that shape, but not custom serializers).
-Numbers must be finite; integers must stay within −9,007,199,254,740,991 to
-+9,007,199,254,740,991 so conversion cannot round them to
-another integer. Unsupported values, cycles and invalid UTF-8 return a bounded error at the call
+Numbers are finite float64, normalized, with safe-integer bounds. Integers must stay within
+−9,007,199,254,740,991 to +9,007,199,254,740,991. Fractional decimal values can round during
+normalization: `json.Number("2.00000000000000000001")` becomes float64 `2`, not an exact decimal. Unsupported values, cycles and invalid UTF-8 return a bounded error at the call
 boundary, before tool intent or execution. This deliberately replaces drop-to-nil conversion for
 invalid **tool arguments**; other content maps retain their existing conversion behavior. Historical
 arguments already lost during conversion cannot be recovered or certified as their original values.

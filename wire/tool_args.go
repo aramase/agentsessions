@@ -9,8 +9,9 @@ import (
 	"unicode/utf8"
 )
 
-// ErrInvalidToolArgs indicates arguments outside the JSON-shaped, lossless numeric domain of a
-// tool call. It carries no argument values, since boundary errors may enter the session journal.
+// ErrInvalidToolArgs indicates arguments outside the JSON-shaped tool-call domain. Numbers are
+// finite float64, normalized, with safe-integer bounds; fractional decimals can round. The error
+// carries no argument values, since boundary errors may enter the session journal.
 var ErrInvalidToolArgs = errors.New("wire: tool arguments must be JSON-shaped with finite, safe-precision numbers")
 
 // NormalizeToolArgs validates tool-call arguments and returns their protobuf Struct representation
