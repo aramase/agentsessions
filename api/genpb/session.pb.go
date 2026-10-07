@@ -784,10 +784,14 @@ type ExecRequest struct {
 	Inputs []*Message `protobuf:"bytes,2,rep,name=inputs,proto3" json:"inputs,omitempty"`
 	// Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a
 	// harness knows what resuming from a sequence means for its own state. To re-read committed
-	// records after a disconnect, use Replay, which is the read path for exactly that.
+	// records after a disconnect, use Replay, which is the read path for exactly that. Non-zero cursors
+	// are journaled in EXECUTION_START and restored during controller replay/interrupted resume.
 	ResumeFromSeq int64  `protobuf:"varint,3,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"`
 	Harness       string `protobuf:"bytes,4,opt,name=harness,proto3" json:"harness,omitempty"` // empty = session default
-	Config        []byte `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`   // opaque per-execution config, passed through to Start.config
+	// Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled
+	// verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume.
+	// Do not put credentials here: config is durable journal content exposed by Replay.
+	Config []byte `protobuf:"bytes,5,opt,name=config,proto3" json:"config,omitempty"`
 	// Single-writer CAS: the host commits this execution's first event only if the log head equals
 	// expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log.
 	//

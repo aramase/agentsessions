@@ -10,6 +10,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -32,9 +33,14 @@ var ErrReplayInvokedModel = errors.New("controller: replay invoked the model (I1
 // the log was written (a determinism violation, symmetric to the I0 input-hash check).
 var ErrReplayDiverged = errors.New("controller: replay diverged from the journal")
 
-// ErrInvalidExecutionLog is returned when execution-scoped events do not carry a valid, contiguous
-// execution ID. Replay and resume require this durable identity to recover exact turn boundaries.
+// ErrInvalidExecutionLog is returned when execution-scoped events lack valid execution identity
+// or a start marker cannot establish a complete invocation. Replay and resume reject such turns
+// before running the harness.
 var ErrInvalidExecutionLog = errors.New("controller: invalid execution log")
+
+// ErrIncompleteInvocation identifies an unfinished trailing turn whose inputs were only partly
+// committed. It wraps ErrInvalidExecutionLog; the caller can retry with Exec and all inputs.
+var ErrIncompleteInvocation = fmt.Errorf("%w: incomplete invocation", ErrInvalidExecutionLog)
 
 // ErrMissingIdempotencyKey rejects a CONTROLLER_MEDIATED tool call that omits the idempotency key
 // the crash-recovery re-drive needs to dedup its side effect (I3). Without a key, at-most-once
@@ -109,8 +115,8 @@ func WithStreamingModel(fn StreamFunc) Option { return func(c *Controller) { c.s
 func WithObserver(o Observer) Option { return func(c *Controller) { c.observer = o } }
 
 // WithStart carries per-execution values the caller supplied straight through to the harness: the
-// opaque config and the resume cursor. They are passed rather than interpreted, since only the
-// harness knows what they mean.
+// opaque config and the resume cursor. Exec journals them before running the harness; Replay and
+// Resume use the recorded values, not this option. Only the harness knows what they mean.
 func WithStart(config []byte, resumeFromSeq int64) Option {
 	return func(c *Controller) {
 		c.startConfig = config
@@ -165,8 +171,8 @@ func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, erro
 	return c, nil
 }
 
-// Exec runs one live execution/turn. The first INPUT append is guarded by the caller's
-// expectedLastSeq (the single-writer CAS at the session boundary); the harness then runs
+// Exec runs one live execution/turn. The first append (EXECUTION_START) is guarded by
+// expectedLastSeq (the single-writer CAS at the session boundary); the harness runs
 // host-mediated, and the turn ends with an END event.
 func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
@@ -203,12 +209,27 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		history = append(history, r.Event)
 	}
 
+	// Record every invocation before inputs so recovery can detect partially committed turns.
+	config := bytes.Clone(c.startConfig)
 	last := expectedLastSeq
+	inputCount := int64(len(inputs))
+	rec, err := c.log.Append(last, c.fence, api.Event{
+		ExecutionID: executionID,
+		Kind:        api.EventExecutionStart,
+		ExecutionStart: &api.ExecutionStart{
+			// Keep journaled bytes separate from Start.Config, which harness code can mutate.
+			Config: bytes.Clone(config), ResumeFromSeq: c.startResumeFromSeq, InputCount: &inputCount,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	c.observe(rec)
+	last = rec.Seq
 	for i := range inputs {
 		in := inputs[i]
-		// This is the CAS-guarded append, so it cannot go through appendSeq (which reads the head
-		// itself). It still has to be observed, or a caller watching the turn would never see the
-		// input that started it.
+		// Extend the committed invocation prefix, not a freshly read head. Observe so a
+		// watching caller sees each input before the harness runs.
 		rec, err := c.log.Append(last, c.fence, api.Event{
 			ExecutionID: executionID,
 			Kind:        api.EventInput,
@@ -229,7 +250,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		ExecutionID:   executionID,
 		History:       history,
 		Inputs:        inputs,
-		Config:        c.startConfig,
+		Config:        config,
 		ResumeFromSeq: c.startResumeFromSeq,
 	}
 	if err := har.Run(ctx, start, &liveSink{c: c, executionID: executionID}); err != nil {
@@ -240,7 +261,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		return err
 	}
 	runFinished(nil)
-	rec, err := c.appendSeq(executionID, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	rec, err = c.appendSeq(executionID, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	finalSeq = rec.Seq
 	return err
 }
@@ -283,9 +304,11 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 		effectCount += len(execution.stream)
 		sink := &replaySink{stream: execution.stream}
 		start := &api.Start{
-			ExecutionID: execution.id,
-			History:     events[:execution.start],
-			Inputs:      execution.inputs,
+			ExecutionID:   execution.id,
+			History:       events[:execution.start],
+			Inputs:        execution.inputs,
+			Config:        execution.config,
+			ResumeFromSeq: execution.resumeFromSeq,
 		}
 		if err := har.Run(ctx, start, sink); err != nil {
 			return nil, err

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/aramase/agentsessions/api"
@@ -10,11 +11,16 @@ import (
 // exact History boundary; every execution-scoped event carries id, so no content-based inference
 // is needed.
 type recordedExecution struct {
-	id        string
-	start     int
-	inputs    []api.Message
-	stream    []api.Event
-	completed bool
+	id            string
+	start         int
+	inputs        []api.Message
+	stream        []api.Event
+	completed     bool
+	config        []byte
+	resumeFromSeq int64
+	hasStart      bool
+	inputCount    *int64
+	inputRecords  int
 }
 
 // recordedExecutions groups execution-scoped events by ID in first-seen journal order. Lifecycle
@@ -44,7 +50,16 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 
 		execution := &executions[executionIndex]
 		switch event.Kind {
+		case api.EventExecutionStart:
+			if execution.start != i || event.ExecutionStart == nil {
+				return nil, fmt.Errorf("%w: execution %q has an invalid start event", ErrInvalidExecutionLog, execution.id)
+			}
+			execution.config = bytes.Clone(event.ExecutionStart.Config)
+			execution.resumeFromSeq = event.ExecutionStart.ResumeFromSeq
+			execution.hasStart = true
+			execution.inputCount = event.ExecutionStart.InputCount
 		case api.EventInput:
+			execution.inputRecords++
 			if event.Message != nil {
 				execution.inputs = append(execution.inputs, *event.Message)
 			}
@@ -55,5 +70,39 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 		}
 	}
 
+	// Validate every completed invocation before any harness runs. Incomplete invocations are
+	// skipped by Replay; Resume validates its selected invocation separately.
+	for _, execution := range executions {
+		if execution.completed {
+			if err := execution.validateInputs(); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return executions, nil
+}
+
+func (e recordedExecution) validateInputs() error {
+	if !e.hasStart {
+		// Only older writers omit the start marker; their logs have no completeness count.
+		return nil
+	}
+	if e.inputCount == nil {
+		return fmt.Errorf("%w: execution %q start has no input_count", ErrInvalidExecutionLog, e.id)
+	}
+	if *e.inputCount < 0 {
+		return fmt.Errorf("%w: execution %q has negative input_count %d", ErrInvalidExecutionLog, e.id, *e.inputCount)
+	}
+	if e.inputRecords != len(e.inputs) {
+		return fmt.Errorf("%w: execution %q has an INPUT without a message", ErrInvalidExecutionLog, e.id)
+	}
+	if int64(e.inputRecords) != *e.inputCount {
+		errKind := ErrInvalidExecutionLog
+		if !e.completed && int64(e.inputRecords) < *e.inputCount {
+			errKind = ErrIncompleteInvocation
+		}
+		return fmt.Errorf("%w: execution %q expected %d INPUT events, committed %d",
+			errKind, e.id, *e.inputCount, e.inputRecords)
+	}
+	return nil
 }

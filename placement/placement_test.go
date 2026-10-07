@@ -351,7 +351,7 @@ func TestSuspendResumeRoundtripThroughSPI(t *testing.T) {
 				kinds = append(kinds, string(rec.Event.Kind))
 			}
 		}
-		wantKinds := []string{"SUSPEND", "RESUME", "INPUT", "MODEL_CALL", "OUTPUT", "END"}
+		wantKinds := []string{"SUSPEND", "RESUME", "EXECUTION_START", "INPUT", "MODEL_CALL", "OUTPUT", "END"}
 		if !reflect.DeepEqual(kinds, wantKinds) {
 			t.Fatalf("cycle %d record order=%v want %v", cycle, kinds, wantKinds)
 		}

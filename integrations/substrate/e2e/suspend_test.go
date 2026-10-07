@@ -95,7 +95,7 @@ func TestSessionSuspendResumeOnGVisor(t *testing.T) {
 			kinds = append(kinds, string(rec.Event.Kind))
 		}
 	}
-	if want := []string{"SUSPEND", "RESUME", "INPUT", "MODEL_CALL", "OUTPUT", "END"}; !reflect.DeepEqual(kinds, want) {
+	if want := []string{"SUSPEND", "RESUME", "EXECUTION_START", "INPUT", "MODEL_CALL", "OUTPUT", "END"}; !reflect.DeepEqual(kinds, want) {
 		t.Fatalf("suspend/resume record order=%v want %v", kinds, want)
 	}
 	if err := log.Verify(); err != nil {

@@ -304,7 +304,7 @@ func TestSubstrateSuspendResumePreservesActor(t *testing.T) {
 	a, retained := ctl.actors[substrate.ActorRef{Atespace: "space", Name: "session"}]
 	workerReleased := retained && !a.worker
 
-	// Run Restore before the retention assertions so the baseline fails at the real NotFound seam.
+	// Restore must make the retained actor usable by the next turn.
 	if err := p.Resume(ctx, log, "session"); err != nil {
 		t.Fatalf("resume suspended session (gRPC code %s): %v", status.Code(err), err)
 	}
@@ -321,13 +321,72 @@ func TestSubstrateSuspendResumePreservesActor(t *testing.T) {
 			kinds = append(kinds, string(record.Event.Kind))
 		}
 	}
-	wantKinds := []string{"INPUT", "MODEL_CALL", "OUTPUT", "END", "SUSPEND", "RESUME", "INPUT", "MODEL_CALL", "OUTPUT", "END"}
+	wantKinds := []string{"EXECUTION_START", "INPUT", "MODEL_CALL", "OUTPUT", "END", "SUSPEND", "RESUME", "EXECUTION_START", "INPUT", "MODEL_CALL", "OUTPUT", "END"}
 	if !reflect.DeepEqual(kinds, wantKinds) {
 		t.Fatalf("record order=%v want %v", kinds, wantKinds)
 	}
 	wantCalls := []string{"create:session", "resume:session:boot=true", "suspend:session", "resume:session:boot=false"}
 	if !reflect.DeepEqual(ctl.calls, wantCalls) {
 		t.Fatalf("lifecycle calls=%v want %v", ctl.calls, wantCalls)
+	}
+}
+
+func TestSubstrateSuspendThenExecWithoutResume(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		memory      bool
+		wantOutputs []string
+	}{
+		{name: "stateless", wantOutputs: []string{"echo:first", "echo:second", "echo:third"}},
+		{name: "memory", memory: true, wantOutputs: []string{"echo:first:1", "echo:second:2", "echo:third:3"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ctl := newSuspendControl()
+			p, backend := newSuspendPlacer(t, ctl, tc.memory)
+			log := newSuspendStore(t).Session("session")
+			execSuspendTurn(t, p, log, "session", "first")
+			ref, err := p.Suspend(ctx, log, "session")
+			if err != nil {
+				t.Fatalf("suspend: %v", err)
+			}
+			assertSuspendRef(t, log, ref)
+			cold, coldErr := backend.Status(ctx, api.Incarnation{ID: "session"})
+			actor := ctl.actors[substrate.ActorRef{Atespace: "space", Name: "session"}]
+			workerReleased := actor != nil && !actor.worker
+
+			// Exec must restore via Create without an explicit Resume or a RESUME journal marker.
+			execSuspendTurn(t, p, log, "session", "second")
+			if coldErr != nil || cold != api.ComputeCold || !workerReleased {
+				t.Fatalf("suspend must retain a cold actor without a worker: state=%s err=%v released=%v", cold, coldErr, workerReleased)
+			}
+			live, err := backend.Status(ctx, api.Incarnation{ID: "session"})
+			if err != nil || live != api.ComputeLive || actor != ctl.actors[substrate.ActorRef{Atespace: "space", Name: "session"}] {
+				t.Fatalf("Exec must restore the retained actor: state=%s err=%v", live, err)
+			}
+			execSuspendTurn(t, p, log, "session", "third")
+			assertSuspendOutputs(t, log, tc.wantOutputs)
+			var kinds []string
+			for _, record := range suspendRecords(t, log) {
+				if record.Event.Lifecycle != nil {
+					kinds = append(kinds, string(record.Event.Lifecycle.Kind))
+				} else {
+					kinds = append(kinds, string(record.Event.Kind))
+				}
+			}
+			wantKinds := []string{
+				"EXECUTION_START", "INPUT", "MODEL_CALL", "OUTPUT", "END", "SUSPEND",
+				"EXECUTION_START", "INPUT", "MODEL_CALL", "OUTPUT", "END",
+				"EXECUTION_START", "INPUT", "MODEL_CALL", "OUTPUT", "END",
+			}
+			if !reflect.DeepEqual(kinds, wantKinds) {
+				t.Fatalf("record order=%v want %v (no RESUME)", kinds, wantKinds)
+			}
+			wantCalls := []string{"create:session", "resume:session:boot=true", "suspend:session", "resume:session:boot=false"}
+			if !reflect.DeepEqual(ctl.calls, wantCalls) {
+				t.Fatalf("lifecycle calls=%v want %v", ctl.calls, wantCalls)
+			}
+		})
 	}
 }
 

@@ -258,6 +258,7 @@ func TestChatSessionConversation(t *testing.T) {
 					kinds = append(kinds, rec.GetEvent().GetKind())
 				}
 				want := []v1.EventKind{
+					v1.EventKind_EVENT_EXECUTION_START,
 					v1.EventKind_EVENT_INPUT, v1.EventKind_EVENT_MODEL_CALL,
 					v1.EventKind_EVENT_OUTPUT, v1.EventKind_EVENT_END,
 				}
@@ -298,12 +299,15 @@ func TestChatSessionModelFailure(t *testing.T) {
 	for _, rec := range records {
 		kinds = append(kinds, rec.GetEvent().GetKind())
 	}
-	want := []v1.EventKind{v1.EventKind_EVENT_INPUT, v1.EventKind_EVENT_MODEL_CALL, v1.EventKind_EVENT_ERROR}
+	want := []v1.EventKind{
+		v1.EventKind_EVENT_EXECUTION_START, v1.EventKind_EVENT_INPUT,
+		v1.EventKind_EVENT_MODEL_CALL, v1.EventKind_EVENT_ERROR,
+	}
 	if !reflect.DeepEqual(kinds, want) {
 		t.Fatalf("failed turn events = %v, want %v", kinds, want)
 	}
-	if !strings.Contains(records[2].GetEvent().GetError().GetDescription(), modelErr.Error()) {
-		t.Fatalf("error record = %v", records[2])
+	if !strings.Contains(records[3].GetEvent().GetError().GetDescription(), modelErr.Error()) {
+		t.Fatalf("error record = %v", records[3])
 	}
 }
 

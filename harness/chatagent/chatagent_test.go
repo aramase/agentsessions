@@ -88,7 +88,7 @@ func TestControllerReplay(t *testing.T) {
 					for _, record := range records {
 						kinds = append(kinds, record.Event.Kind)
 					}
-					if !reflect.DeepEqual(kinds, []api.EventKind{api.EventInput, api.EventModelCall, api.EventError}) {
+					if !reflect.DeepEqual(kinds, []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventModelCall, api.EventError}) {
 						t.Fatalf("failed turn records = %v", kinds)
 					}
 				} else if err != nil {

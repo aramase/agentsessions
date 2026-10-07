@@ -153,6 +153,19 @@ first turn lands; cold-booting it there would throw away the cloned RAM the fork
 the harness would never rebuild it (I4). A control-client double that accepts every `CreateActor`
 cannot see any of this, which is why it is asserted against a live cluster.
 
+### Suspend and Resume failure boundaries
+
+An `Exec` after `Placer.Suspend` does not require an explicit `Placer.Resume`: `Create` restores the
+SUSPENDED actor with `boot:false`, then the controller records the new execution. This path preserves
+the actor's captured state but does not append a RESUME lifecycle marker.
+
+`Placer.Resume` restores compute before dialing the harness, minting a fence, recovering any interrupted
+turn, and appending RESUME. If a step after `Restore` fails, the actor may already be RUNNING while the
+journal's last lifecycle marker is still SUSPEND. There is no automatic re-snapshot on this failure.
+A later successful `Suspend` checkpoints the running actor and records a new SUSPEND; a later successful
+`Exec` attaches to it and records a new execution without a RESUME marker. Either reconciles the
+recorded compute state with the actor; neither rolls back effects from a failed interrupted turn.
+
 ## The transport: direct pod-IP dial, not the mesh
 
 The harness is a `harnesswire` gRPC server. The key finding (verified empirically on a live cluster):
@@ -322,22 +335,22 @@ Local reproduction needs a Linux host with `/dev/kvm` (micro-VM); the recipe mir
 
 The session-level stateless regression and explicit memory Resume are selected by the respective
 live CI passes. Ordinary local `go test` runs compile them but skip them unless `AGENTSESSIONS_E2E=1`;
-a skipped test is not live verification. The added Placer coverage has not been freshly run against a
-live cluster in this change. Earlier raw-Runtime memory results do not establish a pass for the new
-Placer sequence.
+a skipped test is not live verification.
 
 Root placement tests separately exercise a lifecycle-faithful control fake: deletion removes actors,
 missing-actor Resume returns NotFound, Suspend retains established fork-child pins, and destructive
-Stop removes only the child's own pin while its sibling remains usable. These tests prove orchestration
-and retention behavior, not real RAM snapshot continuity.
+Stop removes only the child's own pin while its sibling remains usable. Suspend followed by Exec
+without Resume restores through `Create(boot:false)`, preserves the fake's counter, and journals no
+RESUME marker. These tests prove orchestration and retention behavior, not real RAM snapshot continuity.
 
 ## In progress
 
 - **Fork tag lifecycle.** A fork tags the parent snapshot (`fork-<child-uid>`) so `CreateActor` can
   reference it, and a tag is a retention pin. The tag name is derived from the child session UID, so
   `Stop` releases it when the child is torn down and a failed fork releases it on the way out. A
-  long-lived child therefore holds one pin on its parent's snapshot for as long as it exists, which
-  is correct but means upstream snapshot GC (substrate #664) still governs the ceiling.
+  child holds one pin on its parent's snapshot indefinitely: `DeleteSession` is unimplemented and
+  no session teardown calls `Stop`. Suspended actors are likewise retained indefinitely. Operators
+  must reclaim actors and fork tags directly in Substrate; there is no automatic retention deadline.
 - **Controller-side I4.** `controller.Exec` sends the full journal as `Start.History` even on the
   post-restore turn; for the general case the controller should send empty `History` on memory-restore.
   The counter's harness-side I4 carries the stateful tier today.
