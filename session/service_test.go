@@ -905,13 +905,16 @@ func TestSessionsRegistryHostToolExec(t *testing.T) {
 			var uid string
 			var opts []placement.Option
 			if tc.configured {
-				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, call api.ToolCall) (api.ToolResult, error) {
-					log := store.Session(uid)
+				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, sessionUID string, call api.ToolCall) (api.ToolResult, error) {
+					if sessionUID != uid {
+						return api.ToolResult{}, fmt.Errorf("executor session = %q, want %q", sessionUID, uid)
+					}
+					log := store.Session(sessionUID)
 					recs, err := log.Read(1)
 					if err != nil {
 						return api.ToolResult{}, err
 					}
-					if len(recs) != 2 || recs[1].Event.ToolCall == nil || recs[1].Event.ToolCall.IdempotencyKey != "service-key" {
+					if len(recs) == 0 || recs[len(recs)-1].Event.Kind != api.EventToolCall || recs[len(recs)-1].Event.ToolCall == nil || recs[len(recs)-1].Event.ToolCall.IdempotencyKey != "service-key" {
 						return api.ToolResult{}, fmt.Errorf("host effect preceded durable intent: %+v", recs)
 					}
 					if err := log.Verify(); err != nil {
@@ -978,9 +981,13 @@ func TestSessionsRegistryHostToolResume(t *testing.T) {
 			store := openStore(t, ":memory:")
 			backend := local.New(registryToolHarness{key: "original-service-key"})
 			t.Cleanup(func() { _ = backend.Close() })
+			var uid string
 			var opts []placement.Option
 			if !completedPrefix {
-				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, call api.ToolCall) (api.ToolResult, error) {
+				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, sessionUID string, call api.ToolCall) (api.ToolResult, error) {
+					if sessionUID != uid {
+						return api.ToolResult{}, fmt.Errorf("resume executor session = %q, want %q", sessionUID, uid)
+					}
 					if call.ID != "service-call" || call.IdempotencyKey != "original-service-key" || call.Tool != "charge" || call.Args["account"] != "a1" {
 						return api.ToolResult{}, fmt.Errorf("resume lost recorded intent: %+v", call)
 					}
@@ -989,14 +996,18 @@ func TestSessionsRegistryHostToolResume(t *testing.T) {
 			}
 			// No executor for the completed prefix: the recorded result must suffice.
 			client := serveRegistry(t, store, echoRegistry(t, backend, opts...))
-			uid := mustCreate(t, client)
+			uid = mustCreate(t, client)
 			log := store.Session(uid)
 			fence, err := log.NewFence()
 			if err != nil {
 				t.Fatal(err)
 			}
 			call := api.ToolCall{ID: "service-call", Tool: "charge", Args: map[string]any{"account": "a1"}, Mediation: api.MediationControllerMediated, IdempotencyKey: "original-service-key"}
-			events := []api.Event{{Kind: api.EventInput, Message: api.TextMessage("user", "charge")}, {Kind: api.EventToolCall, ToolCall: &call}}
+			events := []api.Event{
+				{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(1)}},
+				{Kind: api.EventInput, Message: api.TextMessage("user", "charge")},
+				{Kind: api.EventToolCall, ToolCall: &call},
+			}
 			if completedPrefix {
 				events = append(events, api.Event{Kind: api.EventToolResult, Result: &api.ToolResult{ID: "service-call", Output: map[string]any{"receipt": "original-receipt"}}})
 			}
@@ -1015,7 +1026,7 @@ func TestSessionsRegistryHostToolResume(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(recs) != 6 || recs[2].Event.Result == nil || recs[2].Event.Result.ID != "service-call" || recs[3].Event.Message.Text() != "service-call:original-receipt" || recs[4].Event.Kind != api.EventEnd || recs[5].Event.Lifecycle == nil || recs[5].Event.Lifecycle.Kind != api.LifecycleResume {
+			if len(recs) != 7 || recs[3].Event.Result == nil || recs[3].Event.Result.ID != "service-call" || recs[4].Event.Message.Text() != "service-call:original-receipt" || recs[5].Event.Kind != api.EventEnd || recs[6].Event.Lifecycle == nil || recs[6].Event.Lifecycle.Kind != api.LifecycleResume {
 				t.Fatalf("resume did not complete the tool turn: %+v", recs)
 			}
 			if err := log.Verify(); err != nil {

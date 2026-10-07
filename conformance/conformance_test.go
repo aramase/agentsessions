@@ -391,26 +391,29 @@ func TestIntegrityGoldenVectorCrossImpl(t *testing.T) {
 	}
 }
 
+type toolKey struct{ sessionUID, key string }
+
 // idempotentTool models an external side-effecting tool with tool-side dedup: it counts real
-// effects per idempotency key and returns the cached result for a repeated key. Its state stands in
-// for the tool's OWN durable dedup (e.g. a payment API keyed on the idempotency key), so — like the
+// effects per session and idempotency key and returns the cached result for a repeated pair. Its
+// state stands in for the tool's OWN durable dedup keyed on that pair, so — like the
 // external effect — it survives the simulated controller crash.
 type idempotentTool struct {
-	effects map[string]int
-	results map[string]api.ToolResult
+	effects map[toolKey]int
+	results map[toolKey]api.ToolResult
 }
 
 func newIdempotentTool() *idempotentTool {
-	return &idempotentTool{effects: map[string]int{}, results: map[string]api.ToolResult{}}
+	return &idempotentTool{effects: map[toolKey]int{}, results: map[toolKey]api.ToolResult{}}
 }
 
-func (t *idempotentTool) exec(_ context.Context, tc api.ToolCall) (api.ToolResult, error) {
-	if r, ok := t.results[tc.IdempotencyKey]; ok {
+func (t *idempotentTool) exec(_ context.Context, sessionUID string, tc api.ToolCall) (api.ToolResult, error) {
+	key := toolKey{sessionUID, tc.IdempotencyKey}
+	if r, ok := t.results[key]; ok {
 		return r, nil // deduped: the effect already ran under this key
 	}
-	t.effects[tc.IdempotencyKey]++
+	t.effects[key]++
 	r := api.ToolResult{ID: tc.ID, Output: map[string]any{"ran": true}}
-	t.results[tc.IdempotencyKey] = r
+	t.results[key] = r
 	return r, nil
 }
 
@@ -439,7 +442,7 @@ func (h toolHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) 
 func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	s, path := openFile(t)
 	tool := newIdempotentTool()
-	c1, err := controller.New(s.Session("s"), (&countModel{}).call, controller.WithToolExecutor(tool.exec))
+	c1, err := controller.New(s.Session("s"), (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(tool.exec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,8 +451,8 @@ func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	}
 	// Journal now: EXECUTION_START(1) INPUT(2) TOOL_CALL(3) TOOL_RESULT(4) END(5).
 	// The effect ran exactly once.
-	if tool.effects["k1"] != 1 {
-		t.Fatalf("live: effect ran %d times, want 1", tool.effects["k1"])
+	if tool.effects[toolKey{"s", "k1"}] != 1 {
+		t.Fatalf("live: effect ran %d times, want 1", tool.effects[toolKey{"s", "k1"}])
 	}
 	s.Close()
 
@@ -465,7 +468,7 @@ func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	log := s2.Session("s")
 	// Same tool instance: its dedup state is the external tool's, which the controller crash does
 	// not erase.
-	c2, err := controller.New(log, (&countModel{}).call, controller.WithToolExecutor(tool.exec))
+	c2, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(tool.exec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,8 +481,8 @@ func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	}
 	// The executor is CALLED again on re-drive, but the same key dedups it — the external effect
 	// fired exactly once across the crash (at-most-once / I3).
-	if tool.effects["k1"] != 1 {
-		t.Fatalf("resume re-ran the side effect: %d times, want 1 (I3 violated)", tool.effects["k1"])
+	if tool.effects[toolKey{"s", "k1"}] != 1 {
+		t.Fatalf("resume re-ran the side effect: %d times, want 1 (I3 violated)", tool.effects[toolKey{"s", "k1"}])
 	}
 	recs, _ := log.Read(1)
 	if recs[len(recs)-1].Event.Kind != api.EventEnd {

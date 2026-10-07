@@ -177,14 +177,18 @@ Each tool declares how it executes (`api.Mediation`):
 | `CONTROLLER_MEDIATED` | The host / gateway. You call `sink.ToolCall(...)` and block for the result. | Tools needing central authz, policy, or audit. |
 | `REQUIRES_APPROVAL` | The host, after a human or policy approval gate. | Sensitive or destructive actions. |
 
-For any side-effecting tool, set `ToolCall.IdempotencyKey`. If a crash forces an at-most-once re-drive
-(I3), the key lets the tool side dedup so the effect happens once, not twice.
+For any side-effecting tool, the harness chooses `ToolCall.IdempotencyKey`, unique only within its
+session. If a crash forces an at-most-once re-drive (I3), the tool side dedups on **session UID plus
+idempotency key** so the effect happens once, not twice. Different sessions may reuse the same key.
 
 #### Host composition for controller-mediated tools
 
 A custom Sessions host supplies its executor on the Placer registered for that harness. The same
 executor is used for live `Exec` and interrupted-turn `Resume`; no Sessions RPC field is needed.
-Given a backend serving your harness, a model, and your host executor:
+`controller.ToolFunc` has signature
+`func(ctx context.Context, sessionUID string, call api.ToolCall) (api.ToolResult, error)`.
+The Placer binds the session UID for both paths. Given a backend serving your harness, a model,
+and your host executor:
 
 ```go
 import (
@@ -213,9 +217,12 @@ The controller records intent before invoking the executor and stamps the result
 ID. Completed intent/result pairs are served during recovery without invoking an executor; intent
 without a result is re-driven using the **original recorded key**.
 
-The executor owns tool/resource authorization and durable deduplication. If an effect succeeds but
-its journal result append fails, recovery must retrieve the original receipt rather than repeat the
-effect. Keep that receipt/dedup state durable across host restarts; an in-memory cache is insufficient.
+The executor owns tool/resource authorization scoped to the supplied `sessionUID` and durable
+deduplication keyed by `(sessionUID, call.IdempotencyKey)`, never by the harness-chosen key alone.
+If an effect succeeds but its journal result append fails, recovery must retrieve that session's
+original receipt rather than repeat the effect. Keep that receipt/dedup state durable across host
+restarts; an in-memory cache is insufficient. Direct controller users must configure
+`controller.WithSessionUID(uid)`; without it, the executor receives an empty session UID.
 Journaling alone does not provide exactly-once external delivery. `REQUIRES_APPROVAL` still fails
 closed because its approval gate is unimplemented. The stock daemon does not configure a tool executor.
 

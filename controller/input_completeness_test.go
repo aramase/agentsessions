@@ -77,7 +77,7 @@ func TestResumeRejectsFailedInputAppendAfterSQLiteReopen(t *testing.T) {
 						modelCalls++
 						return api.ModelResponse{Message: *api.TextMessage("assistant", "reply")}, nil
 					}
-					tool := func(context.Context, api.ToolCall) (api.ToolResult, error) {
+					tool := func(context.Context, string, api.ToolCall) (api.ToolResult, error) {
 						toolCalls++
 						return api.ToolResult{ID: "t1"}, nil
 					}
@@ -186,7 +186,7 @@ func TestResumeInputCompletenessFromTruncatedSQLiteSnapshot(t *testing.T) {
 			recovery, err := controller.New(log, func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 				models++
 				return api.ModelResponse{Message: *api.TextMessage("assistant", "reply")}, nil
-			}, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+			}, controller.WithToolExecutor(func(context.Context, string, api.ToolCall) (api.ToolResult, error) {
 				tools++
 				return api.ToolResult{ID: "t1"}, nil
 			}))

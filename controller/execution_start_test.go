@@ -208,7 +208,7 @@ func TestResumeRestoresExecutionStartAfterSQLiteReopen(t *testing.T) {
 				modelCalls++
 				return api.ModelResponse{Message: *api.TextMessage("assistant", "recorded")}, nil
 			}
-			tool := func(context.Context, api.ToolCall) (api.ToolResult, error) {
+			tool := func(context.Context, string, api.ToolCall) (api.ToolResult, error) {
 				toolCalls++
 				return api.ToolResult{ID: "t1", Output: map[string]any{"ok": true}}, nil
 			}

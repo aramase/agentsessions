@@ -9,6 +9,11 @@ provide.
 
 ### Compatibility
 
+- `controller.ToolFunc` now takes `sessionUID` between `ctx` and `call`. Custom tool executors must
+  update their Go signatures and scope authorization and durable deduplication to the session UID
+  plus the harness-chosen idempotency key. Placement binds the UID for Exec and Resume; direct
+  controller users must set `controller.WithSessionUID` (otherwise the executor receives an empty
+  UID). This is a Go source compatibility change, not a wire or journal schema change.
 - Every new execution records `EXECUTION_START`, including default-config turns, so interrupted
   recovery can reject partially committed inputs. Binaries older than this release fail chain
   verification with a `content_hash` mismatch for sessions containing this event. Rollback is not

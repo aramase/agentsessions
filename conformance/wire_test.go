@@ -188,15 +188,15 @@ func TestWireControllerMediatedTool(t *testing.T) {
 	har := wireHarnessFrom(t, toolHarness{key: "k1"})
 	tool := newIdempotentTool()
 
-	c, err := controller.New(log, (&countModel{}).call, controller.WithToolExecutor(tool.exec))
+	c, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(tool.exec))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Exec(context.Background(), har, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
 		t.Fatalf("wire exec: %v", err)
 	}
-	if tool.effects["k1"] != 1 {
-		t.Fatalf("host executed the tool %d times, want 1", tool.effects["k1"])
+	if tool.effects[toolKey{"s", "k1"}] != 1 {
+		t.Fatalf("host executed the tool %d times, want 1", tool.effects[toolKey{"s", "k1"}])
 	}
 	recs, _ := log.Read(1)
 	var calls, results int
@@ -212,15 +212,15 @@ func TestWireControllerMediatedTool(t *testing.T) {
 		t.Fatalf("journal has %d TOOL_CALL / %d TOOL_RESULT, want 1/1", calls, results)
 	}
 
-	c2, err := controller.New(log, (&countModel{}).call, controller.WithToolExecutor(tool.exec))
+	c2, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(tool.exec))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c2.Replay(context.Background(), har); err != nil {
 		t.Fatalf("wire replay: %v", err)
 	}
-	if tool.effects["k1"] != 1 {
-		t.Fatalf("replay re-executed the tool: %d times, want 1 (I1)", tool.effects["k1"])
+	if tool.effects[toolKey{"s", "k1"}] != 1 {
+		t.Fatalf("replay re-executed the tool: %d times, want 1 (I1)", tool.effects[toolKey{"s", "k1"}])
 	}
 	if err := log.Verify(); err != nil {
 		t.Fatalf("verify: %v", err)

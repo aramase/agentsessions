@@ -117,7 +117,8 @@ func (p *Placer) controllerOpts(fence int64, sessionUID string, observer control
 func WithStreamingModel(fn controller.StreamFunc) Option { return func(p *Placer) { p.stream = fn } }
 
 // WithToolExecutor supplies the host executor for controller-mediated tools in Exec and Resume.
-// Without one, tool calls fail closed. The host owns authorization and durable idempotency.
+// It receives the session UID bound by the Placer. Without one, tool calls fail closed. The host
+// owns session-scoped authorization and durable deduplication by session UID plus idempotency key.
 func WithToolExecutor(fn controller.ToolFunc) Option { return func(p *Placer) { p.tool = fn } }
 
 // WithLogger enables structured operational logs. Message contents and fence tokens are never logged.

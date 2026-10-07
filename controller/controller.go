@@ -45,7 +45,7 @@ var ErrIncompleteInvocation = fmt.Errorf("%w: incomplete invocation", ErrInvalid
 // ErrMissingIdempotencyKey rejects a CONTROLLER_MEDIATED tool call that omits the idempotency key
 // the crash-recovery re-drive needs to dedup its side effect (I3). Without a key, at-most-once
 // silently would not hold, so the host fails loud rather than record an unrecoverable intent. The
-// full key contract (generation, TTL, scope) is the §10 spike; this is the minimal guard.
+// remaining key contract (generation, TTL) is the §10 spike; this is the minimal guard.
 var ErrMissingIdempotencyKey = errors.New("controller: CONTROLLER_MEDIATED tool call requires an idempotency key")
 
 // ErrUnmediatedToolCall rejects a ToolCall whose mediation tier is not host-executed. ToolCall is
@@ -83,11 +83,13 @@ type Observer struct {
 }
 
 // ToolFunc executes a CONTROLLER_MEDIATED tool. The host calls it between appending the TOOL_CALL
-// intent and appending the TOOL_RESULT (the two-phase write-ahead of §3/I3). It receives the call's
-// IdempotencyKey and owns tool-side deduplication: on crash-recovery the host re-executes the same
-// call under the same key, and an idempotent tool MUST NOT repeat the external effect. ctx carries
-// the execution's cancellation and deadline.
-type ToolFunc func(ctx context.Context, tc api.ToolCall) (api.ToolResult, error)
+// intent and appending the TOOL_RESULT (the two-phase write-ahead of §3/I3). sessionUID is the
+// identity configured by WithSessionUID (empty if omitted). The host owns tool/resource
+// authorization and durable deduplication scoped by sessionUID plus the harness-chosen
+// IdempotencyKey, which is only unique within a session. On crash-recovery it receives the same
+// session and recorded call, and MUST NOT repeat the external effect. ctx carries the execution's
+// cancellation and deadline.
+type ToolFunc func(ctx context.Context, sessionUID string, call api.ToolCall) (api.ToolResult, error)
 
 // Option configures a Controller at construction.
 type Option func(*Controller)
@@ -124,7 +126,8 @@ func WithStart(config []byte, resumeFromSeq int64) Option {
 	}
 }
 
-// WithSessionUID adds session correlation to controller logs.
+// WithSessionUID binds the session identity passed to tool executors and controller logs.
+// Direct controller users must set it to scope host authorization and durable tool deduplication.
 func WithSessionUID(sessionUID string) Option {
 	return func(c *Controller) { c.sessionUID = sessionUID }
 }
