@@ -402,11 +402,7 @@ func descriptorToProto(d api.Descriptor) *v1.HarnessDescriptor {
 		Capabilities: capabilitiesToProto(d.Capabilities),
 	}
 	for _, tool := range d.Tools {
-		out.Tools = append(out.Tools, &v1.ToolSpec{
-			Name:        tool.Name,
-			Description: tool.Description,
-			Mediation:   wire.MediationToProto(tool.Mediation),
-		})
+		out.Tools = append(out.Tools, wire.ToolSpecToProto(tool))
 	}
 	return out
 }
@@ -418,11 +414,7 @@ func descriptorFromProto(p *v1.HarnessDescriptor) api.Descriptor {
 		Capabilities: capabilitiesFromProto(p.GetCapabilities()),
 	}
 	for _, tool := range p.GetTools() {
-		out.Tools = append(out.Tools, api.ToolSpec{
-			Name:        tool.GetName(),
-			Description: tool.GetDescription(),
-			Mediation:   wire.MediationFromProto(tool.GetMediation()),
-		})
+		out.Tools = append(out.Tools, wire.ToolSpecFromProto(tool))
 	}
 	return out
 }

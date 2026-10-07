@@ -126,6 +126,25 @@ func ToolCallFromProto(t *v1.ToolCall) *api.ToolCall       { return toolCallFrom
 func ToolResultToProto(t *api.ToolResult) *v1.ToolResult   { return toolResultToProto(t) }
 func ToolResultFromProto(t *v1.ToolResult) *api.ToolResult { return toolResultFromProto(t) }
 
+// ToolSpecToProto converts a declared tool to its wire form (exported for the harness wire bridge,
+// which carries a harness's declared tools in its descriptor).
+func ToolSpecToProto(t api.ToolSpec) *v1.ToolSpec {
+	return &v1.ToolSpec{
+		Name:        t.Name,
+		Description: t.Description,
+		Mediation:   mediationToProto(t.Mediation),
+	}
+}
+
+// ToolSpecFromProto converts a wire tool declaration to the domain type. A nil p yields the zero value.
+func ToolSpecFromProto(p *v1.ToolSpec) api.ToolSpec {
+	return api.ToolSpec{
+		Name:        p.GetName(),
+		Description: p.GetDescription(),
+		Mediation:   mediationFromProto(p.GetMediation()),
+	}
+}
+
 func msgToProto(m *api.Message) *v1.Message {
 	if m == nil {
 		return nil
@@ -285,7 +304,7 @@ func toolCallToProto(t *api.ToolCall) *v1.ToolCall {
 		Id:             t.ID,
 		Tool:           t.Tool,
 		Args:           toStruct(t.Args),
-		Mediation:      MediationToProto(t.Mediation),
+		Mediation:      mediationToProto(t.Mediation),
 		IdempotencyKey: t.IdempotencyKey,
 	}
 }
@@ -298,7 +317,7 @@ func toolCallFromProto(t *v1.ToolCall) *api.ToolCall {
 		ID:             t.GetId(),
 		Tool:           t.GetTool(),
 		Args:           fromStruct(t.GetArgs()),
-		Mediation:      MediationFromProto(t.GetMediation()),
+		Mediation:      mediationFromProto(t.GetMediation()),
 		IdempotencyKey: t.GetIdempotencyKey(),
 	}
 }
@@ -530,8 +549,7 @@ func kindFromProto(k v1.EventKind) api.EventKind {
 	}
 }
 
-// MediationToProto converts a mediation value to its wire representation.
-func MediationToProto(m api.Mediation) v1.Mediation {
+func mediationToProto(m api.Mediation) v1.Mediation {
 	switch m {
 	case api.MediationInHarnessReported:
 		return v1.Mediation_MEDIATION_IN_HARNESS_REPORTED
@@ -544,8 +562,7 @@ func MediationToProto(m api.Mediation) v1.Mediation {
 	}
 }
 
-// MediationFromProto converts a wire mediation value to its in-process representation.
-func MediationFromProto(m v1.Mediation) api.Mediation {
+func mediationFromProto(m v1.Mediation) api.Mediation {
 	switch m {
 	case v1.Mediation_MEDIATION_IN_HARNESS_REPORTED:
 		return api.MediationInHarnessReported

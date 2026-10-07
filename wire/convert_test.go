@@ -157,3 +157,32 @@ func TestHashStableAcrossWire(t *testing.T) {
 		}
 	}
 }
+
+// TestToolSpecRoundTrip pins descriptor tool conversion at the public wire boundary: every field and
+// every mediation survives a trip through the proto form, and an absent proto decodes to the zero
+// value (the nil-tolerant getter behavior Describe has always had).
+func TestToolSpecRoundTrip(t *testing.T) {
+	for _, want := range []api.ToolSpec{
+		{Name: "report", Description: "Report local work", Mediation: api.MediationInHarnessReported},
+		{Name: "lookup", Description: "Look up a record", Mediation: api.MediationControllerMediated},
+		{Name: "charge", Description: "Request a charge", Mediation: api.MediationRequiresApproval},
+		{Name: "default", Description: "Use unspecified mediation"},
+		{},
+	} {
+		p := wire.ToolSpecToProto(want)
+		if p == nil {
+			t.Fatalf("ToolSpecToProto(%#v) = nil", want)
+		}
+		if got := wire.ToolSpecFromProto(p); !reflect.DeepEqual(got, want) {
+			t.Fatalf("ToolSpec round-trip = %#v, want %#v", got, want)
+		}
+	}
+
+	// The wire form carries the declared mediation, not just the name.
+	if got := wire.ToolSpecToProto(api.ToolSpec{Name: "charge", Mediation: api.MediationRequiresApproval}).GetMediation(); got != v1.Mediation_MEDIATION_REQUIRES_APPROVAL {
+		t.Fatalf("wire mediation = %v, want %v", got, v1.Mediation_MEDIATION_REQUIRES_APPROVAL)
+	}
+	if got := wire.ToolSpecFromProto(nil); !reflect.DeepEqual(got, api.ToolSpec{}) {
+		t.Fatalf("ToolSpecFromProto(nil) = %#v, want zero value", got)
+	}
+}
