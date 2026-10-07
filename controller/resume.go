@@ -167,7 +167,7 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (_ api.ToolR
 		}()
 		call, ok := s.recordedNext(api.EventToolCall)
 		if !ok {
-			return api.ToolResult{}, errors.New("resume: recorded stream diverged (expected tool call)")
+			return api.ToolResult{}, fmt.Errorf("%w: resume expected a recorded tool call, found none", ErrReplayDiverged)
 		}
 		if err := matchToolCall(tc, call.ToolCall); err != nil {
 			return api.ToolResult{}, err

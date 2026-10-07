@@ -162,6 +162,7 @@ func TestMalformedToolEvidenceFailsClosed(t *testing.T) {
 		call   api.ToolCall
 		replay bool
 	}{
+		{"no recorded call", []api.Event{{Kind: api.EventToolResult, Result: &result}}, base, true},
 		{"missing call", []api.Event{{Kind: api.EventToolCall}, {Kind: api.EventToolResult, Result: &result}}, base, true},
 		{"missing result", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}, {Kind: api.EventToolResult}}, base, true},
 		{"wrong result id", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}, {Kind: api.EventToolResult, Result: &api.ToolResult{ID: "wrong"}}}, base, true},
@@ -200,8 +201,8 @@ func TestMalformedToolEvidenceFailsClosed(t *testing.T) {
 					}
 					return
 				}
-				if err == nil || attempts != 0 || len(h.results) != 0 {
-					t.Fatalf("malformed evidence accepted: attempts=%d results=%d err=%v", attempts, len(h.results), err)
+				if !errors.Is(err, controller.ErrReplayDiverged) || attempts != 0 || len(h.results) != 0 {
+					t.Fatalf("want malformed-evidence divergence: attempts=%d results=%d err=%v", attempts, len(h.results), err)
 				}
 			})
 		}

@@ -208,14 +208,14 @@ func (s *replaySink) ToolCall(_ context.Context, tc api.ToolCall) (_ api.ToolRes
 	}
 	call, ok := s.nextOf(api.EventToolCall)
 	if !ok {
-		return api.ToolResult{}, errors.New("replay: expected a recorded tool call, found none")
+		return api.ToolResult{}, fmt.Errorf("%w: replay expected a recorded tool call, found none", ErrReplayDiverged)
 	}
 	if err := matchToolCall(tc, call.ToolCall); err != nil {
 		return api.ToolResult{}, err
 	}
 	tr, ok := s.nextOf(api.EventToolResult)
 	if !ok {
-		return api.ToolResult{}, errors.New("replay: expected a recorded tool result, found none")
+		return api.ToolResult{}, fmt.Errorf("%w: replay expected a recorded tool result, found none", ErrReplayDiverged)
 	}
 	return recordedToolResult(call.ToolCall, tr.Result)
 }
