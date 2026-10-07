@@ -30,13 +30,18 @@ func serve(t *testing.T, store *sqlitelog.Store, opts ...session.Option) v1.Sess
 
 func serveWith(t *testing.T, store *sqlitelog.Store, backend placement.Backend, opts ...session.Option) v1.SessionsClient {
 	t.Helper()
+	return serveWithPlacement(t, store, backend, nil, opts...)
+}
+
+func serveWithPlacement(t *testing.T, store *sqlitelog.Store, backend placement.Backend, placementOpts []placement.Option, opts ...session.Option) v1.SessionsClient {
+	t.Helper()
 	if c, ok := backend.(io.Closer); ok {
 		t.Cleanup(func() { _ = c.Close() })
 	}
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	v1.RegisterSessionsServer(srv, session.NewService(store, echoRegistry(t, backend), opts...))
+	v1.RegisterSessionsServer(srv, session.NewService(store, echoRegistry(t, backend, placementOpts...), opts...))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 
@@ -79,9 +84,12 @@ func TestCreateSessionPersistsRequestedMetadata(t *testing.T) {
 
 	created, err := client.CreateSession(ctx, &v1.CreateSessionRequest{
 		Session: &v1.Session{
-			Metadata: &v1.ResourceMetadata{Project: "acme", Name: "nightly-triage"},
-			Harness:  "echo",
-			Model:    "echo-1",
+			Metadata:    &v1.ResourceMetadata{Project: "acme", Name: "nightly-triage"},
+			Harness:     "echo",
+			Model:       "echo-1",
+			Labels:      map[string]string{"team": "platform", "empty": ""},
+			Annotations: map[string]string{"external/context": "triage \"nightly\"\nline two", "owner": "Māori"},
+			Identity:    &v1.IdentityRef{Principal: "agent://parent", Issuer: "issuer", Subject: "parent"},
 		},
 	})
 	if err != nil {
@@ -109,6 +117,29 @@ func TestCreateSessionPersistsRequestedMetadata(t *testing.T) {
 	}
 	if got.GetModel() != "echo-1" {
 		t.Errorf("get model = %q, want echo-1", got.GetModel())
+	}
+
+	listed, err := client.ListSessions(ctx, &v1.ListSessionsRequest{Project: "acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listedUIDs := uids(listed.GetSessions()); len(listedUIDs) != 1 || listedUIDs[0] != created.GetMetadata().GetUid() {
+		t.Fatalf("list = %v, want only the created session", listedUIDs)
+	}
+	for _, tc := range []struct {
+		name string
+		sess *v1.Session
+	}{{"create", created}, {"get", got}, {"list", listed.GetSessions()[0]}} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertSessionMaps(t, tc.sess,
+				map[string]string{"team": "platform", "empty": ""},
+				map[string]string{"external/context": "triage \"nightly\"\nline two", "owner": "Māori"},
+			)
+			identity := tc.sess.GetIdentity()
+			if identity.GetPrincipal() != "agent://parent" || identity.GetIssuer() != "issuer" || identity.GetSubject() != "parent" {
+				t.Errorf("identity provenance = %v, want the supplied parent identity", identity)
+			}
+		})
 	}
 }
 
@@ -174,7 +205,11 @@ func TestListSessionsSurvivesRestart(t *testing.T) {
 
 	first := openStore(t, path)
 	created, err := serve(t, first).CreateSession(ctx, &v1.CreateSessionRequest{
-		Session: &v1.Session{Metadata: &v1.ResourceMetadata{Project: "acme", Name: "survivor"}},
+		Session: &v1.Session{
+			Metadata:    &v1.ResourceMetadata{Project: "acme", Name: "survivor"},
+			Labels:      map[string]string{"team": "platform", "empty": ""},
+			Annotations: map[string]string{"external/context": "restart \"test\"\nline two", "owner": "Māori"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +218,8 @@ func TestListSessionsSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := serve(t, openStore(t, path)).ListSessions(ctx, &v1.ListSessionsRequest{Project: "acme"})
+	reopened := serve(t, openStore(t, path))
+	resp, err := reopened.ListSessions(ctx, &v1.ListSessionsRequest{Project: "acme"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,6 +228,16 @@ func TestListSessionsSurvivesRestart(t *testing.T) {
 	}
 	if got := resp.GetSessions()[0].GetMetadata().GetName(); got != "survivor" {
 		t.Errorf("name = %q, want it to survive the restart", got)
+	}
+	stored, err := reopened.GetSession(ctx, &v1.GetSessionRequest{Uid: created.GetMetadata().GetUid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sess := range []*v1.Session{resp.GetSessions()[0], stored} {
+		assertSessionMaps(t, sess,
+			map[string]string{"team": "platform", "empty": ""},
+			map[string]string{"external/context": "restart \"test\"\nline two", "owner": "Māori"},
+		)
 	}
 }
 
