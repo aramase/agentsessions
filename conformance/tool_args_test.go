@@ -217,6 +217,55 @@ func TestHandledInvalidToolArgumentsFailOnBothTransports(t *testing.T) {
 	}
 }
 
+type nilRejectionSink struct {
+	api.EventSink
+	reported *error
+}
+
+func (s nilRejectionSink) RejectToolCall(err error) error {
+	*s.reported = err
+	return nil
+}
+
+type nilRejectionHarness struct {
+	remote   api.Harness
+	reported error
+}
+
+func (h *nilRejectionHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+	return h.remote.Describe(ctx)
+}
+
+func (h *nilRejectionHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	return h.remote.Run(ctx, start, nilRejectionSink{EventSink: sink, reported: &h.reported})
+}
+
+func TestRemoteValidationRejectionCannotBeSuppressedByNilHook(t *testing.T) {
+	log := eventlog.AsStore(eventlog.New())
+	attempts := 0
+	c, err := controller.New(log, nil, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+		attempts++
+		return api.ToolResult{}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &nilRejectionHarness{remote: wireHarnessFrom(t, handledArgumentErrorHarness{reject: true})}
+	err = c.Exec(t.Context(), h, nil, 0)
+	if !errors.Is(err, wire.ErrInvalidToolArgs) || !errors.Is(h.reported, wire.ErrInvalidToolArgs) || attempts != 0 {
+		t.Fatalf("hook suppressed rejection: attempts=%d reported=%v err=%v", attempts, h.reported, err)
+	}
+	recs, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range recs {
+		if rec.Event.Kind == api.EventEnd {
+			t.Fatal("nil hook certified successful completion")
+		}
+	}
+}
+
 func TestWireToolRequestChangesFailReplayAndRecovery(t *testing.T) {
 	for _, recovery := range []bool{false, true} {
 		t.Run(map[bool]string{false: "replay", true: "resume"}[recovery], func(t *testing.T) {

@@ -386,7 +386,9 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 // EventSink SPI. Other sinks still fail the remote Run, even if they lack this optional hook.
 func rejectToolArgs(sink api.EventSink) error {
 	if rejecting, ok := sink.(interface{ RejectToolCall(error) error }); ok {
-		return rejecting.RejectToolCall(wire.ErrInvalidToolArgs)
+		if err := rejecting.RejectToolCall(wire.ErrInvalidToolArgs); err != nil {
+			return err
+		}
 	}
 	return wire.ErrInvalidToolArgs
 }

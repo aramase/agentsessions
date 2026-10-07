@@ -197,8 +197,9 @@ Tool-call arguments must be JSON-shaped: booleans, strings, null, numbers, strin
 lists (including typed Go containers that preserve that shape, but not custom serializers).
 Numbers are finite float64, normalized, with safe-integer bounds. Integers must stay within
 −9,007,199,254,740,991 to +9,007,199,254,740,991. Fractional decimal values can round during
-normalization: `json.Number("2.00000000000000000001")` becomes float64 `2`, not an exact decimal. Unsupported values, cycles and invalid UTF-8 return a bounded error at the call
-boundary, before tool intent or execution. This deliberately replaces drop-to-nil conversion for
+normalization: `json.Number("2.00000000000000000001")` becomes float64 `2`, not an exact decimal.
+Unsupported values, cycles and invalid UTF-8 return a bounded error at the call boundary, before tool
+intent or execution. This deliberately replaces drop-to-nil conversion for
 invalid **tool arguments**; other content maps retain their existing conversion behavior. Historical
 arguments already lost during conversion cannot be recovered or certified as their original values.
 
@@ -210,9 +211,10 @@ fatal even if the harness catches the sink error; later calls cannot unlock the 
 replay. Tool-argument validation failures also remain fatal during live execution.
 
 The Go wire bridge sends a bounded `EVENT_ERROR` with `InvalidArgument` when tool arguments fail
-validation before a call can be sent. The receiving bridge uses an optional `RejectToolCall(error)
-error` hook on controller sinks to latch that rejection immediately; it does not extend the required
-`EventSink` interface. Other sinks still receive a failed `Run`. The sending bridge blocks later
+validation before a call can be sent. The receiving bridge uses an optional
+`RejectToolCall(error) error` hook on controller sinks to latch that rejection immediately; it does not
+extend the required `EventSink` interface. Other sinks still receive a failed `Run`, even if their
+optional hook returns nil. The sending bridge blocks later
 sink calls and refuses successful completion even if the harness handles its local error. This remote
 rejection report is cooperative: a custom remote harness can omit it. The host still validates and
 compares the calls it receives against the record; the report does not replace those checks.
