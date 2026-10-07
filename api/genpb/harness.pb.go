@@ -381,8 +381,8 @@ type Start struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Config  []byte                 `protobuf:"bytes,1,opt,name=config,proto3" json:"config,omitempty"`
 	History []*Event               `protobuf:"bytes,2,rep,name=history,proto3" json:"history,omitempty"`
-	// New input messages for this execution. Empty = resume/re-drive an interrupted
-	// execution from history with no new input.
+	// Invocation input messages. Controller replay and interrupted recovery restore the original
+	// messages from the journal; empty inputs describe an intentionally inputless invocation.
 	Inputs        []*Message       `protobuf:"bytes,3,rep,name=inputs,proto3" json:"inputs,omitempty"`
 	Identity      *IdentityContext `protobuf:"bytes,4,opt,name=identity,proto3" json:"identity,omitempty"`
 	ResumeFromSeq int64            `protobuf:"varint,5,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"`

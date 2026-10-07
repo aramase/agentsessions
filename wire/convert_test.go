@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/aramase/agentsessions/api"
+	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/wire"
 )
@@ -45,6 +48,20 @@ func richMessage() *api.Message {
 func TestEventRoundTrip(t *testing.T) {
 	actor := api.IdentityRef{Principal: "agent://a", Issuer: "entra", Subject: "sub-1"}
 	cases := map[string]api.Event{
+		"execution_start": {
+			ExecutionID: "e1", Kind: api.EventExecutionStart,
+			ExecutionStart: &api.ExecutionStart{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993, InputCount: proto.Int64(2)},
+		},
+		"execution_start_cursor_only": {
+			ExecutionID: "e1", Kind: api.EventExecutionStart,
+			ExecutionStart: &api.ExecutionStart{ResumeFromSeq: -7, InputCount: proto.Int64(1)},
+		},
+		"execution_start_inputless": {
+			ExecutionID: "e1", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(0)},
+		},
+		"execution_start_legacy_absent_count": {
+			ExecutionID: "e1", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{},
+		},
 		"input": {
 			ExecutionID: "e1", SchemaVersion: 1, Timestamp: ts, Kind: api.EventInput,
 			Message: api.TextMessage("user", "drive"), Actor: actor,
@@ -90,7 +107,15 @@ func TestEventRoundTrip(t *testing.T) {
 	}
 	for name, ev := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := wire.EventFromProto(wire.EventToProto(ev))
+			blob, err := proto.Marshal(wire.EventToProto(ev))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded v1.Event
+			if err := proto.Unmarshal(blob, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			got := wire.EventFromProto(&decoded)
 			if !reflect.DeepEqual(ev, got) {
 				t.Fatalf("round-trip mismatch\n want: %#v\n got:  %#v", ev, got)
 			}
@@ -108,6 +133,9 @@ func TestEventRoundTrip(t *testing.T) {
 // proto3-JSON, contract §7) and is used by both the in-memory and sqlite logs.
 func TestHashStableAcrossWire(t *testing.T) {
 	events := []api.Event{
+		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Config: []byte{0, 255, ' ', '\n', '\t'}, ResumeFromSeq: 9007199254740993, InputCount: proto.Int64(2)}},
+		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(0)}},
+		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{}},
 		{Kind: api.EventInput, Message: api.TextMessage("user", "drive")},
 		{Kind: api.EventModelCall, ModelCall: &api.ModelCall{Model: "m", Params: map[string]string{"a": "b"}, InputHash: "h", ID: "c1"}},
 		{Kind: api.EventOutput, Message: richMessage()},

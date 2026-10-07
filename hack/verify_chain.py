@@ -38,6 +38,20 @@ GOLDEN_EVENT = {
 }
 GOLDEN_EXPECTED = "551bd146050c8d630b0c3b999a4445f3792a470db9bca443d8d4a67706283fcc"
 
+# Additional Go/Python interop vectors cover starts with opaque config and default invocations.
+START_GOLDENS = [
+    ({"execution_id": "exec-config", "kind": "EVENT_EXECUTION_START",
+      "execution_start": {"config": "AP8gCgk=", "input_count": "2",
+                          "resume_from_seq": "9007199254740993"}},
+     "aa1f42a26b7a227836d32d31608ebb69c59f3b1c57eadd8537b6faf88a01c790"),
+    ({"execution_id": "exec-default", "kind": "EVENT_EXECUTION_START",
+      "execution_start": {"input_count": "0"}},
+     "b09cbff45d5a30990c3b72be8b06af6bc509d5a29a849aab5fd42153ef10ec65"),
+    ({"execution_id": "exec-default", "kind": "EVENT_EXECUTION_START",
+      "execution_start": {"input_count": "2"}},
+     "f06c25ee5b3673ee23b8f91883c7f1c6c5682d94986caf5bc067908a61b2ac4f"),
+]
+
 EVENT_TYPE = "agentsessions.v1.Event"
 
 
@@ -48,14 +62,15 @@ def _stdlib_jcs(value):
 
 
 def golden_check():
-    record = {"event": GOLDEN_EVENT, "prev_hash": "", "seq": "1"}
-    digest = hashlib.sha256(_stdlib_jcs(record)).hexdigest()
-    print("computed:", digest)
-    print("expected:", GOLDEN_EXPECTED)
-    if digest != GOLDEN_EXPECTED:
-        print("MISMATCH: non-Go verifier did NOT reproduce the golden content_hash", file=sys.stderr)
-        return 1
-    print("OK: non-Go (Python) verifier reproduced the Go golden content_hash (stdlib)")
+    for event, expected in [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS]:
+        record = {"event": event, "prev_hash": "", "seq": "1"}
+        digest = hashlib.sha256(_stdlib_jcs(record)).hexdigest()
+        print("computed:", digest)
+        print("expected:", expected)
+        if digest != expected:
+            print("MISMATCH: non-Go verifier did NOT reproduce the golden content_hash", file=sys.stderr)
+            return 1
+    print("OK: non-Go (Python) verifier reproduced all 4 Go golden content_hash vectors (stdlib)")
     return 0
 
 

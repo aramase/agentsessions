@@ -79,11 +79,11 @@ func TestExecCreatesSessionAndReturnsOutput(t *testing.T) {
 	if turn.Output != "echo:hello" {
 		t.Fatalf("output = %q, want %q", turn.Output, "echo:hello")
 	}
-	if turn.LastSeq != 4 { // INPUT, MODEL_CALL, OUTPUT, END
-		t.Fatalf("last_seq = %d, want 4", turn.LastSeq)
+	if turn.LastSeq != 5 { // EXECUTION_START, INPUT, MODEL_CALL, OUTPUT, END
+		t.Fatalf("last_seq = %d, want 5", turn.LastSeq)
 	}
-	if len(turn.Records) != 4 {
-		t.Fatalf("records = %d, want 4", len(turn.Records))
+	if len(turn.Records) != 5 {
+		t.Fatalf("records = %d, want 5", len(turn.Records))
 	}
 }
 
@@ -139,8 +139,8 @@ func TestExecWithoutCASRunsConsecutiveTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.GetLastSeq() != 12 {
-		t.Fatalf("last_seq = %d after 3 turns, want 12", got.GetLastSeq())
+	if got.GetLastSeq() != 15 {
+		t.Fatalf("last_seq = %d after 3 turns, want 15", got.GetLastSeq())
 	}
 }
 
@@ -183,8 +183,8 @@ func TestExecOnRecordObservesEveryRecord(t *testing.T) {
 	if len(kinds) != len(turn.Records) {
 		t.Fatalf("OnRecord saw %d records, stream carried %d", len(kinds), len(turn.Records))
 	}
-	if kinds[0] != v1.EventKind_EVENT_INPUT {
-		t.Fatalf("first record = %v, want EVENT_INPUT", kinds[0])
+	if kinds[0] != v1.EventKind_EVENT_EXECUTION_START {
+		t.Fatalf("first record = %v, want EVENT_EXECUTION_START", kinds[0])
 	}
 }
 
@@ -255,8 +255,8 @@ func TestReplayReturnsCommittedRecords(t *testing.T) {
 	if len(records) != len(turn.Records) {
 		t.Fatalf("replay returned %d records, turn committed %d", len(records), len(turn.Records))
 	}
-	if records[0].GetEvent().GetKind() != v1.EventKind_EVENT_INPUT {
-		t.Fatalf("first replayed record = %v, want EVENT_INPUT", records[0].GetEvent().GetKind())
+	if records[0].GetEvent().GetKind() != v1.EventKind_EVENT_EXECUTION_START {
+		t.Fatalf("first replayed record = %v, want EVENT_EXECUTION_START", records[0].GetEvent().GetKind())
 	}
 }
 
