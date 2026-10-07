@@ -99,8 +99,7 @@ label map. The parent's `annotations` and `origin` are inherited unchanged. Both
 and returned in the fork response and subsequent `GetSession` and `ListSessions` calls.
 
 `ForkRequest.identity` is unsupported because per-child principals are not enforced. Any supplied
-identity, even an empty message, is rejected with `INVALID_ARGUMENT` and the fixed error
-`ForkRequest.identity is unsupported: per-child principals are not enforced` before placement,
+identity, even an empty message, is rejected with `INVALID_ARGUMENT` before placement,
 provisioning, or journal mutation. Leave it unset to fork; children do not inherit the parent's
 identity. This does not change `Session.identity`, which remains recorded provenance rather than
 authorization (see [security posture](security.md)).

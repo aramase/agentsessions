@@ -1041,7 +1041,7 @@ func (x *ResumeRequest) GetBoot() bool {
 	return false
 }
 
-// Children inherit the parent's annotations and origin. Labels are supplied below, not inherited.
+// Children inherit the parent's annotations and origin.
 type ForkRequest struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Session string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`

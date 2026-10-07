@@ -154,7 +154,7 @@ message ResumeRequest {
   bool boot = 2; // true = cold-boot + replay instead of snapshot restore
 }
 
-// Children inherit the parent's annotations and origin. Labels are supplied below, not inherited.
+// Children inherit the parent's annotations and origin.
 message ForkRequest {
   string session = 1;
   // 0 = HEAD. A REQUIRES_MEMORY_SNAPSHOT harness forks by cloning a memory snapshot, which captures

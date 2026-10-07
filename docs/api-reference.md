@@ -962,7 +962,7 @@ ephemeral streaming Delta (transport only — not logged, not hash-chained).
 <a name="agentsessions-v1-ForkRequest"></a>
 
 ### ForkRequest
-Children inherit the parent&#39;s annotations and origin. Labels are supplied below, not inherited.
+Children inherit the parent&#39;s annotations and origin.
 
 
 | Field | Type | Label | Description |
