@@ -58,6 +58,15 @@ func toolArgShape(v reflect.Value, visiting map[toolArgContainer]bool) bool {
 	if _, ok := v.Interface().(encoding.TextMarshaler); ok {
 		return false
 	}
+	// encoding/json also invokes pointer-receiver serializers for addressable elements.
+	if v.CanAddr() {
+		if _, ok := v.Addr().Interface().(json.Marshaler); ok {
+			return false
+		}
+		if _, ok := v.Addr().Interface().(encoding.TextMarshaler); ok {
+			return false
+		}
+	}
 	if n, ok := v.Interface().(json.Number); ok {
 		f, err := n.Float64()
 		return err == nil && safeToolNumber(f)

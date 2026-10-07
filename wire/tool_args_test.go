@@ -48,6 +48,14 @@ type panickingToolText string
 
 func (panickingToolText) MarshalText() ([]byte, error) { panic("custom text serializer invoked") }
 
+type panickingPointerJSON int
+
+func (*panickingPointerJSON) MarshalJSON() ([]byte, error) { panic("pointer JSON serializer invoked") }
+
+type panickingPointerText string
+
+func (*panickingPointerText) MarshalText() ([]byte, error) { panic("pointer text serializer invoked") }
+
 func TestNormalizeToolArgsPreflightRejectsWithoutPanic(t *testing.T) {
 	mapCycle := map[string]any{}
 	mapCycle["self"] = mapCycle
@@ -59,6 +67,8 @@ func TestNormalizeToolArgsPreflightRejectsWithoutPanic(t *testing.T) {
 	}{
 		{"custom JSON serializer", panickingToolJSON{}},
 		{"custom text serializer", panickingToolText("private")},
+		{"pointer JSON serializer in typed slice", []panickingPointerJSON{1}},
+		{"pointer text serializer in nested typed slice", []any{[]panickingPointerText{"private"}}},
 		{"map cycle", mapCycle},
 		{"slice cycle", sliceCycle},
 	} {
