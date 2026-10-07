@@ -25,6 +25,7 @@ import (
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/wire"
+	"google.golang.org/grpc/codes"
 )
 
 // ---- Server: api.Harness -> v1.HarnessServer ----
@@ -78,16 +79,20 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 	sink := &streamSink{stream: stream, results: results, executionID: executionID}
 	runStart := startFromProto(start)
 	runStart.ExecutionID = executionID
-	if err := s.harness.Run(stream.Context(), runStart, sink); err != nil {
+	runErr := s.harness.Run(stream.Context(), runStart, sink)
+	if sink.failure != nil {
+		runErr = sink.failure
+	}
+	if runErr != nil {
 		_ = stream.Send(&v1.Event{
 			ExecutionId: executionID,
 			Kind:        v1.EventKind_EVENT_END,
 			Body: &v1.Event_End{End: &v1.HarnessEnd{
 				State: "FAILED",
-				Error: &v1.Error{Description: err.Error()},
+				Error: &v1.Error{Description: runErr.Error()},
 			}},
 		})
-		return err
+		return runErr
 	}
 	return stream.Send(&v1.Event{
 		ExecutionId: executionID,
@@ -102,6 +107,7 @@ type streamSink struct {
 	stream      v1.Harness_ConnectServer
 	results     <-chan *v1.ControllerFrame
 	executionID string
+	failure     error
 }
 
 // awaitResult blocks for the host's reply frame, honoring cancellation. The ctx arm is what stops a
@@ -124,6 +130,9 @@ func (s *streamSink) awaitResult(ctx context.Context) (*v1.ControllerFrame, erro
 }
 
 func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	if s.failure != nil {
+		return api.ModelResponse{}, s.failure
+	}
 	id := newID()
 	ev := &v1.Event{
 		ExecutionId: s.executionID,
@@ -159,6 +168,9 @@ func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 }
 
 func (s *streamSink) Output(_ context.Context, delta string) error {
+	if s.failure != nil {
+		return s.failure
+	}
 	return s.stream.Send(&v1.Event{
 		ExecutionId: s.executionID,
 		Kind:        v1.EventKind_EVENT_OUTPUT,
@@ -171,8 +183,21 @@ func (s *streamSink) Output(_ context.Context, delta string) error {
 // host — not the harness — executes and records the tool (record-before-effect, §3), exactly as it
 // mediates a model call, so the load-bearing rule holds across the process boundary.
 func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
+	if s.failure != nil {
+		return api.ToolResult{}, s.failure
+	}
 	args, err := wire.NormalizeToolArgs(tc.Args)
 	if err != nil {
+		s.failure = err
+		// Report only the bounded rejection, never arguments. The host must learn about a
+		// pre-send failure even when the harness handles the returned error locally.
+		if sendErr := s.stream.Send(&v1.Event{
+			ExecutionId: s.executionID,
+			Kind:        v1.EventKind_EVENT_ERROR,
+			Body:        &v1.Event_Error{Error: &v1.Error{Code: int32(codes.InvalidArgument), Description: wire.ErrInvalidToolArgs.Error()}},
+		}); sendErr != nil {
+			return api.ToolResult{}, sendErr
+		}
 		return api.ToolResult{}, err
 	}
 	call := tc
@@ -207,6 +232,9 @@ func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 // Report records the result of a tool the harness executed in-sandbox (IN_HARNESS_REPORTED): it
 // emits an EVENT_TOOL_RESULT the host records, mirroring the in-process liveSink.Report.
 func (s *streamSink) Report(_ context.Context, tr api.ToolResult) error {
+	if s.failure != nil {
+		return s.failure
+	}
 	res := tr
 	return s.stream.Send(&v1.Event{
 		ExecutionId: s.executionID,
@@ -215,6 +243,9 @@ func (s *streamSink) Report(_ context.Context, tr api.ToolResult) error {
 	})
 }
 func (s *streamSink) Usage(_ context.Context, u api.Usage) error {
+	if s.failure != nil {
+		return s.failure
+	}
 	return s.stream.Send(&v1.Event{ExecutionId: s.executionID, Kind: v1.EventKind_EVENT_USAGE, Body: &v1.Event_Usage{Usage: &v1.Usage{
 		Model: u.Model, InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, ReasoningTokens: u.ReasoningTokens,
 	}}})
@@ -302,7 +333,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			// Validate raw Struct values before AsMap can turn nonfinite numbers into strings.
 			if tool != nil && tool.GetArgs() != nil {
 				if _, err := tool.GetArgs().MarshalJSON(); err != nil {
-					return wire.ErrInvalidToolArgs
+					return rejectToolArgs(sink)
 				}
 			}
 			tc := wire.ToolCallFromProto(tool)
@@ -310,7 +341,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 				return errors.New("harnesswire: EVENT_TOOL_CALL missing its payload")
 			}
 			if _, err := wire.NormalizeToolArgs(tc.Args); err != nil {
-				return err
+				return rejectToolArgs(sink)
 			}
 			res, err := sink.ToolCall(ctx, *tc)
 			if err != nil {
@@ -339,10 +370,25 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 					return err
 				}
 			}
+		case v1.EventKind_EVENT_ERROR:
+			reported := ev.GetError()
+			if reported.GetCode() == int32(codes.InvalidArgument) && reported.GetDescription() == wire.ErrInvalidToolArgs.Error() {
+				return rejectToolArgs(sink)
+			}
+			return errors.New("harnesswire: remote harness reported an error")
 		case v1.EventKind_EVENT_END:
 			return endError(ev.GetEnd())
 		}
 	}
+}
+
+// rejectToolArgs reaches the controller's lasting guard without extending the required
+// EventSink SPI. Other sinks still fail the remote Run, even if they lack this optional hook.
+func rejectToolArgs(sink api.EventSink) error {
+	if rejecting, ok := sink.(interface{ RejectToolCall(error) error }); ok {
+		return rejecting.RejectToolCall(wire.ErrInvalidToolArgs)
+	}
+	return wire.ErrInvalidToolArgs
 }
 
 // endError maps a terminal HarnessEnd into a Go error. COMPLETED is the only success; a FAILED (or

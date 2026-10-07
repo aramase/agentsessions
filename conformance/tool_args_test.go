@@ -17,6 +17,7 @@ import (
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/harnesswire"
+	"github.com/aramase/agentsessions/wire"
 )
 
 type argumentHarness struct{ args map[string]any }
@@ -119,6 +120,101 @@ func (s rawToolServer) Connect(stream v1.Harness_ConnectServer) error {
 		return err
 	}
 	return stream.Send(&v1.Event{ExecutionId: start.GetExecutionId(), Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}})
+}
+
+type handledArgumentErrorHarness struct{ reject, interrupt bool }
+
+func (handledArgumentErrorHarness) Describe(context.Context) (api.Descriptor, error) {
+	return argumentHarness{}.Describe(context.Background())
+}
+
+func (h handledArgumentErrorHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	if h.reject {
+		_, _ = sink.ToolCall(ctx, api.ToolCall{ID: "call-1", Tool: "read", Args: map[string]any{"value": make(chan int)}, Mediation: api.MediationControllerMediated, IdempotencyKey: "key-1"})
+	}
+	_ = (argumentHarness{args: map[string]any{"count": 2}}).Run(ctx, start, sink)
+	if h.interrupt {
+		return errors.New("interrupted")
+	}
+	return nil
+}
+
+type handlesRemoteRunError struct{ remote api.Harness }
+
+func (h handlesRemoteRunError) Describe(ctx context.Context) (api.Descriptor, error) {
+	return h.remote.Describe(ctx)
+}
+
+func (h handlesRemoteRunError) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	_ = h.remote.Run(ctx, start, sink)
+	_ = (argumentHarness{args: map[string]any{"count": 2}}).Run(ctx, start, sink)
+	return nil
+}
+
+func TestHandledInvalidToolArgumentsFailOnBothTransports(t *testing.T) {
+	for _, path := range []string{"live", "replay", "resume result", "resume intent"} {
+		for _, transport := range []string{"direct", "remote", "handled remote error"} {
+			t.Run(path+"/"+transport, func(t *testing.T) {
+				log := eventlog.AsStore(eventlog.New())
+				if path != "live" {
+					original, err := controller.New(log, nil, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+						if path == "resume intent" {
+							return api.ToolResult{}, errors.New("interrupted")
+						}
+						return api.ToolResult{Output: map[string]any{"receipt": "recorded"}}, nil
+					}))
+					if err != nil {
+						t.Fatal(err)
+					}
+					err = original.Exec(t.Context(), handledArgumentErrorHarness{interrupt: path != "replay"}, nil, 0)
+					if path == "replay" && err != nil || path != "replay" && err == nil {
+						t.Fatalf("fixture execution: %v", err)
+					}
+				}
+				attempts := 0
+				c, err := controller.New(log, nil, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+					attempts++
+					return api.ToolResult{}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var h api.Harness = handledArgumentErrorHarness{reject: true}
+				if transport != "direct" {
+					h = wireHarnessFrom(t, h)
+					if transport == "handled remote error" {
+						h = handlesRemoteRunError{remote: h}
+					}
+				}
+				before, err := log.Head()
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantErr := controller.ErrReplayDiverged
+				switch path {
+				case "live":
+					wantErr = wire.ErrInvalidToolArgs
+					err = c.Exec(t.Context(), h, nil, before)
+				case "replay":
+					_, err = c.Replay(t.Context(), h)
+				default:
+					_, err = c.Resume(t.Context(), h)
+				}
+				if !errors.Is(err, wantErr) || attempts != 0 {
+					t.Fatalf("handled rejection escaped: attempts=%d err=%v", attempts, err)
+				}
+				recs, err := log.Read(before + 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, rec := range recs {
+					if rec.Event.Kind != api.EventError && rec.Event.Kind != api.EventExecutionStart {
+						t.Fatalf("rejection appended %s", rec.Event.Kind)
+					}
+				}
+			})
+		}
+	}
 }
 
 func TestWireToolRequestChangesFailReplayAndRecovery(t *testing.T) {

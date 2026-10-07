@@ -52,7 +52,7 @@ func matchToolCall(emitted api.ToolCall, recorded *api.ToolCall) error {
 	}
 	got, err := wire.NormalizeToolArgs(emitted.Args)
 	if err != nil {
-		return fmt.Errorf("%w: invalid emitted tool arguments", ErrReplayDiverged)
+		return fmt.Errorf("%w: invalid emitted tool arguments: %w", ErrReplayDiverged, err)
 	}
 	if !reflect.DeepEqual(got, want) {
 		return fmt.Errorf("%w: tool arguments mismatch", ErrReplayDiverged)

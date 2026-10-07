@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/wire"
 )
 
 // liveSink is the host-mediated EventSink for a live turn: it invokes each nondeterministic op and
@@ -13,6 +14,7 @@ import (
 type liveSink struct {
 	c           *Controller
 	executionID string
+	failure     error
 }
 
 var _ api.EventSink = (*liveSink)(nil)
@@ -24,6 +26,9 @@ var _ api.EventSink = (*liveSink)(nil)
 // Footgun: the completion is ALREADY recorded as the output here. A harness that also calls
 // Output() with the same content double-records it; use Output() only for additional/streamed text.
 func (s *liveSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	if s.failure != nil {
+		return api.ModelResponse{}, s.failure
+	}
 	if _, err := s.c.appendSeq(s.executionID, api.Event{
 		Kind:      api.EventModelCall,
 		ModelCall: &api.ModelCall{Model: req.Model, InputHash: hashModelInput(req), ID: newID()},
@@ -43,14 +48,32 @@ func (s *liveSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelRe
 }
 
 func (s *liveSink) Output(_ context.Context, delta string) error {
+	if s.failure != nil {
+		return s.failure
+	}
 	_, err := s.c.appendSeq(s.executionID, api.Event{Kind: api.EventOutput, Message: api.TextMessage("assistant", delta)})
 	return err
 }
 
+// RejectToolCall is the optional wire rejection hook. Latch validation failures before a
+// harness can handle the error and issue another effect or claim successful completion.
+func (s *liveSink) RejectToolCall(err error) error {
+	if s.failure == nil {
+		s.failure = err
+	}
+	return s.failure
+}
+
 func (s *liveSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
+	if s.failure != nil {
+		return api.ToolResult{}, s.failure
+	}
 	// Use the same policy/key/argument guards for new calls and interrupted-intent redrive. Reject
 	// before recording, so invalid arguments cannot silently become nil in the journal.
 	call, err := validateLiveToolCall(tc)
+	if errors.Is(err, wire.ErrInvalidToolArgs) {
+		return api.ToolResult{}, s.RejectToolCall(err)
+	}
 	if err != nil {
 		return api.ToolResult{}, err
 	}
@@ -84,12 +107,18 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolRes
 }
 
 func (s *liveSink) Report(_ context.Context, tr api.ToolResult) error {
+	if s.failure != nil {
+		return s.failure
+	}
 	res := tr
 	_, err := s.c.appendSeq(s.executionID, api.Event{Kind: api.EventToolResult, Result: &res})
 	return err
 }
 
 func (s *liveSink) Usage(_ context.Context, u api.Usage) error {
+	if s.failure != nil {
+		return s.failure
+	}
 	usage := u
 	_, err := s.c.appendSeq(s.executionID, api.Event{Kind: api.EventUsage, Usage: &usage})
 	return err
@@ -159,6 +188,13 @@ func (s *replaySink) Output(_ context.Context, delta string) error {
 	}
 	s.outputs = append(s.outputs, delta)
 	return nil
+}
+
+func (s *replaySink) RejectToolCall(err error) error {
+	if s.failure == nil {
+		s.failure = fmt.Errorf("%w: invalid emitted tool arguments: %w", ErrReplayDiverged, err)
+	}
+	return s.failure
 }
 
 func (s *replaySink) ToolCall(_ context.Context, tc api.ToolCall) (_ api.ToolResult, err error) {

@@ -207,7 +207,17 @@ controller-mediated intent with a nonempty key may be re-driven without a record
 following unrelated effect is malformed evidence, not a retry opportunity. Recovery refuses a
 successful END if the harness leaves recorded effects unconsumed. A tool-prefix rejection stays
 fatal even if the harness catches the sink error; later calls cannot unlock the live path or certify
-replay. The executor still owns durable key deduplication. These checks do not enforce effects
+replay. Tool-argument validation failures also remain fatal during live execution.
+
+The Go wire bridge sends a bounded `EVENT_ERROR` with `InvalidArgument` when tool arguments fail
+validation before a call can be sent. The receiving bridge uses an optional `RejectToolCall(error)
+error` hook on controller sinks to latch that rejection immediately; it does not extend the required
+`EventSink` interface. Other sinks still receive a failed `Run`. The sending bridge blocks later
+sink calls and refuses successful completion even if the harness handles its local error. This remote
+rejection report is cooperative: a custom remote harness can omit it. The host still validates and
+compares the calls it receives against the record; the report does not replace those checks.
+
+The executor still owns durable key deduplication. These checks do not enforce effects
 performed inside an `IN_HARNESS_REPORTED` harness, and `REQUIRES_APPROVAL` remains unimplemented
 and fails closed.
 
