@@ -323,6 +323,11 @@ func TestRunConfig(t *testing.T) {
 			want:   []api.Message{*api.TextMessage("system", "Be concise."), question, reply, followUp},
 		},
 		{
+			name:   "duplicate system_prompt keys resolve last-wins",
+			config: []byte(`{"system_prompt":"a","system_prompt":"b"}`),
+			want:   []api.Message{*api.TextMessage("system", "b"), question, reply, followUp},
+		},
+		{
 			name:   "whitespace and newlines preserved",
 			config: []byte(" {\"system_prompt\":\"  First line.\\nSecond line.\\n\\t \"} \n"),
 			want:   []api.Message{*api.TextMessage("system", "  First line.\nSecond line.\n\t "), question, reply, followUp},

@@ -259,7 +259,7 @@ Chat reads an optional JSON object from `Start.Config` (the bytes in `ExecReques
 ```
 
 A non-empty `system_prompt` adds exactly one `system` text message **before** the prior conversation
-and current inputs. Its string is used verbatim, including whitespace and newlines. No config,
+and current inputs. Its string is used as decoded from JSON, including whitespace and newlines. No config,
 zero-length config, `{}`, an omitted field, or `"system_prompt":""` leaves the model request
 unchanged. Unknown fields are ignored for forward compatibility; the field name is case-sensitive.
 Malformed JSON, trailing JSON or other tokens, non-object values (including top-level `null`), and
