@@ -253,17 +253,12 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		Config:        config,
 		ResumeFromSeq: c.startResumeFromSeq,
 	}
-	sink := &liveSink{c: c, executionID: executionID}
-	runErr := har.Run(ctx, start, sink)
-	if sink.failure != nil {
-		runErr = sink.failure
-	}
-	if runErr != nil {
-		runFinished(runErr, "error_kind", "harness_run_failed")
+	if err := har.Run(ctx, start, &liveSink{c: c, executionID: executionID}); err != nil {
+		runFinished(err, "error_kind", "harness_run_failed")
 		// Best-effort: record the failure. If this append itself fails we still surface the
 		// original harness error to the caller.
-		_, _ = c.appendSeq(executionID, api.Event{Kind: api.EventError, Err: &api.Error{Description: runErr.Error()}})
-		return runErr
+		_, _ = c.appendSeq(executionID, api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
+		return err
 	}
 	runFinished(nil)
 	rec, err = c.appendSeq(executionID, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})

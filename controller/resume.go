@@ -7,7 +7,6 @@ import (
 
 	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/observability"
-	"github.com/aramase/agentsessions/wire"
 )
 
 // Resume re-drives an interrupted last execution (crash-recovery, I4). If the journal's last turn
@@ -148,13 +147,6 @@ func (s *resumeSink) Output(ctx context.Context, delta string) error {
 	return s.live.Output(ctx, delta)
 }
 
-func (s *resumeSink) RejectToolCall(err error) error {
-	if s.failure == nil {
-		s.failure = fmt.Errorf("%w: invalid emitted tool arguments: %w", ErrReplayDiverged, err)
-	}
-	return s.failure
-}
-
 func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (_ api.ToolResult, err error) {
 	if s.failure != nil {
 		return api.ToolResult{}, s.failure
@@ -175,22 +167,15 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (_ api.ToolR
 		if tr, ok := s.recordedNext(api.EventToolResult); ok {
 			return recordedToolResult(call.ToolCall, tr.Result)
 		}
-		// Only a terminal intent is a crash window. A different following effect is malformed
-		// evidence, not permission to re-drive this call under its recorded key.
+		// Only a terminal intent can be safely re-driven. A following effect without a result
+		// provides no receipt to correlate. Main can also write this shape when a harness handles
+		// an executor failure and continues; fail closed rather than repeat an uncertain effect.
 		if s.i != len(s.stream) {
 			return api.ToolResult{}, fmt.Errorf("%w: tool intent has no result before the next recorded effect", ErrReplayDiverged)
 		}
-		validated, err := validateLiveToolCall(*call.ToolCall)
-		if err != nil {
-			return api.ToolResult{}, err
-		}
-		return s.live.execTool(ctx, validated)
+		return s.live.execTool(ctx, *call.ToolCall)
 	}
-	result, err := s.live.ToolCall(ctx, tc)
-	if errors.Is(err, wire.ErrInvalidToolArgs) {
-		return api.ToolResult{}, s.RejectToolCall(err)
-	}
-	return result, err
+	return s.live.ToolCall(ctx, tc)
 }
 
 func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {

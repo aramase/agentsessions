@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
-	"strings"
+	"reflect"
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
+	"github.com/aramase/agentsessions/sqlitelog"
 )
 
 var errToolInterrupted = errors.New("test: interrupted turn")
@@ -234,26 +234,41 @@ func TestRecoveryRejectsInvalidRecordedToolIntent(t *testing.T) {
 	for _, change := range []struct {
 		name   string
 		change func(*api.ToolCall)
+		cause  error
 	}{
-		{"empty key", func(c *api.ToolCall) { c.IdempotencyKey = "" }},
-		{"unmediated", func(c *api.ToolCall) { c.Mediation = api.MediationInHarnessReported }},
-		{"approval", func(c *api.ToolCall) { c.Mediation = api.MediationRequiresApproval }},
+		{"empty key", func(c *api.ToolCall) { c.IdempotencyKey = "" }, controller.ErrMissingIdempotencyKey},
+		{"unmediated", func(c *api.ToolCall) { c.Mediation = api.MediationInHarnessReported }, controller.ErrUnmediatedToolCall},
+		{"unspecified", func(c *api.ToolCall) { c.Mediation = "" }, controller.ErrUnmediatedToolCall},
+		// Approval has no live sentinel on main. Invalid recorded approval evidence is classified
+		// as divergence, without inventing an error-string match or a new public approval API.
+		{"approval", func(c *api.ToolCall) { c.Mediation = api.MediationRequiresApproval }, controller.ErrReplayDiverged},
 	} {
-		t.Run(change.name, func(t *testing.T) {
-			log := memStore(t)
-			call := recordedToolCall()
-			change.change(&call)
-			appendToolEvidence(t, log, []api.Event{{Kind: api.EventToolCall, ToolCall: &call}}, false)
-			attempts := 0
-			c, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) { attempts++; return api.ToolResult{}, nil }))
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = c.Resume(t.Context(), &callHarness{calls: []api.ToolCall{call}})
-			if err == nil || attempts != 0 {
-				t.Fatalf("invalid intent executed: attempts=%d err=%v", attempts, err)
-			}
-		})
+		for _, path := range []string{"replay", "resume result", "resume intent"} {
+			t.Run(path+"/"+change.name, func(t *testing.T) {
+				log := memStore(t)
+				call := recordedToolCall()
+				change.change(&call)
+				events := []api.Event{{Kind: api.EventToolCall, ToolCall: &call}}
+				if path != "resume intent" {
+					events = append(events, api.Event{Kind: api.EventToolResult, Result: &api.ToolResult{ID: call.ID}})
+				}
+				appendToolEvidence(t, log, events, path == "replay")
+				attempts := 0
+				c, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) { attempts++; return api.ToolResult{}, nil }))
+				if err != nil {
+					t.Fatal(err)
+				}
+				h := &callHarness{calls: []api.ToolCall{call}}
+				if path == "replay" {
+					_, err = c.Replay(t.Context(), h)
+				} else {
+					_, err = c.Resume(t.Context(), h)
+				}
+				if !errors.Is(err, controller.ErrReplayDiverged) || !errors.Is(err, change.cause) || attempts != 0 || len(h.results) != 0 {
+					t.Fatalf("want divergence and %v before results/effects: attempts=%d results=%d err=%v", change.cause, attempts, len(h.results), err)
+				}
+			})
+		}
 	}
 }
 
@@ -321,7 +336,7 @@ func TestHandledToolDivergenceCannotActivateLiveEffectsOrVerify(t *testing.T) {
 				} else {
 					_, err = c.Resume(t.Context(), handledToolErrorHarness{call: call})
 				}
-				if err == nil || tools != 0 || models != 0 {
+				if !errors.Is(err, controller.ErrReplayDiverged) || tools != 0 || models != 0 {
 					t.Fatalf("handled divergence escaped: tools=%d models=%d err=%v", tools, models, err)
 				}
 				recs, err := log.Read(before + 1)
@@ -397,7 +412,6 @@ func TestToolArgumentPresenceRemainsDistinct(t *testing.T) {
 		{"absent vs empty", nil, map[string]any{}},
 		{"missing vs null", map[string]any{}, map[string]any{"x": nil}},
 		{"object vs list", map[string]any{"x": map[string]any{}}, map[string]any{"x": []any{}}},
-		{"invalid cannot equal absent", nil, map[string]any{"x": make(chan int)}},
 	} {
 		for _, path := range []string{"replay", "resume result", "resume intent"} {
 			t.Run(path+"/"+test.name, func(t *testing.T) {
@@ -422,7 +436,7 @@ func TestToolArgumentPresenceRemainsDistinct(t *testing.T) {
 					_, err = c.Resume(t.Context(), h)
 				}
 				if !errors.Is(err, controller.ErrReplayDiverged) || attempts != 0 || len(h.results) != 0 {
-					t.Fatalf("different/invalid args accepted: attempts=%d results=%d err=%v", attempts, len(h.results), err)
+					t.Fatalf("different args accepted: attempts=%d results=%d err=%v", attempts, len(h.results), err)
 				}
 			})
 		}
@@ -443,7 +457,8 @@ func TestToolReplayPreservesLegacyFallbackRequestIdentity(t *testing.T) {
 					log := memStore(t)
 					call := recordedToolCall()
 					call.Args = args
-					// Append directly, without the new live normalizer, to model a legacy journal.
+					// The existing whole-map fallback records native nil containers as empty, but
+					// typed siblings can turn them into null. Keep that legacy wire identity.
 					events := []api.Event{{Kind: api.EventToolCall, ToolCall: &call}}
 					if path != "resume intent" {
 						events = append(events, api.Event{Kind: api.EventToolResult, Result: &api.ToolResult{ID: call.ID}})
@@ -508,74 +523,251 @@ func TestToolReplayPreservesExistingEmptyCallIDs(t *testing.T) {
 	}
 }
 
-// Direct Go harnesses must execute the same Struct-domain values that are journaled, rather than
-// giving an executor raw json.Number/typed-container values it would not receive after recovery.
-func TestLiveToolExecutorReceivesRecordedArgumentRepresentation(t *testing.T) {
-	log := memStore(t)
-	call := recordedToolCall()
-	call.Args = map[string]any{"number": json.Number("2.00000000000000000001"), "items": []int{1, 2}}
-	c, err := controller.New(log, echoModel, controller.WithToolExecutor(func(_ context.Context, got api.ToolCall) (api.ToolResult, error) {
-		if number, ok := got.Args["number"].(float64); !ok || number != 2 {
-			return api.ToolResult{}, errors.New("executor received unnormalized number")
-		}
-		if items, ok := got.Args["items"].([]any); !ok || len(items) != 2 || items[0] != float64(1) || items[1] != float64(2) {
-			return api.ToolResult{}, errors.New("executor received unnormalized list")
-		}
-		recs, err := log.Read(1)
-		if err != nil {
-			return api.ToolResult{}, err
-		}
-		if len(recs) == 0 {
-			return api.ToolResult{}, errors.New("executor invoked before durable intent")
-		}
-		intent := recs[len(recs)-1].Event
-		if intent.Kind != api.EventToolCall || intent.ToolCall == nil || intent.ToolCall.Args["number"] != got.Args["number"] {
-			return api.ToolResult{}, errors.New("executor args differ from durable intent")
-		}
-		return api.ToolResult{}, nil
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = c.Exec(t.Context(), &callHarness{calls: []api.ToolCall{call}}, []api.Message{msg("read")}, 0); err != nil {
-		t.Fatal(err)
+// Comparison must not normalize the arguments a direct Go executor receives on main's live
+// path, including new calls after a recorded prefix. Removing this distinction changes ToolFunc.
+func TestLiveToolExecutorReceivesOriginalArguments(t *testing.T) {
+	for _, recovery := range []bool{false, true} {
+		t.Run(map[bool]string{false: "exec", true: "resume live tail"}[recovery], func(t *testing.T) {
+			log := memStore(t)
+			call := recordedToolCall()
+			if recovery {
+				appendToolEvidence(t, log, []api.Event{{Kind: api.EventToolCall, ToolCall: &call}, {Kind: api.EventToolResult, Result: &api.ToolResult{ID: call.ID}}}, false)
+			}
+			live := recordedToolCall()
+			live.ID, live.IdempotencyKey = "call-2", "key-2"
+			live.Args = map[string]any{"number": json.Number("2.00000000000000000001"), "items": []int{1, 2}}
+			attempts := 0
+			c, err := controller.New(log, echoModel, controller.WithToolExecutor(func(_ context.Context, got api.ToolCall) (api.ToolResult, error) {
+				attempts++
+				want := map[string]any{"number": json.Number("2.00000000000000000001"), "items": []int{1, 2}}
+				if !reflect.DeepEqual(got.Args, want) {
+					t.Fatalf("executor arguments changed: got %#v want %#v", got.Args, want)
+				}
+				recs, err := log.Read(1)
+				if err != nil {
+					return api.ToolResult{}, err
+				}
+				intent := recs[len(recs)-1].Event
+				if intent.Kind != api.EventToolCall || intent.ToolCall == nil || intent.ToolCall.ID != "call-2" {
+					t.Fatal("executor invoked before durable intent")
+				}
+				return api.ToolResult{}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recovery {
+				_, err = c.Resume(t.Context(), &callHarness{calls: []api.ToolCall{call, live}})
+			} else {
+				err = c.Exec(t.Context(), &callHarness{calls: []api.ToolCall{live}}, []api.Message{msg("read")}, 0)
+			}
+			if err != nil || attempts != 1 {
+				t.Fatalf("live execution: attempts=%d err=%v", attempts, err)
+			}
+		})
 	}
 }
 
-func TestLiveToolCallRejectsInvalidArgumentsBeforeIntent(t *testing.T) {
+func TestForkCutAtToolCallChecksIdentityBeforeRedrive(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		args map[string]any
+		name   string
+		change func(*api.ToolCall)
 	}{
-		{"channel", map[string]any{"secret": make(chan int)}},
-		{"nonfinite", map[string]any{"secret": math.NaN()}},
-		{"unsafe integer", map[string]any{"secret": int64(9007199254740993)}},
-		{"struct", map[string]any{"secret": struct{ X string }{"private"}}},
+		{"same identity", func(*api.ToolCall) {}},
+		{"different id", func(c *api.ToolCall) { c.ID = "changed" }},
+		{"different name", func(c *api.ToolCall) { c.Tool = "write" }},
+		{"different args", func(c *api.ToolCall) { c.Args["count"] = 3 }},
+		{"different mediation", func(c *api.ToolCall) { c.Mediation = api.MediationRequiresApproval }},
+		{"different key", func(c *api.ToolCall) { c.IdempotencyKey = "changed" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			log := memStore(t)
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { store.Close() })
+			parent, child := store.Session("parent"), store.Session("child")
+			original, err := controller.New(parent, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+				return api.ToolResult{Output: map[string]any{"receipt": "parent"}}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := original.Exec(t.Context(), &callHarness{calls: []api.ToolCall{recordedToolCall()}}, []api.Message{msg("read")}, 0); err != nil {
+				t.Fatal(err)
+			}
+			before, err := parent.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var atSeq int64
+			for _, rec := range before {
+				if rec.Event.Kind == api.EventToolCall {
+					atSeq = rec.Seq
+				}
+			}
+			if atSeq == 0 {
+				t.Fatal("parent has no tool intent")
+			}
+			if err := controller.Fork(parent, child, atSeq); err != nil {
+				t.Fatal(err)
+			}
 			attempts := 0
-			c, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) { attempts++; return api.ToolResult{}, nil }))
+			fresh, err := controller.New(child, echoModel, controller.WithSessionUID("child"), controller.WithToolExecutor(func(_ context.Context, got api.ToolCall) (api.ToolResult, error) {
+				attempts++
+				if got.ID != "call-1" || got.Tool != "read" || got.Mediation != api.MediationControllerMediated || got.IdempotencyKey != "key-1" || got.Args["count"] != float64(2) {
+					t.Fatalf("child re-drove wrong recorded call: %+v", got)
+				}
+				return api.ToolResult{Output: map[string]any{"receipt": "child"}}, nil
+			}))
 			if err != nil {
 				t.Fatal(err)
 			}
 			call := recordedToolCall()
-			call.Args = test.args
-			err = c.Exec(t.Context(), &callHarness{calls: []api.ToolCall{call}}, []api.Message{msg("read")}, 0)
-			if err == nil || attempts != 0 {
-				t.Fatalf("invalid args executed: attempts=%d err=%v", attempts, err)
+			test.change(&call)
+			h := &callHarness{calls: []api.ToolCall{call}}
+			resumed, err := fresh.Resume(t.Context(), h)
+			if !resumed {
+				t.Fatal("fork cut was not resumed")
 			}
-			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private") {
-				t.Fatalf("error leaked argument content: %v", err)
+			if test.name == "same identity" {
+				if err != nil || attempts != 1 || len(h.results) != 1 || h.results[0].ID != "call-1" || h.results[0].Output["receipt"] != "child" {
+					t.Fatalf("child recovery: attempts=%d results=%+v err=%v", attempts, h.results, err)
+				}
+			} else if !errors.Is(err, controller.ErrReplayDiverged) || attempts != 0 || len(h.results) != 0 {
+				t.Fatalf("fork divergence served results/effects: attempts=%d results=%d err=%v", attempts, len(h.results), err)
 			}
-			recs, err := log.Read(1)
+			after, err := parent.Read(1)
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, rec := range recs {
-				if rec.Event.Kind == api.EventToolCall || rec.Event.Kind == api.EventToolResult {
-					t.Fatal("invalid args produced a tool intent/result")
+			if !reflect.DeepEqual(before, after) {
+				t.Fatal("child recovery changed parent journal")
+			}
+			recs, err := child.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantTail := []api.EventKind{api.EventLifecycle, api.EventError}
+			if test.name == "same identity" {
+				wantTail = []api.EventKind{api.EventLifecycle, api.EventToolResult, api.EventEnd}
+			}
+			if len(recs) != int(atSeq)+len(wantTail) {
+				t.Fatalf("child journal has %d records, want prefix plus %v", len(recs), wantTail)
+			}
+			if recs[atSeq-1].Hash != before[atSeq-1].Hash {
+				t.Fatal("fork changed shared prefix hash")
+			}
+			for i, kind := range wantTail {
+				if recs[int(atSeq)+i].Event.Kind != kind {
+					t.Fatalf("child tail event %d = %s, want %s", i, recs[int(atSeq)+i].Event.Kind, kind)
 				}
+			}
+			for _, rec := range recs {
+				if rec.Seq <= atSeq || rec.Event.Kind == api.EventLifecycle {
+					continue
+				}
+				if test.name != "same identity" && rec.Event.Kind != api.EventError {
+					t.Fatalf("mismatched child appended %s", rec.Event.Kind)
+				}
+				if rec.Event.Kind == api.EventToolResult && (rec.Event.Result.ID != "call-1" || rec.Event.Result.Output["receipt"] != "child") {
+					t.Fatal("child did not journal its own correlated result")
+				}
+			}
+			if err := child.Verify(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+type continuesAfterToolFailureHarness struct{ call api.ToolCall }
+
+func (continuesAfterToolFailureHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+	return (&callHarness{}).Describe(ctx)
+}
+
+func (h continuesAfterToolFailureHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	_, _ = sink.ToolCall(ctx, h.call)
+	if err := sink.Output(ctx, "handled tool failure"); err != nil {
+		return err
+	}
+	return errToolInterrupted
+}
+
+// Main does not journal executor failures as TOOL_RESULT. A harness can handle that failure and
+// append another effect before interruption. Recovery cannot safely correlate or re-drive it.
+func TestRecoveryFailsClosedAfterHandledExecutorFailure(t *testing.T) {
+	log := memStore(t)
+	h := continuesAfterToolFailureHarness{call: recordedToolCall()}
+	original, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+		return api.ToolResult{}, errors.New("executor failed")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := original.Exec(t.Context(), h, []api.Message{msg("read")}, 0); !errors.Is(err, errToolInterrupted) {
+		t.Fatalf("fixture: %v", err)
+	}
+	recs, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var intent, output int64
+	for _, rec := range recs {
+		switch rec.Event.Kind {
+		case api.EventToolCall:
+			intent = rec.Seq
+		case api.EventOutput:
+			output = rec.Seq
+		case api.EventToolResult:
+			t.Fatal("fixture unexpectedly journaled an executor failure receipt")
+		}
+	}
+	if intent == 0 || output != intent+1 {
+		t.Fatal("fixture lacks an intent followed by a handled-failure output")
+	}
+	attempts := 0
+	fresh, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) { attempts++; return api.ToolResult{}, nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh.Resume(t.Context(), h); !errors.Is(err, controller.ErrReplayDiverged) || attempts != 0 {
+		t.Fatalf("uncertain intent re-driven: attempts=%d err=%v", attempts, err)
+	}
+}
+
+func TestRecoveryLiveTailToolErrorsAreNotDivergence(t *testing.T) {
+	executorErr := errors.New("executor failed")
+	for _, test := range []struct {
+		name     string
+		change   func(*api.ToolCall)
+		want     error
+		attempts int
+	}{
+		{"executor", func(*api.ToolCall) {}, executorErr, 1},
+		{"key", func(c *api.ToolCall) { c.IdempotencyKey = "" }, controller.ErrMissingIdempotencyKey, 0},
+		{"mediation", func(c *api.ToolCall) { c.Mediation = api.MediationInHarnessReported }, controller.ErrUnmediatedToolCall, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log := memStore(t)
+			call := recordedToolCall()
+			appendToolEvidence(t, log, []api.Event{{Kind: api.EventToolCall, ToolCall: &call}, {Kind: api.EventToolResult, Result: &api.ToolResult{ID: call.ID}}}, false)
+			live := recordedToolCall()
+			live.ID, live.IdempotencyKey = "call-2", "key-2"
+			test.change(&live)
+			attempts := 0
+			c, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+				attempts++
+				return api.ToolResult{}, executorErr
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := &callHarness{calls: []api.ToolCall{call, live}}
+			_, err = c.Resume(t.Context(), h)
+			if !errors.Is(err, test.want) || errors.Is(err, controller.ErrReplayDiverged) || attempts != test.attempts || len(h.results) != 1 {
+				t.Fatalf("live error classification: attempts=%d results=%d err=%v", attempts, len(h.results), err)
 			}
 		})
 	}

@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"errors"
 	"fmt"
 	"reflect"
 
@@ -9,32 +8,23 @@ import (
 	"github.com/aramase/agentsessions/wire"
 )
 
-// validateLiveToolCall returns the same argument representation the journal records, so direct
-// Go harnesses cannot give an executor values that differ from a later recovered call.
-func validateLiveToolCall(call api.ToolCall) (api.ToolCall, error) {
-	switch call.Mediation {
-	case api.MediationControllerMediated:
-	case api.MediationRequiresApproval:
-		return api.ToolCall{}, errors.New("controller: REQUIRES_APPROVAL mediation is not yet implemented")
-	default:
-		return api.ToolCall{}, fmt.Errorf("%w (got %q)", ErrUnmediatedToolCall, call.Mediation)
-	}
-	if call.IdempotencyKey == "" {
-		return api.ToolCall{}, ErrMissingIdempotencyKey
-	}
-	args, err := wire.NormalizeToolArgs(call.Args)
-	if err != nil {
-		return api.ToolCall{}, err
-	}
-	call.Args = args
-	return call, nil
-}
-
 // matchToolCall compares only the observable request, not raw Go numeric types or map ordering.
 // Mismatch errors name the field without exposing arguments or idempotency keys to the journal.
 func matchToolCall(emitted api.ToolCall, recorded *api.ToolCall) error {
 	if recorded == nil {
 		return fmt.Errorf("%w: recorded tool call missing its payload", ErrReplayDiverged)
+	}
+	// These are main's existing host-execution guards, applied to recorded evidence before either
+	// serving a receipt or re-driving an intent. Preserve the key/mediation causes for errors.Is.
+	switch recorded.Mediation {
+	case api.MediationControllerMediated:
+	case api.MediationRequiresApproval:
+		return fmt.Errorf("%w: recorded tool call requires unsupported approval", ErrReplayDiverged)
+	default:
+		return fmt.Errorf("%w: invalid recorded tool mediation: %w", ErrReplayDiverged, ErrUnmediatedToolCall)
+	}
+	if recorded.IdempotencyKey == "" {
+		return fmt.Errorf("%w: invalid recorded tool key: %w", ErrReplayDiverged, ErrMissingIdempotencyKey)
 	}
 	switch {
 	case emitted.ID != recorded.ID:
@@ -46,14 +36,12 @@ func matchToolCall(emitted api.ToolCall, recorded *api.ToolCall) error {
 	case emitted.IdempotencyKey != recorded.IdempotencyKey:
 		return fmt.Errorf("%w: tool idempotency key mismatch", ErrReplayDiverged)
 	}
-	want, err := wire.NormalizeToolArgs(recorded.Args)
-	if err != nil {
-		return fmt.Errorf("%w: invalid recorded tool arguments", ErrReplayDiverged)
-	}
-	got, err := wire.NormalizeToolArgs(emitted.Args)
-	if err != nil {
-		return fmt.Errorf("%w: invalid emitted tool arguments: %w", ErrReplayDiverged, err)
-	}
+	// Use the journal's existing wire conversion only for comparison; do not rewrite live args
+	// or introduce a new argument domain. Its whole-map JSON fallback can turn nested nil
+	// containers into null when a sibling has a typed value. Preserve those legacy distinctions
+	// and the conversion's existing precision limitations rather than reinterpret old evidence.
+	want := wire.ToolCallFromProto(wire.ToolCallToProto(recorded)).Args
+	got := wire.ToolCallFromProto(wire.ToolCallToProto(&emitted)).Args
 	if !reflect.DeepEqual(got, want) {
 		return fmt.Errorf("%w: tool arguments mismatch", ErrReplayDiverged)
 	}
