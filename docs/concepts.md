@@ -113,6 +113,7 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 
 | Kind | Meaning |
 |---|---|
+| `EXECUTION_START` | Host-owned opaque execution config, harness resume cursor, and expected input count, recorded before inputs for every new execution. |
 | `INPUT` | A user or producer input message. |
 | `MODEL_CALL` | A call to a model was made (records the model, params, and an input hash for the replay check). |
 | `OUTPUT` | Assistant output (a delta or a full message). |
@@ -124,8 +125,48 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 | `ERROR` | An error, mirroring a gRPC status. |
 
 The same `Event` type is shared by the session log and the harness stream, so what a harness emits is
-exactly what gets journaled. Content is carried as A2A-style `Message`s (a role plus a list of `Part`s:
-text, file, structured data, or an opaque reasoning block).
+exactly what gets journaled; the host additionally owns invocation and lifecycle records. Content is
+carried as A2A-style `Message`s (a role plus a list of `Part`s: text, file, structured data, or an
+opaque reasoning block).
+
+### Durable execution invocation
+
+The controller commits an `EXECUTION_START` before inputs or harness execution for every new
+execution, including default-config, zero-cursor turns. It preserves opaque config bytes verbatim,
+including binary data and whitespace, and records the harness cursor and expected `INPUT` count at
+the same boundary. A direct `Controller.Exec` with no inputs records an explicit zero count.
+The caller's `expected_last_seq` guards this first committed record; if that append fails, neither
+the harness nor the model runs.
+
+The marker and inputs are separate appends. If an input append fails, or the process dies before all
+inputs commit, the marker's count prevents recovery from running a different invocation. Before any
+harness runs, controller Replay validates every completed invocation's count, and Resume validates
+the last interrupted invocation. Missing/negative counts, mismatched committed input counts, and
+payloadless `INPUT` records return `ErrInvalidExecutionLog` without running the harness/model/tool or
+appending execution records. Explicit zero permits genuinely inputless invocations; all inputs
+committed before a crash permits resume even if the harness has not run yet. Completed Replay skips
+an incomplete trailing invocation and remains read-only. A historical fork cut before all expected
+inputs likewise cannot resume, but completed prefixes and complete invocation boundaries still work.
+
+Controller replay and interrupted-turn resume reconstruct each `Start` from its own recorded values,
+including in inherited fork prefixes. `History` is the exact prior journal prefix: it excludes the
+current execution's start marker and inputs, but retains markers from prior executions. Replay is
+read-only; recovery serves already-recorded effects rather than repeating them. The harness cursor
+is opaque and distinct from the append CAS cursor.
+
+**Legacy logs:** an execution without an `EXECUTION_START` reconstructs with empty config and a zero
+cursor, regardless of a new controller's `WithStart` option. Older builds discarded these values;
+non-empty config or non-zero cursors from those executions cannot be recovered retroactively. No
+SQLite schema migration or rewriting of existing records is needed. Experimental start markers
+without `input_count` fail closed when their invocation is selected for resume or is completed for
+replay: absence cannot distinguish a genuine inputless turn from lost inputs. Markerless logs retain
+their prior behavior and lack completeness information; only older writers omit the marker.
+
+**Rollback compatibility:** binaries older than this release fail chain verification for sessions
+containing `EXECUTION_START`, reporting a `content_hash` mismatch. Rollback is not supported for any
+session that executed a turn on this release, including existing markerless sessions that execute
+another turn after upgrading. Replay streams and harness `History` now carry one extra
+`EXECUTION_START` event per turn (in `History`, only prior turns).
 
 ## The event log: single writer, append-only, tamper-evident
 
@@ -218,8 +259,9 @@ sequenceDiagram
   participant M as Model
 
   C->>Ctrl: Exec(input, expectedLastSeq)
+  Ctrl->>Log: append EXECUTION_START (CAS + fence + hash)
   Ctrl->>Log: append INPUT (CAS + fence + hash)
-  Ctrl->>H: Run(Start{Inputs, History})
+  Ctrl->>H: Run(Start{Config, ResumeFromSeq, Inputs, History})
   H->>Ctrl: sink.Model(request)
   Ctrl->>M: invoke model (live only)
   M-->>Ctrl: completion

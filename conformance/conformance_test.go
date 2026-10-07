@@ -157,8 +157,8 @@ func TestCrashMidTurnRedriveAtMostOnce(t *testing.T) {
 	recorded, _ := c1.Outputs()
 	s.Close()
 
-	// Simulate a crash that lost only the END record (INPUT, MODEL_CALL, OUTPUT are durable).
-	truncateFrom(t, path, "s", 4)
+	// Simulate a crash that lost only END (EXECUTION_START, INPUT, MODEL_CALL, OUTPUT are durable).
+	truncateFrom(t, path, "s", 5)
 
 	s2, err := sqlitelog.Open(path)
 	if err != nil {
@@ -246,8 +246,8 @@ func TestCrashAfterUsageDoesNotDuplicateAccounting(t *testing.T) {
 	}
 	s.Close()
 
-	// INPUT, MODEL_CALL, OUTPUT, and USAGE are durable; only END was lost.
-	truncateFrom(t, path, "s", 5)
+	// EXECUTION_START, INPUT, MODEL_CALL, OUTPUT, and USAGE are durable; only END was lost.
+	truncateFrom(t, path, "s", 6)
 
 	s2, err := sqlitelog.Open(path)
 	if err != nil {
@@ -446,15 +446,16 @@ func TestCrashMidToolCallAtMostOnce(t *testing.T) {
 	if err := c1.Exec(context.Background(), toolHarness{key: "k1"}, []api.Message{*api.TextMessage("user", "go")}, 0); err != nil {
 		t.Fatal(err)
 	}
-	// Journal now: INPUT(1) TOOL_CALL(2) TOOL_RESULT(3) END(4); the effect ran exactly once.
+	// Journal now: EXECUTION_START(1) INPUT(2) TOOL_CALL(3) TOOL_RESULT(4) END(5).
+	// The effect ran exactly once.
 	if tool.effects["k1"] != 1 {
 		t.Fatalf("live: effect ran %d times, want 1", tool.effects["k1"])
 	}
 	s.Close()
 
-	// Crash lost the TOOL_RESULT and END: the intent (TOOL_CALL, seq 2) is durable, the result is
+	// Crash lost the TOOL_RESULT and END: the intent (TOOL_CALL, seq 3) is durable, the result is
 	// not — the exact window §3 protects against.
-	truncateFrom(t, path, "s", 3)
+	truncateFrom(t, path, "s", 4)
 
 	s2, err := sqlitelog.Open(path)
 	if err != nil {

@@ -628,6 +628,9 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	}
 	log := s.store.Session(req.GetSession())
 	if err := placer.Resume(ctx, log, req.GetSession()); err != nil {
+		if errors.Is(err, controller.ErrIncompleteInvocation) {
+			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
+		}
 		return nil, status.Errorf(codes.Internal, "resume: %v", err)
 	}
 	info, err := s.store.SessionInfo(req.GetSession())
