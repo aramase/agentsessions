@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -120,6 +121,73 @@ func (s rawToolServer) Connect(stream v1.Harness_ConnectServer) error {
 		return err
 	}
 	return stream.Send(&v1.Event{ExecutionId: start.GetExecutionId(), Kind: v1.EventKind_EVENT_END, Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}}})
+}
+
+type errorThenCompletedServer struct {
+	v1.UnimplementedHarnessServer
+	reported *v1.Error
+}
+
+func (s errorThenCompletedServer) Connect(stream v1.Harness_ConnectServer) error {
+	start, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	if err := stream.Send(&v1.Event{
+		ExecutionId: start.GetExecutionId(), Kind: v1.EventKind_EVENT_ERROR,
+		Body: &v1.Event_Error{Error: s.reported},
+	}); err != nil {
+		return err
+	}
+	return stream.Send(&v1.Event{
+		ExecutionId: start.GetExecutionId(), Kind: v1.EventKind_EVENT_END,
+		Body: &v1.Event_End{End: &v1.HarnessEnd{State: "COMPLETED"}},
+	})
+}
+
+func TestUnrecognizedWireErrorRetainsCompletionBehavior(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		reported *v1.Error
+	}{
+		{"generic error", &v1.Error{Code: int32(codes.Internal), Description: "fixture error"}},
+		{"unrelated invalid argument", &v1.Error{Code: int32(codes.InvalidArgument), Description: "fixture error"}},
+		{"rejection description with wrong code", &v1.Error{Code: int32(codes.Internal), Description: wire.ErrInvalidToolArgs.Error()}},
+		{"missing payload", nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lis := bufconn.Listen(1 << 20)
+			server := grpc.NewServer()
+			v1.RegisterHarnessServer(server, errorThenCompletedServer{reported: test.reported})
+			go server.Serve(lis)
+			t.Cleanup(server.Stop)
+			conn, err := grpc.NewClient("passthrough:///error-harness", grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { conn.Close() })
+			log := eventlog.AsStore(eventlog.New())
+			c, err := controller.New(log, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := harnesswire.NewClientHarness(v1.NewHarnessClient(conn))
+			if err := c.Exec(t.Context(), h, nil, 0); err != nil {
+				t.Fatalf("unrecognized error prevented completion: %v", err)
+			}
+			recs, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			last := recs[len(recs)-1].Event
+			if last.Kind != api.EventEnd || last.End == nil || last.End.State != "COMPLETED" {
+				t.Fatalf("want completed execution, got %+v", last)
+			}
+			if _, err := c.Replay(t.Context(), h); err != nil {
+				t.Fatalf("unrecognized error prevented reconstruction: %v", err)
+			}
+		})
+	}
 }
 
 type handledArgumentErrorHarness struct{ reject, interrupt bool }

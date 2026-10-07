@@ -375,7 +375,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			if reported.GetCode() == int32(codes.InvalidArgument) && reported.GetDescription() == wire.ErrInvalidToolArgs.Error() {
 				return rejectToolArgs(sink)
 			}
-			return errors.New("harnesswire: remote harness reported an error")
+			// Unrecognized error frames retain their previous ignored behavior.
 		case v1.EventKind_EVENT_END:
 			return endError(ev.GetEnd())
 		}
