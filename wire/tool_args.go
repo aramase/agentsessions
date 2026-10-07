@@ -22,12 +22,12 @@ func NormalizeToolArgs(args map[string]any) (map[string]any, error) {
 	if args == nil {
 		return nil, nil
 	}
-	// Marshal rejects cycles and unsupported values before recursively checking the shape. Do not
-	// return its error: a custom marshaler or unsupported value may expose argument contents.
-	if _, err := json.Marshal(args); err != nil {
+	// Inspect before Marshal so rejected values cannot execute custom serializers. Track only
+	// containers on the current path: shared acyclic values are valid, back-references are not.
+	if !toolArgShape(reflect.ValueOf(args), make(map[toolArgContainer]bool)) {
 		return nil, ErrInvalidToolArgs
 	}
-	if !toolArgShape(reflect.ValueOf(args)) {
+	if _, err := json.Marshal(args); err != nil {
 		return nil, ErrInvalidToolArgs
 	}
 	s := toStruct(args)
@@ -39,7 +39,13 @@ func NormalizeToolArgs(args map[string]any) (map[string]any, error) {
 
 const maxSafeToolInteger = 1<<53 - 1
 
-func toolArgShape(v reflect.Value) bool {
+type toolArgContainer struct {
+	typ reflect.Type
+	ptr uintptr
+	len int
+}
+
+func toolArgShape(v reflect.Value, visiting map[toolArgContainer]bool) bool {
 	if !v.IsValid() {
 		return true
 	}
@@ -57,7 +63,7 @@ func toolArgShape(v reflect.Value) bool {
 	}
 	switch v.Kind() {
 	case reflect.Interface:
-		return v.IsNil() || toolArgShape(v.Elem())
+		return v.IsNil() || toolArgShape(v.Elem(), visiting)
 	case reflect.Bool:
 		return true
 	case reflect.String:
@@ -69,20 +75,32 @@ func toolArgShape(v reflect.Value) bool {
 		return v.Uint() <= maxSafeToolInteger
 	case reflect.Float32, reflect.Float64:
 		return safeToolNumber(v.Float())
-	case reflect.Map:
-		if v.Type().Key().Kind() != reflect.String {
+	case reflect.Map, reflect.Slice:
+		if v.Kind() == reflect.Map && v.Type().Key().Kind() != reflect.String {
 			return false
 		}
-		iter := v.MapRange()
-		for iter.Next() {
-			if !toolArgShape(iter.Key()) || !toolArgShape(iter.Value()) {
-				return false
-			}
+		if v.IsNil() {
+			return true
 		}
-		return true
-	case reflect.Slice, reflect.Array:
+		container := toolArgContainer{typ: v.Type(), ptr: v.Pointer(), len: v.Len()}
+		if visiting[container] {
+			return false
+		}
+		visiting[container] = true
+		defer delete(visiting, container)
+		if v.Kind() == reflect.Map {
+			iter := v.MapRange()
+			for iter.Next() {
+				if !toolArgShape(iter.Key(), visiting) || !toolArgShape(iter.Value(), visiting) {
+					return false
+				}
+			}
+			return true
+		}
+		fallthrough
+	case reflect.Array:
 		for i := 0; i < v.Len(); i++ {
-			if !toolArgShape(v.Index(i)) {
+			if !toolArgShape(v.Index(i), visiting) {
 				return false
 			}
 		}

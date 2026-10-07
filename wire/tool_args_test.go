@@ -39,6 +39,61 @@ func TestNormalizeToolArgs(t *testing.T) {
 
 type namedToolNumber int
 
+type panickingToolJSON struct{}
+
+func (panickingToolJSON) MarshalJSON() ([]byte, error) { panic("custom JSON serializer invoked") }
+
+type panickingToolText string
+
+func (panickingToolText) MarshalText() ([]byte, error) { panic("custom text serializer invoked") }
+
+func TestNormalizeToolArgsPreflightRejectsWithoutPanic(t *testing.T) {
+	mapCycle := map[string]any{}
+	mapCycle["self"] = mapCycle
+	sliceCycle := make([]any, 1)
+	sliceCycle[0] = sliceCycle
+	for _, test := range []struct {
+		name  string
+		value any
+	}{
+		{"custom JSON serializer", panickingToolJSON{}},
+		{"custom text serializer", panickingToolText("private")},
+		{"map cycle", mapCycle},
+		{"slice cycle", sliceCycle},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Fatalf("argument rejection panicked: %v", p)
+				}
+			}()
+			_, err := wire.NormalizeToolArgs(map[string]any{"value": test.value})
+			if !errors.Is(err, wire.ErrInvalidToolArgs) || err.Error() != wire.ErrInvalidToolArgs.Error() {
+				t.Fatalf("want bounded argument error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestNormalizeToolArgsAllowsSharedContainersAndTypedArrays(t *testing.T) {
+	sharedMap := map[string]int{"count": 2}
+	sharedSlice := []int{1, 2}
+	args := map[string]any{
+		"maps":   []any{sharedMap, sharedMap},
+		"slices": []any{sharedSlice, sharedSlice},
+		"array":  [2]int{3, 4},
+	}
+	want := map[string]any{
+		"maps":   []any{map[string]any{"count": float64(2)}, map[string]any{"count": float64(2)}},
+		"slices": []any{[]any{float64(1), float64(2)}, []any{float64(1), float64(2)}},
+		"array":  []any{float64(3), float64(4)},
+	}
+	got, err := wire.NormalizeToolArgs(args)
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("acyclic shared/typed containers: got %#v err=%v", got, err)
+	}
+}
+
 func TestNormalizeToolArgsPreservesExistingFallbackRepresentation(t *testing.T) {
 	for _, test := range []struct {
 		name       string
