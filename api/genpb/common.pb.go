@@ -1,7 +1,7 @@
 // Shared wire types for the agentsessions Session and Harness services.
 //
 // The Event message is used by BOTH the session log (Sessions.Exec / Replay) and the
-// harness stream (Harness.Connect) — the harness's events become the session log.
+// harness stream (Harness.Connect) — harness events become the log alongside host-owned records.
 //
 // The content model (Part) is aligned with A2A `Part` + MCP content for interop; the
 // event/log model is native. Derived from the durable-log & replay contract §7 (record
@@ -100,6 +100,7 @@ const (
 	EventKind_EVENT_LIFECYCLE        EventKind = 9
 	EventKind_EVENT_END              EventKind = 10
 	EventKind_EVENT_ERROR            EventKind = 11
+	EventKind_EVENT_EXECUTION_START  EventKind = 12 // host-owned config/cursor/input count, before inputs and harness effects
 )
 
 // Enum value maps for EventKind.
@@ -117,6 +118,7 @@ var (
 		9:  "EVENT_LIFECYCLE",
 		10: "EVENT_END",
 		11: "EVENT_ERROR",
+		12: "EVENT_EXECUTION_START",
 	}
 	EventKind_value = map[string]int32{
 		"EVENT_KIND_UNSPECIFIED": 0,
@@ -131,6 +133,7 @@ var (
 		"EVENT_LIFECYCLE":        9,
 		"EVENT_END":              10,
 		"EVENT_ERROR":            11,
+		"EVENT_EXECUTION_START":  12,
 	}
 )
 
@@ -1566,7 +1569,77 @@ func (x *Lifecycle) GetSnapshotSealed() bool {
 	return false
 }
 
-// Event is the harness-emitted content unit. Ordering (seq) and integrity (prev_hash /
+// ExecutionStart is host-owned invocation state, committed before inputs and harness execution.
+// The host emits it for every new execution, including default-config and inputless turns.
+// Logs without this event reconstruct with empty config and a zero cursor. Older discarded
+// non-empty values cannot be recovered. Config is opaque: preserve bytes verbatim, never parse it.
+type ExecutionStart struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Config        []byte                 `protobuf:"bytes,1,opt,name=config,proto3" json:"config,omitempty"`
+	ResumeFromSeq int64                  `protobuf:"varint,2,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"` // harness cursor, distinct from the append CAS cursor
+	// Expected number of INPUT events for this invocation, always set by new writers (including zero).
+	// Replay/resume reject a completed or selected invocation with a missing/negative count or a
+	// different committed INPUT count before running the harness. An incomplete trailing invocation
+	// is skipped by completed replay. Count-less experimental start markers fail closed; truly
+	// markerless legacy executions retain their existing reconstruction behavior.
+	InputCount    *int64 `protobuf:"varint,3,opt,name=input_count,json=inputCount,proto3,oneof" json:"input_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExecutionStart) Reset() {
+	*x = ExecutionStart{}
+	mi := &file_common_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExecutionStart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExecutionStart) ProtoMessage() {}
+
+func (x *ExecutionStart) ProtoReflect() protoreflect.Message {
+	mi := &file_common_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExecutionStart.ProtoReflect.Descriptor instead.
+func (*ExecutionStart) Descriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ExecutionStart) GetConfig() []byte {
+	if x != nil {
+		return x.Config
+	}
+	return nil
+}
+
+func (x *ExecutionStart) GetResumeFromSeq() int64 {
+	if x != nil {
+		return x.ResumeFromSeq
+	}
+	return 0
+}
+
+func (x *ExecutionStart) GetInputCount() int64 {
+	if x != nil && x.InputCount != nil {
+		return *x.InputCount
+	}
+	return 0
+}
+
+// Event is the shared journal/stream content unit; EXECUTION_START is emitted only by the host.
+// Ordering (seq) and integrity (prev_hash /
 // content_hash) are host-assigned and live on LogRecord — the harness, which does not know
 // seq/prev, emits a hash-free Event, so there is no circular hashing. Streaming deltas are
 // transport (see Delta in session.proto) and coalesce into the finalized event (§3).
@@ -1588,6 +1661,7 @@ type Event struct {
 	//	*Event_Lifecycle
 	//	*Event_End
 	//	*Event_Error
+	//	*Event_ExecutionStart
 	Body          isEvent_Body `protobuf_oneof:"body"`
 	Actor         *IdentityRef `protobuf:"bytes,18,opt,name=actor,proto3" json:"actor,omitempty"` // emitter principal -> provenance
 	unknownFields protoimpl.UnknownFields
@@ -1596,7 +1670,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_common_proto_msgTypes[18]
+	mi := &file_common_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1608,7 +1682,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[18]
+	mi := &file_common_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1621,7 +1695,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{18}
+	return file_common_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Event) GetExecutionId() string {
@@ -1749,6 +1823,15 @@ func (x *Event) GetError() *Error {
 	return nil
 }
 
+func (x *Event) GetExecutionStart() *ExecutionStart {
+	if x != nil {
+		if x, ok := x.Body.(*Event_ExecutionStart); ok {
+			return x.ExecutionStart
+		}
+	}
+	return nil
+}
+
 func (x *Event) GetActor() *IdentityRef {
 	if x != nil {
 		return x.Actor
@@ -1800,6 +1883,10 @@ type Event_Error struct {
 	Error *Error `protobuf:"bytes,17,opt,name=error,proto3,oneof"`
 }
 
+type Event_ExecutionStart struct {
+	ExecutionStart *ExecutionStart `protobuf:"bytes,19,opt,name=execution_start,json=executionStart,proto3,oneof"`
+}
+
 func (*Event_Message) isEvent_Body() {}
 
 func (*Event_Model) isEvent_Body() {}
@@ -1820,6 +1907,8 @@ func (*Event_End) isEvent_Body() {}
 
 func (*Event_Error) isEvent_Body() {}
 
+func (*Event_ExecutionStart) isEvent_Body() {}
+
 // LogRecord is the host's durable, ordered wrapper around an Event. The host assigns seq,
 // links the hash-chain (content_hash = H(prev_hash || seq || canonical(event)); at a fork
 // child.first.prev_hash = parent@R.content_hash), and records the incarnation fence token.
@@ -1838,7 +1927,7 @@ type LogRecord struct {
 
 func (x *LogRecord) Reset() {
 	*x = LogRecord{}
-	mi := &file_common_proto_msgTypes[19]
+	mi := &file_common_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1850,7 +1939,7 @@ func (x *LogRecord) String() string {
 func (*LogRecord) ProtoMessage() {}
 
 func (x *LogRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[19]
+	mi := &file_common_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1863,7 +1952,7 @@ func (x *LogRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogRecord.ProtoReflect.Descriptor instead.
 func (*LogRecord) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{19}
+	return file_common_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *LogRecord) GetSeq() int64 {
@@ -2020,7 +2109,13 @@ const file_common_proto_rawDesc = "" +
 	"\x10LIFECYCLE_RESUME\x10\x02\x12\x12\n" +
 	"\x0eLIFECYCLE_FORK\x10\x03\x12\x16\n" +
 	"\x12LIFECYCLE_BASELINE\x10\x04\x12\x14\n" +
-	"\x10LIFECYCLE_CANCEL\x10\x05\"\xb2\x06\n" +
+	"\x10LIFECYCLE_CANCEL\x10\x05\"\x86\x01\n" +
+	"\x0eExecutionStart\x12\x16\n" +
+	"\x06config\x18\x01 \x01(\fR\x06config\x12&\n" +
+	"\x0fresume_from_seq\x18\x02 \x01(\x03R\rresumeFromSeq\x12$\n" +
+	"\vinput_count\x18\x03 \x01(\x03H\x00R\n" +
+	"inputCount\x88\x01\x01B\x0e\n" +
+	"\f_input_count\"\xff\x06\n" +
 	"\x05Event\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12*\n" +
 	"\x02ts\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x02ts\x12%\n" +
@@ -2036,7 +2131,8 @@ const file_common_proto_rawDesc = "" +
 	"\x05usage\x18\x0e \x01(\v2\x17.agentsessions.v1.UsageH\x00R\x05usage\x12;\n" +
 	"\tlifecycle\x18\x0f \x01(\v2\x1b.agentsessions.v1.LifecycleH\x00R\tlifecycle\x120\n" +
 	"\x03end\x18\x10 \x01(\v2\x1c.agentsessions.v1.HarnessEndH\x00R\x03end\x12/\n" +
-	"\x05error\x18\x11 \x01(\v2\x17.agentsessions.v1.ErrorH\x00R\x05error\x123\n" +
+	"\x05error\x18\x11 \x01(\v2\x17.agentsessions.v1.ErrorH\x00R\x05error\x12K\n" +
+	"\x0fexecution_start\x18\x13 \x01(\v2 .agentsessions.v1.ExecutionStartH\x00R\x0eexecutionStart\x123\n" +
 	"\x05actor\x18\x12 \x01(\v2\x1d.agentsessions.v1.IdentityRefR\x05actorB\x06\n" +
 	"\x04bodyJ\x04\b\x01\x10\x02J\x04\b\x05\x10\x06J\x04\b\x06\x10\a\"\xa2\x01\n" +
 	"\tLogRecord\x12\x10\n" +
@@ -2049,7 +2145,7 @@ const file_common_proto_rawDesc = "" +
 	"\x15MEDIATION_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dMEDIATION_IN_HARNESS_REPORTED\x10\x01\x12!\n" +
 	"\x1dMEDIATION_CONTROLLER_MEDIATED\x10\x02\x12\x1f\n" +
-	"\x1bMEDIATION_REQUIRES_APPROVAL\x10\x03*\x89\x02\n" +
+	"\x1bMEDIATION_REQUIRES_APPROVAL\x10\x03*\xa4\x02\n" +
 	"\tEventKind\x12\x1a\n" +
 	"\x16EVENT_KIND_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vEVENT_INPUT\x10\x01\x12\x14\n" +
@@ -2063,7 +2159,8 @@ const file_common_proto_rawDesc = "" +
 	"\x0fEVENT_LIFECYCLE\x10\t\x12\r\n" +
 	"\tEVENT_END\x10\n" +
 	"\x12\x0f\n" +
-	"\vEVENT_ERROR\x10\vB<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
+	"\vEVENT_ERROR\x10\v\x12\x19\n" +
+	"\x15EVENT_EXECUTION_START\x10\fB<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
 
 var (
 	file_common_proto_rawDescOnce sync.Once
@@ -2078,7 +2175,7 @@ func file_common_proto_rawDescGZIP() []byte {
 }
 
 var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_common_proto_goTypes = []any{
 	(Mediation)(0),                // 0: agentsessions.v1.Mediation
 	(EventKind)(0),                // 1: agentsessions.v1.EventKind
@@ -2101,32 +2198,33 @@ var file_common_proto_goTypes = []any{
 	(*Error)(nil),                 // 18: agentsessions.v1.Error
 	(*HarnessEnd)(nil),            // 19: agentsessions.v1.HarnessEnd
 	(*Lifecycle)(nil),             // 20: agentsessions.v1.Lifecycle
-	(*Event)(nil),                 // 21: agentsessions.v1.Event
-	(*LogRecord)(nil),             // 22: agentsessions.v1.LogRecord
-	nil,                           // 23: agentsessions.v1.Origin.AttributesEntry
-	nil,                           // 24: agentsessions.v1.ModelCall.ParamsEntry
-	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),       // 26: google.protobuf.Struct
+	(*ExecutionStart)(nil),        // 21: agentsessions.v1.ExecutionStart
+	(*Event)(nil),                 // 22: agentsessions.v1.Event
+	(*LogRecord)(nil),             // 23: agentsessions.v1.LogRecord
+	nil,                           // 24: agentsessions.v1.Origin.AttributesEntry
+	nil,                           // 25: agentsessions.v1.ModelCall.ParamsEntry
+	(*timestamppb.Timestamp)(nil), // 26: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),       // 27: google.protobuf.Struct
 }
 var file_common_proto_depIdxs = []int32{
-	25, // 0: agentsessions.v1.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
-	25, // 1: agentsessions.v1.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
+	26, // 0: agentsessions.v1.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
+	26, // 1: agentsessions.v1.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
 	5,  // 2: agentsessions.v1.Part.text:type_name -> agentsessions.v1.TextPart
 	6,  // 3: agentsessions.v1.Part.file:type_name -> agentsessions.v1.FilePart
 	7,  // 4: agentsessions.v1.Part.data:type_name -> agentsessions.v1.DataPart
 	8,  // 5: agentsessions.v1.Part.reasoning:type_name -> agentsessions.v1.ReasoningPart
-	26, // 6: agentsessions.v1.DataPart.data:type_name -> google.protobuf.Struct
+	27, // 6: agentsessions.v1.DataPart.data:type_name -> google.protobuf.Struct
 	4,  // 7: agentsessions.v1.ReasoningPart.summary:type_name -> agentsessions.v1.Part
 	4,  // 8: agentsessions.v1.Message.parts:type_name -> agentsessions.v1.Part
-	23, // 9: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
-	24, // 10: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
+	24, // 9: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
+	25, // 10: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
 	9,  // 11: agentsessions.v1.ModelCall.messages:type_name -> agentsessions.v1.Message
-	26, // 12: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
+	27, // 12: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
 	0,  // 13: agentsessions.v1.ToolCall.mediation:type_name -> agentsessions.v1.Mediation
-	26, // 14: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
+	27, // 14: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
 	18, // 15: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
 	2,  // 16: agentsessions.v1.Lifecycle.kind:type_name -> agentsessions.v1.Lifecycle.Kind
-	25, // 17: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	26, // 17: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
 	1,  // 18: agentsessions.v1.Event.kind:type_name -> agentsessions.v1.EventKind
 	9,  // 19: agentsessions.v1.Event.message:type_name -> agentsessions.v1.Message
 	12, // 20: agentsessions.v1.Event.model:type_name -> agentsessions.v1.ModelCall
@@ -2138,13 +2236,14 @@ var file_common_proto_depIdxs = []int32{
 	20, // 26: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
 	19, // 27: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
 	18, // 28: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
-	10, // 29: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
-	21, // 30: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
-	31, // [31:31] is the sub-list for method output_type
-	31, // [31:31] is the sub-list for method input_type
-	31, // [31:31] is the sub-list for extension type_name
-	31, // [31:31] is the sub-list for extension extendee
-	0,  // [0:31] is the sub-list for field type_name
+	21, // 29: agentsessions.v1.Event.execution_start:type_name -> agentsessions.v1.ExecutionStart
+	10, // 30: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
+	22, // 31: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
+	32, // [32:32] is the sub-list for method output_type
+	32, // [32:32] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_common_proto_init() }
@@ -2166,7 +2265,8 @@ func file_common_proto_init() {
 		(*ReasoningPart_OpaqueBytes)(nil),
 		(*ReasoningPart_OpaqueUri)(nil),
 	}
-	file_common_proto_msgTypes[18].OneofWrappers = []any{
+	file_common_proto_msgTypes[18].OneofWrappers = []any{}
+	file_common_proto_msgTypes[19].OneofWrappers = []any{
 		(*Event_Message)(nil),
 		(*Event_Model)(nil),
 		(*Event_Tool)(nil),
@@ -2177,6 +2277,7 @@ func file_common_proto_init() {
 		(*Event_Lifecycle)(nil),
 		(*Event_End)(nil),
 		(*Event_Error)(nil),
+		(*Event_ExecutionStart)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2184,7 +2285,7 @@ func file_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_proto_rawDesc), len(file_common_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -66,8 +66,9 @@ Given the above, there is one safe shape for this release:
 - Treat every host as **single-tenant**. One project per host if you need separation.
 - Do not put it behind a public ingress, even an authenticated one, unless that proxy is doing
   **all** of the authentication and authorization and nothing else can reach the port.
-- Keep the journal file's permissions tight. It holds full conversation contents in the clear, and
-  anyone who can read it can read every session.
+- Keep the journal file's permissions tight. It holds full conversation contents and opaque execution
+  config in the clear, and anyone who can read it can read every session. Do not put credentials in
+  execution config; operational logging omits it, but the durable journal and Replay API expose it.
 - Anyone who can **write** the journal can rewrite history. The chain makes that detectable, not
   impossible: verification tells you the log was altered, it does not prevent the alteration.
 

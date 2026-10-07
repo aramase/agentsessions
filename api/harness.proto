@@ -57,8 +57,8 @@ message IdentityContext {
 message Start {
   bytes config = 1;
   repeated Event history = 2;
-  // New input messages for this execution. Empty = resume/re-drive an interrupted
-  // execution from history with no new input.
+  // Invocation input messages. Controller replay and interrupted recovery restore the original
+  // messages from the journal; empty inputs describe an intentionally inputless invocation.
   repeated Message inputs = 3;
   IdentityContext identity = 4;
   int64 resume_from_seq = 5;
