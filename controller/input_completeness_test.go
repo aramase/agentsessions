@@ -77,13 +77,13 @@ func TestResumeRejectsFailedInputAppendAfterSQLiteReopen(t *testing.T) {
 						modelCalls++
 						return api.ModelResponse{Message: *api.TextMessage("assistant", "reply")}, nil
 					}
-					tool := func(context.Context, string, api.ToolCall) (api.ToolResult, error) {
+					tool := func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 						toolCalls++
 						return api.ToolResult{ID: "t1"}, nil
 					}
 					har := checkedStartHarness{executionConfigHarness{}, func(*api.Start) { runs++ }}
 					live, err := controller.New(failing, model, controller.WithStart(values.config, values.cursor),
-						controller.WithToolExecutor(tool), controller.WithObserver(controller.Observer{OnRecord: func(eventlog.Record) { observed++ }}))
+						controller.WithSessionUID("session"), controller.WithToolExecutor(tool), controller.WithObserver(controller.Observer{OnRecord: func(eventlog.Record) { observed++ }}))
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -105,7 +105,7 @@ func TestResumeRejectsFailedInputAppendAfterSQLiteReopen(t *testing.T) {
 					if head, err := log.Head(); err != nil || head != int64(failAt) {
 						t.Fatalf("reopened head = %d, %v; want %d", head, err, failAt)
 					}
-					recovery, err := controller.New(log, model, controller.WithToolExecutor(tool),
+					recovery, err := controller.New(log, model, controller.WithSessionUID("session"), controller.WithToolExecutor(tool),
 						controller.WithObserver(controller.Observer{OnRecord: func(eventlog.Record) { observed++ }}))
 					if err != nil {
 						t.Fatal(err)
@@ -186,7 +186,7 @@ func TestResumeInputCompletenessFromTruncatedSQLiteSnapshot(t *testing.T) {
 			recovery, err := controller.New(log, func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
 				models++
 				return api.ModelResponse{Message: *api.TextMessage("assistant", "reply")}, nil
-			}, controller.WithToolExecutor(func(context.Context, string, api.ToolCall) (api.ToolResult, error) {
+			}, controller.WithSessionUID("session"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 				tools++
 				return api.ToolResult{ID: "t1"}, nil
 			}))

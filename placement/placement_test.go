@@ -977,9 +977,9 @@ func TestPlacerHostToolExecRecordsIntentBeforeEffect(t *testing.T) {
 	defer store.Close()
 	log := store.Session("tool-live")
 	effects := 0
-	p := newLocalPlacer(t, hostToolHarness{key: "live-key"}, placement.WithToolExecutor(func(_ context.Context, sessionUID string, call api.ToolCall) (api.ToolResult, error) {
-		if sessionUID != "tool-live" {
-			return api.ToolResult{}, fmt.Errorf("executor session = %q, want tool-live", sessionUID)
+	p := newLocalPlacer(t, hostToolHarness{key: "live-key"}, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+		if scope.SessionUID != "tool-live" {
+			return api.ToolResult{}, fmt.Errorf("executor session = %q, want tool-live", scope.SessionUID)
 		}
 		recs := assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall)
 		if !reflect.DeepEqual(call, hostToolCall("live-key")) || !reflect.DeepEqual(*recs[2].Event.ToolCall, call) {
@@ -1018,7 +1018,7 @@ func TestPlacerHostToolFailures(t *testing.T) {
 			attempts := 0
 			var opts []placement.Option
 			if tc.executor {
-				opts = append(opts, placement.WithToolExecutor(func(context.Context, string, api.ToolCall) (api.ToolResult, error) {
+				opts = append(opts, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					attempts++
 					return api.ToolResult{}, errors.New("host policy denied charge")
 				}))
@@ -1046,7 +1046,7 @@ func TestPlacerHostToolExecutorsAreIndependent(t *testing.T) {
 	}
 	defer store.Close()
 	newHost := func(receipt string) *placement.Placer {
-		return newLocalPlacer(t, hostToolHarness{key: "shared-key"}, placement.WithToolExecutor(func(context.Context, string, api.ToolCall) (api.ToolResult, error) {
+		return newLocalPlacer(t, hostToolHarness{key: "shared-key"}, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 			return api.ToolResult{Output: map[string]any{"receipt": receipt}}, nil
 		}))
 	}
@@ -1120,9 +1120,9 @@ func TestPlacerHostToolResumeRedrivesTerminalIntentWithOriginalKey(t *testing.T)
 	defer store.Close()
 	log := store.Session("terminal-intent")
 	seedToolPrefix(t, log, false)
-	p := newLocalPlacer(t, hostToolHarness{key: "original-key"}, placement.WithToolExecutor(func(_ context.Context, sessionUID string, call api.ToolCall) (api.ToolResult, error) {
-		if sessionUID != "terminal-intent" {
-			return api.ToolResult{}, fmt.Errorf("resume executor session = %q, want terminal-intent", sessionUID)
+	p := newLocalPlacer(t, hostToolHarness{key: "original-key"}, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+		if scope.SessionUID != "terminal-intent" {
+			return api.ToolResult{}, fmt.Errorf("resume executor session = %q, want terminal-intent", scope.SessionUID)
 		}
 		assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall)
 		if !reflect.DeepEqual(call, hostToolCall("original-key")) {
@@ -1182,7 +1182,8 @@ func openDurableTool(t *testing.T, path string) *durableTool {
 	return &durableTool{db: db}
 }
 
-func (d *durableTool) exec(ctx context.Context, sessionUID string, call api.ToolCall) (api.ToolResult, error) {
+func (d *durableTool) exec(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+	sessionUID := scope.SessionUID
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return api.ToolResult{}, err

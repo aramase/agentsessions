@@ -406,8 +406,8 @@ func newIdempotentTool() *idempotentTool {
 	return &idempotentTool{effects: map[toolKey]int{}, results: map[toolKey]api.ToolResult{}}
 }
 
-func (t *idempotentTool) exec(_ context.Context, sessionUID string, tc api.ToolCall) (api.ToolResult, error) {
-	key := toolKey{sessionUID, tc.IdempotencyKey}
+func (t *idempotentTool) exec(_ context.Context, scope controller.ToolCallContext, tc api.ToolCall) (api.ToolResult, error) {
+	key := toolKey{scope.SessionUID, tc.IdempotencyKey}
 	if r, ok := t.results[key]; ok {
 		return r, nil // deduped: the effect already ran under this key
 	}
@@ -509,7 +509,7 @@ func TestControllerMediatedToolRequiresKey(t *testing.T) {
 	s, _ := openFile(t)
 	defer s.Close()
 	log := s.Session("s")
-	c, err := controller.New(log, (&countModel{}).call, controller.WithToolExecutor(newIdempotentTool().exec))
+	c, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(newIdempotentTool().exec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,7 @@ func TestUnmediatedToolCallRejected(t *testing.T) {
 	s, _ := openFile(t)
 	defer s.Close()
 	log := s.Session("s")
-	c, err := controller.New(log, (&countModel{}).call, controller.WithToolExecutor(newIdempotentTool().exec))
+	c, err := controller.New(log, (&countModel{}).call, controller.WithSessionUID("s"), controller.WithToolExecutor(newIdempotentTool().exec))
 	if err != nil {
 		t.Fatal(err)
 	}

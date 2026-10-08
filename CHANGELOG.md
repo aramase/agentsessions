@@ -9,11 +9,17 @@ provide.
 
 ### Compatibility
 
-- `controller.ToolFunc` now takes `sessionUID` between `ctx` and `call`. Custom tool executors must
-  update their Go signatures and scope authorization and durable deduplication to the session UID
-  plus the harness-chosen idempotency key. Placement binds the UID for Exec and Resume; direct
-  controller users must set `controller.WithSessionUID` (otherwise the executor receives an empty
-  UID). This is a Go source compatibility change, not a wire or journal schema change.
+- `controller.ToolFunc` now takes `controller.ToolCallContext` between `ctx` and `call`. Custom tool
+  executors must update their Go signatures and scope authorization and durable deduplication to
+  `ToolCallContext.SessionUID` plus the harness-chosen idempotency key. Placement binds the UID for
+  Exec and Resume; `controller.New` rejects a non-nil tool executor without a nonempty
+  `controller.WithSessionUID` with `controller.ErrMissingSessionUID`, before advancing the fence.
+  This is a Go source compatibility change, not a wire or journal schema change.
+- Resume now rejects a forked unfinished execution with unresolved inherited tool intents with
+  `controller.ErrInheritedToolIntent`, rather than re-driving a parent's effect under the child's
+  UID. This applies to existing journals, including legacy markerless turns; Fork still copies the
+  prefix, and completed inherited intent/result pairs remain recoverable without invoking the
+  executor. No wire or journal schema change is required.
 - Every new execution records `EXECUTION_START`, including default-config turns, so interrupted
   recovery can reject partially committed inputs. Binaries older than this release fail chain
   verification with a `content_hash` mismatch for sessions containing this event. Rollback is not

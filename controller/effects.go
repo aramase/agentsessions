@@ -86,7 +86,7 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolRes
 		// (in-harness-reported tools use Report instead).
 		return api.ToolResult{}, errors.New("controller: no tool executor configured")
 	}
-	res, err := s.c.tool(ctx, s.c.sessionUID, call)
+	res, err := s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
 	if err != nil {
 		return api.ToolResult{}, err
 	}

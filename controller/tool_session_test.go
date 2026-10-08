@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -32,7 +33,7 @@ func sessionToolCall() api.ToolCall {
 }
 
 // Losing WithSessionUID at execTool must fail both live delivery and interrupted re-drive.
-// Direct controller users that omit the binding retain an empty executor session identity.
+// Direct controller users that omit the binding must fail before fencing the journal.
 func TestToolExecutorReceivesConfiguredSessionUID(t *testing.T) {
 	for _, tc := range []struct {
 		name, uid, receipt string
@@ -66,7 +67,8 @@ func TestToolExecutorReceivesConfiguredSessionUID(t *testing.T) {
 					}
 				}
 			}
-			opts := []controller.Option{controller.WithToolExecutor(func(_ context.Context, uid string, call api.ToolCall) (api.ToolResult, error) {
+			opts := []controller.Option{controller.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+				uid := scope.SessionUID
 				if uid != tc.uid || call.ID != "call" || call.Tool != "charge" || call.Mediation != api.MediationControllerMediated || call.IdempotencyKey != "shared-key" {
 					return api.ToolResult{}, fmt.Errorf("executor session = %q, want %q; call = %+v", uid, tc.uid, call)
 				}
@@ -76,6 +78,12 @@ func TestToolExecutorReceivesConfiguredSessionUID(t *testing.T) {
 				opts = append(opts, controller.WithSessionUID(tc.uid))
 			}
 			c, err := controller.New(log, echoModel, opts...)
+			if tc.uid == "" {
+				if !errors.Is(err, controller.ErrMissingSessionUID) {
+					t.Fatalf("New = %v, want missing session UID error", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -93,5 +101,40 @@ func TestToolExecutorReceivesConfiguredSessionUID(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestUnscopedToolExecutorDoesNotFenceExistingController(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []controller.Option
+	}{
+		{name: "omitted"},
+		{name: "explicit empty", opts: []controller.Option{controller.WithSessionUID("")}},
+		{name: "overridden empty", opts: []controller.Option{controller.WithSessionUID("session"), controller.WithSessionUID("")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := memStore(t)
+			active, err := controller.New(log, echoModel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := append(tc.opts, controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				t.Fatal("unscoped executor ran")
+				return api.ToolResult{}, nil
+			}))
+			if c, err := controller.New(log, echoModel, opts...); c != nil || !errors.Is(err, controller.ErrMissingSessionUID) {
+				t.Fatalf("New = %v, %v; want nil, ErrMissingSessionUID", c, err)
+			}
+			if head, err := log.Head(); err != nil || head != 0 {
+				t.Fatalf("invalid constructor wrote journal: head=%d, err=%v", head, err)
+			}
+			if err := active.Exec(t.Context(), &outputHarness{text: "still valid"}, nil, 0); err != nil {
+				t.Fatalf("invalid constructor fenced existing writer: %v", err)
+			}
+		})
+	}
+	if _, err := controller.New(memStore(t), echoModel, controller.WithToolExecutor(nil)); err != nil {
+		t.Fatalf("nil executor requires no session binding: %v", err)
 	}
 }

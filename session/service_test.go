@@ -905,11 +905,11 @@ func TestSessionsRegistryHostToolExec(t *testing.T) {
 			var uid string
 			var opts []placement.Option
 			if tc.configured {
-				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, sessionUID string, call api.ToolCall) (api.ToolResult, error) {
-					if sessionUID != uid {
-						return api.ToolResult{}, fmt.Errorf("executor session = %q, want %q", sessionUID, uid)
+				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+					if scope.SessionUID != uid {
+						return api.ToolResult{}, fmt.Errorf("executor session = %q, want %q", scope.SessionUID, uid)
 					}
-					log := store.Session(sessionUID)
+					log := store.Session(scope.SessionUID)
 					recs, err := log.Read(1)
 					if err != nil {
 						return api.ToolResult{}, err
@@ -984,9 +984,9 @@ func TestSessionsRegistryHostToolResume(t *testing.T) {
 			var uid string
 			var opts []placement.Option
 			if !completedPrefix {
-				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, sessionUID string, call api.ToolCall) (api.ToolResult, error) {
-					if sessionUID != uid {
-						return api.ToolResult{}, fmt.Errorf("resume executor session = %q, want %q", sessionUID, uid)
+				opts = append(opts, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+					if scope.SessionUID != uid {
+						return api.ToolResult{}, fmt.Errorf("resume executor session = %q, want %q", scope.SessionUID, uid)
 					}
 					if call.ID != "service-call" || call.IdempotencyKey != "original-service-key" || call.Tool != "charge" || call.Args["account"] != "a1" {
 						return api.ToolResult{}, fmt.Errorf("resume lost recorded intent: %+v", call)

@@ -15,6 +15,8 @@ import (
 // switches to LIVE (invoke + record) for anything past the crash point, then appends END. If the
 // last turn is complete or the log is empty, it is a no-op (returns false). A start marker with
 // missing or inconsistent input completeness information is rejected before the harness runs.
+// An unresolved tool intent inherited across a fork returns ErrInheritedToolIntent before running
+// the harness or appending events: the child's dedup namespace cannot recover the parent's effect.
 func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, recordedEffectCount int
@@ -52,6 +54,30 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	execution := executions[len(executions)-1]
 	if err := execution.validateInputs(); err != nil {
 		return false, err
+	}
+	// An inherited intent belongs to the parent's dedup namespace, not this controller's UID.
+	// Check before running the harness so even a harness that handles errors cannot bypass it.
+	unresolvedTools := 0
+	var precedingCall *api.ToolCall
+	for _, event := range events[execution.start:] {
+		if event.Kind == api.EventLifecycle && event.Lifecycle != nil && event.Lifecycle.Kind == api.LifecycleFork && unresolvedTools > 0 {
+			return false, fmt.Errorf("%w: execution %q", ErrInheritedToolIntent, execution.id)
+		}
+		if event.ExecutionID != execution.id {
+			continue
+		}
+		switch event.Kind {
+		case api.EventToolCall:
+			unresolvedTools++
+			precedingCall = event.ToolCall
+		case api.EventToolResult:
+			if precedingCall != nil && event.Result != nil && event.Result.ID == precedingCall.ID {
+				unresolvedTools--
+			}
+			precedingCall = nil
+		case api.EventModelCall, api.EventOutput, api.EventUsage:
+			precedingCall = nil
+		}
 	}
 	sink := &resumeSink{
 		live:   liveSink{c: c, executionID: execution.id},
