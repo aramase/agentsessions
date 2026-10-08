@@ -177,8 +177,66 @@ Each tool declares how it executes (`api.Mediation`):
 | `CONTROLLER_MEDIATED` | The host / gateway. You call `sink.ToolCall(...)` and block for the result. | Tools needing central authz, policy, or audit. |
 | `REQUIRES_APPROVAL` | The host, after a human or policy approval gate. | Sensitive or destructive actions. |
 
-For any side-effecting tool, set `ToolCall.IdempotencyKey`. If a crash forces an at-most-once re-drive
-(I3), the key lets the tool side dedup so the effect happens once, not twice.
+For any side-effecting tool, the harness chooses `ToolCall.IdempotencyKey`, unique only within its
+session. If a crash forces an at-most-once re-drive (I3), the tool side dedups on **session UID plus
+idempotency key** to avoid repeating the effect during recovery of that same session. Different
+sessions may reuse the same key; a forked child has a different dedup namespace. Resume refuses an
+unfinished inherited execution if an inherited tool intent still lacks a matching result at the
+journal head, rather than re-driving the parent's effect under the child UID.
+
+#### Host composition for controller-mediated tools
+
+A custom Sessions host supplies its executor on the Placer registered for that harness. The same
+executor is used for live `Exec` and interrupted-turn `Resume`; no Sessions RPC field is needed.
+`controller.ToolFunc` has signature
+`func(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error)`.
+`scope.SessionUID` is the nonempty host-bound session identity, not a harness-supplied value.
+The Placer binds the session UID for both paths. Given a backend serving your harness, a model,
+and your host executor:
+
+```go
+import (
+    "github.com/aramase/agentsessions/controller"
+    "github.com/aramase/agentsessions/placement"
+    "github.com/aramase/agentsessions/session"
+    "github.com/aramase/agentsessions/sqlitelog"
+)
+
+func newToolService(store *sqlitelog.Store, backend placement.Backend,
+    model controller.ModelFunc, executeTool controller.ToolFunc) (*session.Service, error) {
+    placer := placement.New(backend, model, placement.WithToolExecutor(executeTool))
+    registry, err := placement.NewRegistry("my-agent", map[string]*placement.Placer{
+        "my-agent": placer,
+    })
+    if err != nil {
+        return nil, err
+    }
+    return session.NewService(store, registry), nil
+}
+```
+
+Without an executor, controller-mediated calls fail closed after recording intent and perform no
+host effect. Every such call requires a nonempty idempotency key, rejected before intent if absent.
+The controller records intent before invoking the executor and stamps the result ID with the call
+ID. Completed intent/result pairs are served during recovery without invoking an executor; intent
+without a result is re-driven using the **original recorded key** only within the same session.
+Fork still copies the requested prefix, but Resume returns `controller.ErrInheritedToolIntent`
+before running the harness or appending any event if the unfinished execution has inherited tool
+intents still unresolved at the journal head. This includes legacy turns without `EXECUTION_START`.
+`Sessions.Resume` reports `FAILED_PRECONDITION`: fork at or after the matching `TOOL_RESULT`, or
+Exec a new turn. Completed inherited pairs are served from the journal without invoking the executor,
+including legacy results recorded after the fork marker. An intent first written by the child after
+the fork is not inherited and can be re-driven under the child's UID.
+
+The executor owns tool/resource authorization scoped to the supplied `scope.SessionUID` and durable
+deduplication keyed by `(scope.SessionUID, call.IdempotencyKey)`, never by the harness-chosen key alone.
+If an effect succeeds but its journal result append fails, recovery must retrieve that session's
+original receipt rather than repeat the effect. Keep that receipt/dedup state durable across host
+restarts; an in-memory cache is insufficient. Direct controller users must configure
+`controller.WithSessionUID(uid)` with a nonempty UID; `controller.New` returns
+`controller.ErrMissingSessionUID` for an unscoped non-nil executor without advancing the log's fence.
+Journaling alone does not provide exactly-once external delivery. `REQUIRES_APPROVAL` still fails
+closed because its approval gate is unimplemented. The stock daemon does not configure a tool executor.
 
 ### Rule 5: pass reasoning parts back verbatim
 
