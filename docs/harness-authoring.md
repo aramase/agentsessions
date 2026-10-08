@@ -298,8 +298,8 @@ req := &v1.ExecRequest{
 ```
 
 Pass `req` to `SessionsClient.Exec` (or `client.Client.Sessions().Exec`) and drain the stream to
-completion, as for any execution. No CLI flag, SDK field, environment variable, or session setting
-is required.
+completion, as for any execution. Supply config through the generated `ExecRequest.Config` field,
+not `client.ExecOptions`; no additional environment variable or session setting is needed.
 
 **Config is journaled in plaintext for deterministic replay.** Treat prompts as recorded
 instructions, not credentials; keep provider keys on the host. A system prompt grants no
