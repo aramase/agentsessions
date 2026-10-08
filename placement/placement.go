@@ -119,6 +119,14 @@ type sessionSet struct {
 	shared bool
 }
 
+// busy reports whether any session has an open harness connection or a checkpoint in progress.
+// Entries are deleted when they drop to zero, so an idle set is empty.
+func (s *sessionSet) busy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.live) > 0 || len(s.checkpoints) > 0
+}
+
 // Dialer opens a Harness.Connect client to the harness an incarnation names and returns a closer for
 // the connection. runtime/local passes a unix-socket address (unix://…); substrate passes the
 // atenet-router's host:port, dialed over h2c, plus CallMetadata naming the actor, which the client
@@ -495,7 +503,7 @@ type liveHarness struct {
 	once    sync.Once
 	close   func() error
 	err     error
-	// superseded is set, under Placer.mu, by the checkpoint that collects this connection, BEFORE
+	// superseded is set, under sessionSet.mu, by the checkpoint that collects this connection, BEFORE
 	// that checkpoint mints its fence. A turn whose fence is newer than the checkpoint's is not
 	// fenced by it, but is guaranteed to observe this flag, so it checks the flag after minting.
 	superseded atomic.Bool
@@ -639,12 +647,14 @@ func (p *Placer) endCheckpoint(sessionUID string) {
 // Ending a stream only cancels the turn's context, and a turn that registered but has not yet
 // minted its fence still mints one. So endHarnesses then waits, bounded by ctx, until every ended
 // turn has made its fence call or returned. After it returns nil, no turn run by a Placer sharing
-// this session set can mint a fence on the session, and the fence the caller mints next is the newest one the checkpoint will
-// see. If ctx ends first, it returns an error and the caller must abort before checkpointing.
+// this session set can mint a fence on the session, and the fence the caller mints next is the
+// newest one the checkpoint will see. If ctx ends first, it returns an error and the caller must
+// abort before checkpointing.
 //
 // It covers connections opened by every Placer sharing this Placer's session set: all Placers of
-// one Registry, so a turn routed by ExecRequest.harness to another harness's Placer is ended too. A turn driven by another process is fenced by the log as before, but its stream stays
-// open until that turn next touches the log or returns.
+// one Registry, so a turn routed by ExecRequest.harness to another harness's Placer is ended too.
+// A turn driven by another process is fenced by the log as before, but its stream stays open until
+// that turn next touches the log or returns.
 func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*liveHarness) (err error) {
 	if len(open) == 0 {
 		return nil

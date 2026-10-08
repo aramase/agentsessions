@@ -479,6 +479,91 @@ func testCheckpointRefusesANewTurn(t *testing.T, checkpoint func(*placement.Plac
 	}
 }
 
+// NewRegistry replaces each Placer's session set. Replacing it under a running turn would orphan
+// the turn's connection, so a checkpoint through the registry would neither end nor refuse it.
+// NewRegistry must reject a Placer with a turn in progress and accept it again once the turn ends.
+func TestNewRegistryRejectsAPlacerWithATurnInProgress(t *testing.T) {
+	hs := startHarnessServer(t, echoagent.Harness{})
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("s1")
+
+	modelCalled := make(chan struct{})
+	model := func(ctx context.Context, _ api.ModelRequest) (api.ModelResponse, error) {
+		close(modelCalled)
+		<-ctx.Done()
+		return api.ModelResponse{}, ctx.Err()
+	}
+	p := placement.New(&routedBackend{address: hs.addr, desc: memDescriptor}, model)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	execErr := make(chan error, 1)
+	go func() {
+		_, err := p.Exec(ctx, log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		execErr <- err
+	}()
+	select {
+	case <-modelCalled:
+	case err := <-execErr:
+		t.Fatalf("turn returned before parking on the model call: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("turn never reached the model call")
+	}
+
+	if _, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": p}); err == nil {
+		t.Fatal("NewRegistry accepted a placer with a turn in progress")
+	}
+	cancel()
+	select {
+	case <-execErr:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the cancelled turn never returned")
+	}
+	if _, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": p}); err != nil {
+		t.Fatalf("NewRegistry rejected a placer whose only turn has ended: %v", err)
+	}
+}
+
+// A stateful fork's checkpoint holds a mark in the set that refuses new turns, and a Suspend holds
+// the session guard that refuses overlapping operations; NewRegistry must not drop either.
+func TestNewRegistryRejectsAPlacerWithACheckpointInProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		checkpoint func(*placement.Placer, *sqlitelog.Log, string) error
+	}{
+		{"suspend", suspendCheckpoint},
+		{"fork", forkCheckpoint},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			log := store.Session("s1")
+
+			backend := &routedBackend{desc: memDescriptor}
+			p := placement.New(backend, echoagent.Model)
+			var regErr error
+			backend.onSnapshot = func() {
+				_, regErr = placement.NewRegistry("echo", map[string]*placement.Placer{"echo": p})
+			}
+			if err := tc.checkpoint(p, log, "s1"); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if regErr == nil {
+				t.Fatalf("NewRegistry accepted a placer with a %s in progress", tc.name)
+			}
+			if _, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": p}); err != nil {
+				t.Fatalf("NewRegistry rejected a placer whose %s has ended: %v", tc.name, err)
+			}
+		})
+	}
+}
+
 // The other interleaving: the turn passed every early check and is about to register its connection
 // when the fork's checkpoint begins. Registration must still be refused. (Suspend cannot begin while
 // a turn is past its early checks: the turn holds the session guard.)
