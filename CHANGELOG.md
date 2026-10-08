@@ -45,6 +45,15 @@ provide.
   reclaims a socket file left behind by a crashed instance. It never removes a socket another
   process created, and it refuses a lock file that is a symlink, a hard link, or owned by another
   user.
+- `HarnessRegistry` API (`api/harness_registry.proto`): register, get, list and retire harnesses on a
+  running host. A registration is immutable and identified by its name and `spec_digest`. Retiring a
+  harness refuses new sessions while existing sessions keep running, resuming and forking;
+  registering the same spec again reactivates it. When a spec sets `descriptor_id`, `Exec`, `Resume`
+  and `Fork` are refused with `FAILED_PRECONDITION`, before anything is journaled, if the harness
+  reports another id (`placement.WithDescriptorID`). A harness added with `placement.Registry.Add`
+  shares the Registry's session guard, so overlapping calls for one session through it and a static
+  harness are `ABORTED` too. It is an admin API and `agentsessionsd` does not serve it yet: it is
+  available in-process through `session.NewHarnessRegistry` (see [security.md](docs/security.md)).
 
 ### Compatibility
 
@@ -123,6 +132,22 @@ provide.
   the harness re-runs that execution. The chat harness previously ignored both. Reading recorded
   events through `Sessions.Replay` is unchanged, as is Resume of an already-completed turn.
   No tagged release is affected.
+- The SQLite journal schema moves from version 1 to version 2: `harnesses` and
+  `reserved_harness_names` tables and an index on `sessions(harness)`. A v0.1.x database migrates
+  in place, in one transaction, the first time this release opens it. The migration reserves every
+  harness name an existing session uses, since all of them were built-in, so no host can register
+  one later. Downgrade is refused: v0.1.0 through v0.1.2 fail to open a version 2 database
+  with "unsupported database schema". Back up the journal before upgrading if you may need to roll
+  back. A database stamped with a negative schema version is refused.
+- `ExecRequest.harness` cannot move a session onto or off a registered harness for one turn; that is
+  `FAILED_PRECONDITION`. Overrides between static harnesses (built-in or given with `--harness`)
+  are unchanged.
+- The `echo` and `chat` names are reserved for the built-in harnesses, including `chat` on a host
+  started without `--model`, and so is every name given to `agentsessionsd --harness`.
+  `agentsessionsd` and embedded `agentctl` record the names they run in the journal at startup, so
+  no host sharing it can register them later, and refuse to start on a journal that already holds a
+  registration, active or retired, under one of them. Opening a journal with either binary
+  therefore writes to it. A reservation is permanent.
 - Every new execution records `EXECUTION_START`, including default-config turns, so interrupted
   recovery can reject partially committed inputs. Binaries older than this release fail chain
   verification with a `content_hash` mismatch for sessions containing this event. Rollback is not

@@ -107,3 +107,51 @@ func TestRegistryResumeGuardsInvocationSelectionThroughRecovery(t *testing.T) {
 		t.Fatalf("Registry Resume retained its guard after completion: %v", err)
 	}
 }
+
+// WithResolvedHarnessCheck sees the name Resume resolved, the recorded one rather than the
+// session's default, and its error stops recovery before anything is restored or journaled.
+func TestRegistryResumeResolvedHarnessCheck(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("checked")
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []api.Event{
+		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(1), Harness: "recorded-alias"}},
+		{Kind: api.EventInput, Message: api.TextMessage("user", "hi")},
+	}
+	for i, ev := range events {
+		ev.ExecutionID = "pending"
+		if _, err := log.Append(int64(i), fence, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := placement.NewRegistry("default", map[string]*placement.Placer{"default": newPlacer(t), "recorded-alias": newPlacer(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := errors.New("refused by the host")
+	var seen []string
+	check := func(name string) error {
+		seen = append(seen, name)
+		return refused
+	}
+	if err := r.Resume(t.Context(), log, "checked", "default", placement.WithResolvedHarnessCheck(check)); err != refused {
+		t.Fatalf("Resume = %v, want the check's error unchanged", err)
+	}
+	if !reflect.DeepEqual(seen, []string{"recorded-alias"}) {
+		t.Fatalf("check saw %v, want the recorded name only", seen)
+	}
+	if head, err := log.Head(); err != nil || head != int64(len(events)) {
+		t.Fatalf("a refused Resume changed the log: head %d, %v", head, err)
+	}
+	// The guard is released: a Resume without the refusal proceeds past routing.
+	if err := r.Resume(t.Context(), log, "checked", "default", placement.WithResolvedHarnessCheck(func(string) error { return nil })); errors.Is(err, placement.ErrSessionBusy) {
+		t.Fatalf("the refused Resume kept the session guard: %v", err)
+	}
+}

@@ -39,6 +39,13 @@ var ErrUnplaceable = errors.New("placement: harness cannot be placed on this run
 // session.Service surfaces it as codes.Aborted, independently of any backend transport status.
 var ErrSessionBusy = errors.New("placement: another operation is in progress for this session")
 
+// ErrDescriptorMismatch is returned when the harness reports a descriptor id other than the one the
+// Placer expects (WithDescriptorID): the address reaches a different harness than the one that was
+// configured. Like ErrUnplaceable it is raised by the admission check, before any compute is
+// provisioned or anything is written to the log, and again on the turn's own connection for a
+// LiveDescriber backend. session.Service surfaces it as codes.FailedPrecondition.
+var ErrDescriptorMismatch = errors.New("placement: harness is not the expected one")
+
 // ErrHarnessUnavailable is returned when the harness could not be reached to describe itself during
 // admission or the controller's connected-harness identity check. Neither check runs the harness or
 // appends journal records; the connected check may follow compute allocation and fence minting.
@@ -85,14 +92,16 @@ type LiveDescriber interface {
 
 // Placer owns the incarnation lifecycle: Create the compute, mint+bind the fence, drive the controller.
 type Placer struct {
-	backend Backend
-	model   controller.ModelFunc
-	stream  controller.StreamFunc
-	tool    controller.ToolFunc
-	dial    Dialer
-	logger  *slog.Logger
+	backend      Backend
+	model        controller.ModelFunc
+	stream       controller.StreamFunc
+	tool         controller.ToolFunc
+	dial         Dialer
+	logger       *slog.Logger
+	descriptorID string
 
-	// Private for a standalone Placer; NewRegistry wires one shared guard before use.
+	// Private for a standalone Placer; NewRegistry and Registry.Add wire the Registry's shared
+	// guard before use.
 	guard *sessionGuard
 }
 
@@ -191,6 +200,18 @@ func WithToolExecutor(fn controller.ToolFunc) Option { return func(p *Placer) { 
 // WithLogger enables structured operational logs. Message contents and fence tokens are never logged.
 func WithLogger(logger *slog.Logger) Option { return func(p *Placer) { p.logger = logger } }
 
+// WithDescriptorID makes the Placer refuse a harness whose Describe reports a HarnessDescriptor.id
+// other than id, with ErrDescriptorMismatch, wherever it applies the CanPlace gate: Exec, Resume and
+// Fork, and the turn's own connection for a LiveDescriber backend. Empty, the default, means the id
+// is not checked.
+//
+// The id is what the harness reports about itself, so the check catches an address that reaches the
+// wrong harness, not a harness that lies about what it is. It is not authentication.
+func WithDescriptorID(id string) Option { return func(p *Placer) { p.descriptorID = id } }
+
+// DescriptorID returns the id set with WithDescriptorID, or "" when the Placer does not check it.
+func (p *Placer) DescriptorID() string { return p.descriptorID }
+
 // New builds a Placer over a compute backend and the live model.
 func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 	p := &Placer{
@@ -213,6 +234,12 @@ func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 // Refuse overlap rather than queueing a request whose cursor may be stale by the time it runs.
 func (p *Placer) trySessionLock(sessionUID string) (func(), error) {
 	return p.guard.tryLock(sessionUID)
+}
+
+// Describe asks the placed harness for its descriptor, the same call Exec gates placement on. It
+// provisions nothing.
+func (p *Placer) Describe(ctx context.Context) (api.Descriptor, error) {
+	return p.backend.Describe(ctx)
 }
 
 // Exec places one turn: Create the incarnation, mint the fence from the log and stamp it on the
@@ -327,8 +354,9 @@ func (p *Placer) recheck(ctx context.Context, sessionUID string, har api.Harness
 	return err
 }
 
-// gate describes the harness with describe and applies CanPlace, mapping a harness that cannot be
-// described to ErrHarnessUnavailable or ErrAdmissionInterrupted.
+// gate describes the harness with describe, refuses one that is not the expected harness
+// (WithDescriptorID), and applies CanPlace, mapping a harness that cannot be described to
+// ErrHarnessUnavailable or ErrAdmissionInterrupted.
 func (p *Placer) gate(ctx context.Context, sessionUID, op string, describe func(context.Context) (api.Descriptor, error)) (desc api.Descriptor, err error) {
 	resolveFinished := observability.StartDebug(ctx, p.logger, "placement", op, "session_uid", sessionUID)
 	// Bound the check on its own. A harness that accepts the connection and then never answers
@@ -340,6 +368,18 @@ func (p *Placer) gate(ctx context.Context, sessionUID, op string, describe func(
 	if err != nil {
 		err = describeError(ctx, err, dctx.Err() != nil)
 		resolveFinished(err, "error_kind", "describe_harness_failed")
+		return api.Descriptor{}, err
+	}
+	// Identity before capabilities: a harness that is not the expected one is refused for that,
+	// whatever it declares.
+	if p.descriptorID != "" && desc.ID != p.descriptorID {
+		err = fmt.Errorf("%w: expected descriptor id %q, the harness reports %q", ErrDescriptorMismatch, p.descriptorID, desc.ID)
+		resolveFinished(err,
+			"error_kind", "descriptor_mismatch",
+			"decision", "refused",
+			"harness_id", desc.ID,
+			"expected_harness_id", p.descriptorID,
+		)
 		return api.Descriptor{}, err
 	}
 	if !controller.CanPlace(desc.Capabilities, p.backend.Capabilities()) {
@@ -574,6 +614,8 @@ func placementErrorKind(err error) string {
 		return ""
 	case errors.Is(err, ErrUnplaceable):
 		return "unplaceable"
+	case errors.Is(err, ErrDescriptorMismatch):
+		return "descriptor_mismatch"
 	case errors.Is(err, ErrHarnessUnavailable):
 		return "harness_unavailable"
 	case errors.Is(err, ErrSessionBusy), errors.Is(err, eventlog.ErrConflict):

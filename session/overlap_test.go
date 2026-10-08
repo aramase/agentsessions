@@ -17,6 +17,7 @@ import (
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
+	"github.com/aramase/agentsessions/sqlitelog"
 	"github.com/aramase/agentsessions/wire"
 )
 
@@ -147,6 +148,92 @@ func TestSessionOverlapAcrossRegistryPlacers(t *testing.T) {
 		t.Fatal(err)
 	}
 	testSessionOverlap(t, newClientWithRegistry(t, registry), h, "override")
+}
+
+// A Placer added at runtime shares the session guard of the Placers given to NewRegistry. A turn
+// through the added Placer holds the session, so the service's calls, which route to the recorded
+// static harness, are refused with Aborted instead of running beside it.
+func TestSessionOverlapWithAddedPlacer(t *testing.T) {
+	h := &overlapHarness{entered: make(chan struct{}), release: make(chan struct{}, 1)}
+	t.Cleanup(func() { close(h.release) })
+	recorded, added := local.New(echoagent.Harness{}), local.New(h)
+	t.Cleanup(func() { _ = recorded.Close() })
+	t.Cleanup(func() { _ = added.Close() })
+	registry, err := placement.NewRegistry("recorded", map[string]*placement.Placer{
+		"recorded": placement.New(recorded, echoagent.Model),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addedPlacer := placement.New(added, echoagent.Model)
+	if err := registry.Add("added", addedPlacer); err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	c := serveRegistry(t, store, registry)
+
+	uid := mustCreate(t, c)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	log := store.Session(uid)
+	head, err := log.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := make(chan error, 1)
+	go func() {
+		_, err := addedPlacer.Exec(ctx, log, uid, []api.Message{*api.TextMessage("user", "first")}, head)
+		first <- err
+	}()
+	select {
+	case <-h.entered:
+	case err := <-first:
+		t.Fatalf("first execution ended before reaching the harness: %v", err)
+	case <-ctx.Done():
+		t.Fatal("first execution did not reach the harness")
+	}
+	before, err := c.GetSession(ctx, &v1.GetSessionRequest{Uid: uid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []string{"Exec", "Suspend", "Resume"} {
+		t.Run(operation, func(t *testing.T) {
+			var err error
+			switch operation {
+			case "Exec":
+				stream, execErr := c.Exec(ctx, &v1.ExecRequest{
+					Session: uid,
+					Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "overlap"))},
+				})
+				err = execErr
+				if err == nil {
+					err = drainExec(stream)
+				}
+			case "Suspend":
+				_, err = c.Suspend(ctx, &v1.SuspendRequest{Session: uid})
+			case "Resume":
+				_, err = c.Resume(ctx, &v1.ResumeRequest{Session: uid})
+			}
+			if status.Code(err) != codes.Aborted {
+				t.Errorf("overlapping %s: want Aborted, got %v", operation, err)
+			}
+			after, err := c.GetSession(ctx, &v1.GetSessionRequest{Uid: uid})
+			if err != nil || after.GetLastSeq() != before.GetLastSeq() || after.GetComputeState() != before.GetComputeState() {
+				t.Errorf("overlapping %s changed the journal projection: %v, %v", operation, after, err)
+			}
+		})
+	}
+	h.release <- struct{}{}
+	if err := <-first; err != nil {
+		t.Fatalf("rejected overlaps disrupted the first execution: %v", err)
+	}
+	if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: uid}); err != nil {
+		t.Fatalf("suspend after execution: %v", err)
+	}
 }
 
 // Exec uses the requested override; Suspend and Resume resolve the recorded harness instead.

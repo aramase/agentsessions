@@ -2,6 +2,8 @@ package main
 
 import (
 	"net"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -9,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/sqlitelog"
 	"github.com/aramase/agentsessions/wire"
 )
 
@@ -82,4 +85,34 @@ func (s *execRecorder) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) 
 		Metadata: &v1.ResourceMetadata{Uid: "session-uid"},
 		Harness:  req.GetHarness(),
 	}}})
+}
+
+// Embedded mode refuses a journal in which another host registered the harness name it serves, and
+// opens one whose registrations use other names.
+func TestEmbeddedRefusesRegistrationCollision(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		wantErr bool
+	}{
+		{name: "echo", wantErr: true},
+		{name: "suite-agent"},
+	} {
+		journal := filepath.Join(t.TempDir(), "journal.db")
+		store, err := sqlitelog.Open(journal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.RegisterHarness(sqlitelog.HarnessRecord{Name: tc.name, UID: "u", Spec: "{}", SpecDigest: "d"}); err != nil {
+			t.Fatal(err)
+		}
+		_ = store.Close()
+		err = cmdList([]string{"--journal", journal})
+		if tc.wantErr {
+			if err == nil || !strings.Contains(err.Error(), "collides with a static harness name") {
+				t.Errorf("registration %q: got %v, want a collision error", tc.name, err)
+			}
+		} else if err != nil {
+			t.Errorf("registration %q: %v", tc.name, err)
+		}
+	}
 }

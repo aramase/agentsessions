@@ -2,6 +2,8 @@ package placement_test
 
 import (
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/aramase/agentsessions/harness/echoagent"
@@ -103,5 +105,68 @@ func TestRegistryNamesAreSorted(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("Names() = %v, want %v", got, want)
 		}
+	}
+}
+
+// Add makes a registered harness resolvable without touching the static entries, and never
+// replaces an entry or takes a reserved name.
+func TestRegistryAdd(t *testing.T) {
+	echo := newPlacer(t)
+	// echo is both static and reserved; ReservedNames lists it once.
+	r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": echo}, placement.WithReservedNames("chat", "echo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := newPlacer(t)
+	if err := r.Add("reg", reg); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.For("reg"); err != nil || got != reg {
+		t.Fatalf("For(reg) = %p, %v; want the added placer", got, err)
+	}
+	for _, name := range []string{"echo", "reg", "chat"} {
+		if err := r.Add(name, newPlacer(t)); !errors.Is(err, placement.ErrHarnessExists) {
+			t.Errorf("Add(%q) = %v, want ErrHarnessExists", name, err)
+		}
+	}
+	if got, _ := r.For("echo"); got != echo {
+		t.Fatal("Add replaced a static entry")
+	}
+	if !r.Static("echo") || r.Static("reg") || r.Static("chat") {
+		t.Fatal("Static must report only the entries given to NewRegistry")
+	}
+	if !r.Reserved("echo") || !r.Reserved("chat") || r.Reserved("reg") {
+		t.Fatal("Reserved must report static and reserved names only")
+	}
+	if got, want := r.ReservedNames(), []string{"chat", "echo"}; !slices.Equal(got, want) {
+		t.Fatalf("ReservedNames = %v, want %v", got, want)
+	}
+	if !r.Has("reg") || r.Has("chat") {
+		t.Fatal("Has must report resolvable names only")
+	}
+}
+
+// Lookups run concurrently with Add on a live host; -race checks the locking.
+func TestRegistryAddIsSafeAlongsideLookups(t *testing.T) {
+	r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": newPlacer(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newPlacer(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			_ = r.Add(fmt.Sprintf("h%d", i), p)
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		_, _ = r.For(fmt.Sprintf("h%d", i))
+		_ = r.Names()
+		_ = r.Has("h0")
+	}
+	<-done
+	if len(r.Names()) != 101 {
+		t.Fatalf("names = %d, want 101", len(r.Names()))
 	}
 }

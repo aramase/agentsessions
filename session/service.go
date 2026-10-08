@@ -39,6 +39,9 @@ type Service struct {
 	registry       *placement.Registry
 	logger         *slog.Logger
 	defaultProject string
+	// afterPinCheck, when set by a test, runs between the pin check and the override lookup in
+	// placerFor, so a test can land a registration in that window.
+	afterPinCheck func()
 }
 
 // Option configures a Service.
@@ -178,7 +181,16 @@ func (s *Service) createSession(uid string, meta sqlitelog.SessionMeta) (*v1.Ses
 		// somewhere that looks unrelated.
 		return nil, harnessError(err)
 	}
-	if err := s.store.PutSession(meta); err != nil {
+	// A new session is the one thing a retired harness refuses. The check runs in the insert's
+	// transaction, so once RetireHarness has returned no new session can land on the harness, even
+	// one whose create started first. A name that is not static must have a registration row.
+	if err := s.store.PutSessionOnActiveHarness(meta, !s.registry.Static(meta.Harness)); err != nil {
+		if errors.Is(err, sqlitelog.ErrHarnessRetired) {
+			return nil, status.Errorf(codes.FailedPrecondition, "create session: %v; it takes no new sessions, while existing sessions on it keep running", err)
+		}
+		if errors.Is(err, sqlitelog.ErrHarnessNameCollision) {
+			return nil, status.Errorf(codes.FailedPrecondition, "create session: %v in this journal; sessions on it are refused", err)
+		}
 		return nil, status.Errorf(codes.Internal, "create session: %v", err)
 	}
 	info, err := s.store.SessionInfo(uid)
@@ -258,26 +270,143 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 // The lookup is by stored harness rather than by a single configured one, which is what makes
 // Session.harness mean something. A session that names a harness this host does not serve fails
 // here instead of silently running on whatever the host happens to have wired.
+//
+// A registered harness pins its sessions. An override that differs from the recorded harness is
+// FailedPrecondition when either one is registered: an override onto a registered harness would
+// let any session run turns on it, retired or not, and a session created on a registration keeps
+// its turns on that registration. Between harnesses that are not registered, the documented
+// per-turn override is unchanged.
 func (s *Service) placerFor(uid, override string) (*placement.Placer, string, error) {
 	if uid == "" {
 		return nil, "", status.Error(codes.InvalidArgument, "session is required")
 	}
-	harness := override
-	if harness == "" {
-		info, err := s.store.SessionInfo(uid)
-		if err != nil {
-			return nil, "", sessionStoreError(err, uid)
+	info, err := s.store.SessionInfo(uid)
+	if err != nil {
+		if override != "" && errors.Is(err, sqlitelog.ErrSessionNotFound) {
+			// With no session there is no pin, so an unknown override is the caller's first
+			// mistake and stays InvalidArgument.
+			if _, rerr := s.registry.For(override); rerr != nil {
+				return nil, "", harnessError(rerr)
+			}
 		}
-		harness = info.Harness
+		return nil, "", sessionStoreError(err, uid)
 	}
+	harness := info.Harness
 	if harness == "" {
+		// A row with no harness predates harness selection and has always run on the default.
 		harness = s.registry.Default()
+	}
+	if err := s.checkStatic(harness); err != nil {
+		return nil, "", err
+	}
+	if override != "" && override != harness {
+		// The pin is checked before the override is resolved, so a session on a registered
+		// harness, or an override onto one, is FailedPrecondition whether this host serves that
+		// harness or not.
+		pinned, err := s.isRegistered(harness)
+		if err != nil {
+			return nil, "", err
+		}
+		if !pinned {
+			if pinned, err = s.isRegistered(override); err != nil {
+				return nil, "", err
+			}
+		}
+		if pinned {
+			return nil, "", status.Errorf(codes.FailedPrecondition, "session %q is pinned to harness %q; a turn cannot run on %q", uid, harness, override)
+		}
+		if s.afterPinCheck != nil {
+			s.afterPinCheck()
+		}
+		if _, err := s.registry.For(override); err != nil {
+			return nil, "", harnessError(err)
+		}
+		// A registration can commit and load between the pin check and the lookup. Every
+		// non-static entry in the registry was loaded from a committed registration, so this
+		// recheck closes that window without another store read.
+		if !s.registry.Static(override) {
+			return nil, "", status.Errorf(codes.FailedPrecondition, "session %q is pinned to harness %q; a turn cannot run on %q", uid, harness, override)
+		}
+		if err := s.checkStatic(override); err != nil {
+			return nil, "", err
+		}
+		harness = override
 	}
 	p, err := s.registry.For(harness)
 	if err != nil {
 		return nil, "", harnessError(err)
 	}
 	return p, harness, nil
+}
+
+// checkResumedHarness applies the routing rules to the harness Resume resolved for a session whose
+// stored harness is stored. A pending turn recorded on another harness ran as an override, so it is
+// refused, as Exec refuses that override, if either name is registered: a registered harness cannot
+// be borrowed for one turn, and the name may have been registered after the turn was recorded. A
+// turn recorded on another static harness still recovers. Registry.Resume has already resolved the
+// name to a static or a loaded registered entry, and a static entry never becomes registered, so
+// reading the registration state here cannot disagree with the entry that runs.
+func (s *Service) checkResumedHarness(uid, stored, name string) error {
+	if err := s.checkStatic(name); err != nil {
+		return err
+	}
+	if name == stored {
+		return nil
+	}
+	pinned, err := s.isRegistered(stored)
+	if err != nil {
+		return err
+	}
+	if !pinned {
+		if pinned, err = s.isRegistered(name); err != nil {
+			return err
+		}
+	}
+	if pinned {
+		return status.Errorf(codes.FailedPrecondition, "session %q is pinned to harness %q; its pending turn was recorded on %q and cannot resume there", uid, stored, name)
+	}
+	return nil
+}
+
+// checkStatic refuses a static harness that also has a registration row. A host sharing the journal
+// registered the name, so it means two harnesses: a session on it may be the other host's, pinned
+// to the registration, and a retired row would otherwise decide whether this host's static harness
+// takes new sessions. ReserveStaticHarnessNames keeps such a row from being written; this keeps a
+// host that did not reserve its names from routing through one.
+func (s *Service) checkStatic(name string) error {
+	if !s.registry.Static(name) {
+		return nil
+	}
+	_, err := s.store.Harness(name)
+	switch {
+	case err == nil:
+		return status.Errorf(codes.FailedPrecondition, "harness %q is a static harness on this host and a registered harness in the journal; sessions on it are refused", name)
+	case errors.Is(err, sqlitelog.ErrHarnessNotFound):
+		return nil
+	default:
+		return status.Errorf(codes.Internal, "resolve harness: %v", err)
+	}
+}
+
+// isRegistered reports whether name is a registered harness: one this host loaded, or one with a
+// registration row that another process added. A static name, or one this host neither serves nor
+// has a row for, is not.
+func (s *Service) isRegistered(name string) (bool, error) {
+	if s.registry.Static(name) {
+		return false, nil
+	}
+	if s.registry.Has(name) {
+		return true, nil
+	}
+	_, err := s.store.Harness(name)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sqlitelog.ErrHarnessNotFound):
+		return false, nil
+	default:
+		return false, status.Errorf(codes.Internal, "resolve harness: %v", err)
+	}
 }
 
 // harnessError reports an unservable harness as InvalidArgument. Naming a harness the host does
@@ -585,7 +714,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 // the caller knows a retry is meaningful.
 func forkError(err error) error {
 	switch {
-	case errors.Is(err, placement.ErrUnplaceable):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())
@@ -642,7 +771,22 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 		return nil, sessionStoreError(err, uid)
 	}
 	log := s.store.Session(uid)
-	if err := s.registry.Resume(ctx, log, uid, info.Harness); err != nil {
+	stored := info.Harness
+	if stored == "" {
+		stored = s.registry.Default()
+	}
+	// The registry resolves the pending turn's recorded harness, which can differ from the
+	// session's. Whichever name it picked gets the static-name collision rule, and a name that
+	// differs from the session's gets the pin rule Exec applies to an override.
+	var refused error
+	check := func(name string) error {
+		refused = s.checkResumedHarness(uid, stored, name)
+		return refused
+	}
+	if err := s.registry.Resume(ctx, log, uid, info.Harness, placement.WithResolvedHarnessCheck(check)); err != nil {
+		if refused != nil && err == refused {
+			return nil, refused
+		}
 		return nil, resumeError(err)
 	}
 	info, err = s.store.SessionInfo(uid)
@@ -662,7 +806,7 @@ func resumeError(err error) error {
 		return status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
 	case errors.Is(err, controller.ErrInvalidExecutionLog):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)
@@ -689,7 +833,7 @@ func execError(err error) error {
 	switch {
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())

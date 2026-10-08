@@ -105,6 +105,14 @@ func dial(cfg *config) (*client.Client, func(), error) {
 		_ = store.Close()
 		return nil, nil, err
 	}
+	// The journal may be shared with a host that registers harnesses. Reserving the names this
+	// embedded server runs refuses a journal where one is already registered, and stops one being
+	// registered later.
+	if err := session.ReserveStaticHarnessNames(store, registry); err != nil {
+		_ = backend.Close()
+		_ = store.Close()
+		return nil, nil, fmt.Errorf("journal %s: %w", cfg.journal, err)
+	}
 	svc := session.NewService(store, registry,
 		session.WithLogger(logger), session.WithDefaultProject(cfg.project))
 	sock := fmt.Sprintf("%s/agentctl-%d.sock", os.TempDir(), os.Getpid())

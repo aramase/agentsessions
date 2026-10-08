@@ -195,3 +195,42 @@ func TestSessionGuardDrainsAfterOperations(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistryAddSharesSessionGuard(t *testing.T) {
+	static := New(nil, nil)
+	r, err := NewRegistry("static", map[string]*Placer{"static": static})
+	if err != nil {
+		t.Fatal(err)
+	}
+	added, refused := New(nil, nil), New(nil, nil)
+	if err := r.Add("added", added); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Add("static", refused); !errors.Is(err, ErrHarnessExists) {
+		t.Fatalf("Add over a static name = %v, want ErrHarnessExists", err)
+	}
+
+	release, err := static.trySessionLock("session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := added.trySessionLock("session"); !errors.Is(err, ErrSessionBusy) {
+		t.Fatalf("added Placer while a static one holds the session = %v, want ErrSessionBusy", err)
+	}
+	// A refused Placer is not in the Registry and keeps its private guard.
+	own, err := refused.trySessionLock("session")
+	if err != nil {
+		t.Fatalf("refused Placer was wired to the Registry's guard: %v", err)
+	}
+	own()
+	release()
+
+	release, err = added.trySessionLock("session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := static.trySessionLock("session"); !errors.Is(err, ErrSessionBusy) {
+		t.Fatalf("static Placer while an added one holds the session = %v, want ErrSessionBusy", err)
+	}
+}
