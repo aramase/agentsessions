@@ -66,10 +66,16 @@ func turnError(ctx context.Context, err error) error {
 //     else idle.
 //   - release (a turn returns): drops the turn.
 //
-// A checkpoint refuses a starting turn instead of superseding it because placement cannot be safely
-// interrupted: a Create or Restore whose context is cancelled can return while the runtime still
-// completes it, waking compute the checkpoint has just captured. Refusing keeps the rule simple: no
-// runtime call that wakes the session's compute overlaps a checkpoint of it.
+// A checkpoint refuses a starting turn instead of superseding it, so the checkpoint never cancels a
+// Create or Restore and no runtime call this host has in flight overlaps a checkpoint. Whether a
+// runtime can still complete a Create or Restore after its context is cancelled is unverified; if
+// it can, cancelling one would wake compute the checkpoint has just captured. That residual case is
+// not closed here: a turn whose own context ends during Create or Restore (the caller goes away, or
+// the Exec deadline expires) is released when the call returns, and a checkpoint may then begin.
+//
+// Refusing trades liveness for that simplicity: while a Create or Restore is in flight, every
+// Suspend and stateful Fork of the session is refused, for as long as the call takes. Only the
+// turn's own context bounds it.
 type sessionSet struct {
 	mu       sync.Mutex
 	sessions map[string]*sessionState

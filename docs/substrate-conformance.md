@@ -96,8 +96,9 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   [One operation at a time per session](#one-operation-at-a-time-per-session)) keeps every turn,
   `Suspend` and `Fork` of this host off the parent from the moment the fork's checkpoint begins until
   every child is cloned, and a fork cannot begin while a turn's `Create` or `Restore` is still in
-  flight, so nothing this host runs wakes the parent in between. A request from outside the host
-  can, so the backend still checks on both sides of the tag that the parent is SUSPENDED holding the
+  flight, so no runtime call this host has in flight wakes the parent in between. A request from
+  outside the host can, and so might a `Create` or `Restore` abandoned just before the fork began
+  (see the contract below), so the backend still checks on both sides of the tag that the parent is SUSPENDED holding the
   snapshot the fork took (a suspend always writes a new one), and otherwise deletes the tag and fails
   with `ErrSnapshotSuperseded`, which `Fork` reports as `ABORTED`.
 - The backend takes one tag per child (`fork-<child-uid>`, atespace-scoped). Each tag owns a full
@@ -203,10 +204,17 @@ The contract:
 - **A turn is admitted before it places compute.** `Exec` takes its place before `Runtime.Create`
   and `Resume` before it reads the SUSPEND ref and calls `Runtime.Restore`. A checkpoint therefore
   sees every turn that could wake the actor, including one that has not reached the runtime yet.
-- **A checkpoint refuses a starting turn instead of superseding it.** A `Create` or `Restore` whose
-  context is cancelled can return while the runtime still completes it, waking compute the
-  checkpoint has just captured. So no call that wakes the session's compute overlaps a checkpoint of
-  it. Once the call returns, the turn is running and a checkpoint can supersede it.
+- **A checkpoint refuses a starting turn instead of superseding it.** The checkpoint never cancels a
+  `Create` or `Restore`, so no runtime call this host has in flight overlaps a checkpoint. Once the
+  call returns, the turn is running and a checkpoint can supersede it. A `Create` or `Restore`
+  abandoned because the turn's own context ended (the caller went away, or the `Exec` deadline
+  expired) is released when it returns, and a checkpoint may begin right after. Whether a runtime
+  can still complete such a call after it returns is unverified; the fork's tag check above covers
+  that case for a fork, and a `Suspend` has no equivalent check.
+- **Refusing trades liveness for simplicity.** While a turn's `Create` or `Restore` is in flight,
+  every `Suspend` and stateful `Fork` of the session is refused with `ABORTED`, for as long as the
+  call takes. Only the turn's own context bounds it: an `Exec` without a deadline whose placement
+  hangs blocks checkpoints of its session until the caller goes away.
 - **A checkpoint supersedes running turns.** It fences the log, ends their harness streams, and
   waits until each has minted its fence or returned (see the fork constraints above). The superseded
   turns return `ErrCheckpointing` wrapping `eventlog.ErrFenced`. Until they have returned the
