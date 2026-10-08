@@ -174,9 +174,10 @@ jobs:
         # Memory continuity across suspend/restore (the differentiator a plain pod cannot do), and
         # fork: fan out k children from one parent checkpoint and require each to continue at N+1
         # independently, the claim that a stateful fork clones RAM instead of silently cold-booting.
+        # Then two sessions' calls through the router at once, each of which must reach its own actor.
         env:
           COUNTER_SANDBOX_CLASS: microvm
-        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestFork' "${E2E_IMAGE}" 1500
+        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestFork|TestConcurrentSessionsReachTheirOwnActors' "${E2E_IMAGE}" 1500
 
       - name: Dump diagnostics on failure
         if: failure()

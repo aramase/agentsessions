@@ -316,6 +316,20 @@ the real per-child clone cost rather than leaving it asserted.
 `TestForkOfMemoryHarnessAtHistoricalSeqIsRefused` pins the honest-degradation half on real compute: a
 stateful fork behind the head is refused, and the refusal leaves the parent usable.
 
+### `TestConcurrentSessionsReachTheirOwnActors` — two sessions through one router
+
+Every actor shares the router's address, so the `ate-target-actor` metadata on each call is all that
+keeps two sessions apart. The test drives two counter sessions to different counts (A to 2, B to 1)
+through the `Placer`, then gives each one more turn at the same time over its own router connection.
+The host holds each session's `Output` until the other session's has arrived, so both calls are in
+flight through the router together. Asserts: A answers 3 and B answers 2. A call that reached the
+other session's actor would answer with the other count.
+
+`placement`'s `TestConcurrentSessionsThroughOneRouterReachTheirOwnActors` makes the same claim
+against an in-process router with both turns held inside their model calls, and
+`TestDefaultDialCallMetadataOverridesTheCaller` pins that a caller's own `ate-target-actor` value,
+in any letter case or number, never reaches the harness call.
+
 The counter's I4 contract is harness-side and unit-tested: it is increment-only and never reads
 `Start.History` (empty on a memory-restored sandbox). The neutrality contrast (`CanPlace` refuses the same
 capability on `runtime/local`, accepts on substrate) is `placement`'s `TestNeutralityThroughPlacer`.
@@ -337,10 +351,10 @@ waits for each golden snapshot.
 
 The suite runs in three passes against that one cluster, all through `hack/run-e2e-job.sh`: the
 stateless tier and the suspend-under-an-idle-stream check first, so a break there fails before the
-stateful tier runs, then the idle-stream route-timeout check, then the stateful tier and fork. Each
-pass is the same image with a different `-test.run`, and the Job's full `go test -v` output is
-echoed into the step, so a failure names the test and the assertion instead of surfacing an exit
-code. The nested-module test and core-neutrality gate also run per-PR in `.github/workflows/ci.yml`.
+stateful tier runs, then the idle-stream route-timeout check, then the stateful tier, fork and
+concurrent sessions. Each pass is the same image with a different `-test.run`, and the Job's full
+`go test -v` output is echoed into the step, so a failure names the test and the assertion instead
+of surfacing an exit code. The nested-module test and core-neutrality gate also run per-PR in `.github/workflows/ci.yml`.
 
 Reproduce:
 
@@ -400,7 +414,7 @@ for tier in echo counter; do
   hack/wait-worker-pool.sh "${tier}-gvisor"
 done
 HARNESS_IMAGE="${HARNESS_IMAGE}" ECHO_SANDBOX_CLASS=gvisor COUNTER_SANDBOX_CLASS=gvisor \
-  hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestFork' \
+  hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestFork|TestConcurrentSessionsReachTheirOwnActors' \
   "${E2E_IMAGE}" 1800
 ```
 
