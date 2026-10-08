@@ -223,13 +223,18 @@ flowchart LR
 
 Limits that come with the router, measured or read rather than assumed:
 
-- **Route timeout.** The router bounds streams by `--route-timeout` (5m by default, one global value)
-  plus a 30s idle timeout. `TestHarnessStreamIdlePastRouteTimeout` holds a Connect stream idle, as a
-  turn parked on a slow model call does. On kind the router reset it after **5m30s**, both at
-  `362637f9` and at `fc0e3586` (held idle for 6m30s): a pending `Recv` got `Internal` "stream terminated by RST_STREAM with error code: INTERNAL_ERROR".
-  Through the Placer, which does not read while the host's model call runs, the turn failed only when
-  the host sent its late reply, with a bare `EOF` (measured at `362637f9`). A turn that can run past 5m30s needs the router's
-  timeout raised until substrate offers a per-route or streaming timeout.
+- **Route timeout.** The router sets `--route-timeout` (5m by default, one global value) and a
+  route-level stream idle timeout 30s past it (`routeIdleTimeout` in
+  `cmd/atenet/internal/router/xds.go` at `fc0e3586`). `TestHarnessStreamIdlePastRouteTimeout` holds
+  a Connect stream idle, as a turn parked on a slow model call does. On kind the router tore the
+  stream down after **5m30s**, both at `362637f9` and at `fc0e3586` (held idle for 6m30s): a
+  pending `Recv` got `Internal` "stream terminated by RST_STREAM with error code: INTERNAL_ERROR",
+  not a 504. Through the Placer, which does not read while the host's model call runs, the turn
+  failed only when the host sent its late reply, with a bare `EOF` (measured at `362637f9`). So a
+  turn that runs longer than the route timeout fails once its stream has been idle past the idle
+  timeout (5m30s by default). Until substrate offers a per-route or streaming timeout (tracked in
+  substrate issue 1291), raise the router's `--route-timeout` above the longest turn; the idle
+  timeout follows it.
 - **Checkpoint drain.** Before it snapshots, the worker waits for the actor's in-flight requests to
   finish, and an idle open Connect stream is one of them. On kind at `362637f9`, `SuspendActor` under
   such a stream took **5m30s**: it waited for the router to reset the stream. `Placer.Suspend`
@@ -327,7 +332,8 @@ image the workflow built (`HARNESS_IMAGE`) and waits for each golden snapshot.
 
 The suite runs in three passes against that one cluster, all through `hack/run-e2e-job.sh`: the
 stateless tier and the suspend-under-an-idle-stream check first, so a break there fails before the
-expensive micro-VM staging, then the idle-stream route-timeout check, then the stateful tier and fork. Each pass is the same image with a different `-test.run`, and the Job's full `go test -v`
+expensive micro-VM staging, then the idle-stream route-timeout check, then the stateful tier and
+fork. Each pass is the same image with a different `-test.run`, and the Job's full `go test -v`
 output is echoed into the step, so a failure names the test and the assertion instead of surfacing an
 exit code. The nested-module test and core-neutrality gate also run per-PR in
 `.github/workflows/ci.yml`.
