@@ -239,13 +239,27 @@ var (
 	}
 )
 
+// checkpointPhase is a point at which a checkpoint owns the session.
+type checkpointPhase struct {
+	name string
+	// install installs fn on the backend call the checkpoint makes in this phase.
+	install func(*serialRig, func())
+}
+
+var (
+	// inSnapshot is Suspend's snapshot, or a stateful Fork's source checkpoint before its SUSPEND is
+	// recorded.
+	inSnapshot = checkpointPhase{name: "checkpointing", install: func(r *serialRig, fn func()) { r.backend.onSnapshot = once(fn) }}
+	// inClone is a stateful Fork's clone, after its checkpoint is recorded.
+	inClone = checkpointPhase{name: "forking", install: func(r *serialRig, fn func()) { r.backend.onFork = once(fn) }}
+)
+
 // checkpointKind is an entry point that checkpoints the session.
 type checkpointKind struct {
 	name string
 	run  func(*serialRig) error
-	// during installs fn where the checkpoint owns the session: inside Suspend's snapshot, and
-	// inside a stateful Fork's clone, after its checkpoint is recorded.
-	during func(*serialRig, func())
+	// phases are the points at which the checkpoint owns the session.
+	phases []checkpointPhase
 	// done checks the effect of a checkpoint that succeeded.
 	done func(*testing.T, *serialRig)
 }
@@ -254,7 +268,7 @@ var (
 	suspendCheckpointKind = checkpointKind{
 		name:   "Suspend",
 		run:    (*serialRig).suspend,
-		during: func(r *serialRig, fn func()) { r.backend.onSnapshot = once(fn) },
+		phases: []checkpointPhase{inSnapshot},
 		done: func(t *testing.T, r *serialRig) {
 			if _, _, _, _, running := r.backend.counts(); running {
 				t.Fatal("the actor is running after Suspend returned")
@@ -264,7 +278,7 @@ var (
 	forkCheckpointKind = checkpointKind{
 		name:   "Fork",
 		run:    (*serialRig).fork,
-		during: func(r *serialRig, fn func()) { r.backend.onFork = once(fn) },
+		phases: []checkpointPhase{inSnapshot, inClone},
 		done: func(t *testing.T, r *serialRig) {
 			if _, _, _, clones, _ := r.backend.counts(); clones != r.forks {
 				t.Fatalf("%d clone(s) for %d fork(s)", clones, r.forks)
@@ -300,8 +314,8 @@ func TestSerializeResumeAndSuspend(t *testing.T) {
 // The checkpoint must be refused with ErrTurnStarting before it captures anything, because that call
 // can complete after any snapshot taken now. Once the turn is placed and done, the checkpoint runs.
 //
-// Checkpoint first: while the checkpoint owns the session, the turn must be refused with
-// ErrCheckpointing before it reaches the runtime at all.
+// Checkpoint first: in every phase in which the checkpoint owns the session, the turn must be
+// refused with ErrCheckpointing before it reaches the runtime at all.
 func testSerializeTurnAndCheckpoint(t *testing.T, turn turnKind, cp checkpointKind) {
 	t.Run(turn.name+" placing compute first", func(t *testing.T) {
 		r := newSerialRig(t)
@@ -331,24 +345,26 @@ func testSerializeTurnAndCheckpoint(t *testing.T, turn turnKind, cp checkpointKi
 		cp.done(t, r)
 	})
 
-	t.Run(cp.name+" first", func(t *testing.T) {
-		r := newSerialRig(t)
-		r.suspended()
-		creates, restores, _, _, _ := r.backend.counts()
+	for _, phase := range cp.phases {
+		t.Run(cp.name+" first, "+phase.name, func(t *testing.T) {
+			r := newSerialRig(t)
+			r.suspended()
+			creates, restores, _, _, _ := r.backend.counts()
 
-		var turnErr error
-		cp.during(r, func() { turnErr = turn.run(r) })
-		if err := cp.run(r); err != nil {
-			t.Fatalf("%s: %v", cp.name, err)
-		}
-		if !errors.Is(turnErr, placement.ErrCheckpointing) {
-			t.Fatalf("%s during the %s returned %v, want ErrCheckpointing", turn.name, cp.name, turnErr)
-		}
-		if c, rs, _, _, _ := r.backend.counts(); c != creates || rs != restores {
-			t.Fatalf("the refused %s reached the runtime: %d Create(s), %d Restore(s)", turn.name, c-creates, rs-restores)
-		}
-		cp.done(t, r)
-	})
+			var turnErr error
+			phase.install(r, func() { turnErr = turn.run(r) })
+			if err := cp.run(r); err != nil {
+				t.Fatalf("%s: %v", cp.name, err)
+			}
+			if !errors.Is(turnErr, placement.ErrCheckpointing) {
+				t.Fatalf("%s while the %s was %s returned %v, want ErrCheckpointing", turn.name, cp.name, phase.name, turnErr)
+			}
+			if c, rs, _, _, _ := r.backend.counts(); c != creates || rs != restores {
+				t.Fatalf("the refused %s reached the runtime: %d Create(s), %d Restore(s)", turn.name, c-creates, rs-restores)
+			}
+			cp.done(t, r)
+		})
+	}
 }
 
 // Suspend vs Fork: neither may begin while the other owns the session. A Suspend during a fork's
@@ -370,6 +386,24 @@ func TestSerializeSuspendAndFork(t *testing.T) {
 		}
 		if _, _, snapshots, clones, running := r.backend.counts(); snapshots != 1 || clones != 0 || running {
 			t.Fatalf("snapshots=%d clones=%d running=%v, want only the Suspend's checkpoint", snapshots, clones, running)
+		}
+	})
+
+	t.Run("Suspend while the Fork checkpoints", func(t *testing.T) {
+		r := newSerialRig(t)
+		if err := r.exec(); err != nil {
+			t.Fatal(err)
+		}
+		var suspendErr error
+		r.backend.onSnapshot = once(func() { suspendErr = r.suspend() })
+		if err := r.fork(); err != nil {
+			t.Fatalf("fork: %v", err)
+		}
+		if !errors.Is(suspendErr, placement.ErrCheckpointing) {
+			t.Fatalf("Suspend during the Fork's checkpoint returned %v, want ErrCheckpointing", suspendErr)
+		}
+		if _, _, snapshots, clones, _ := r.backend.counts(); snapshots != 1 || clones != 1 {
+			t.Fatalf("snapshots=%d clones=%d, want the Fork's one checkpoint and one clone", snapshots, clones)
 		}
 	})
 
