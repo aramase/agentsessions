@@ -12,13 +12,13 @@ import (
 	"github.com/aramase/agentsessions/placement"
 )
 
-// TestStatelessReplayOnGVisor is the stateless tier on real substrate: create and place the echo
+// TestStatelessReplay is the stateless tier on real substrate: create and place the echo
 // harness, drive one turn through the atenet-router, then replay the journal through the same harness
 // and require it byte-identical with the model never invoked (I1).
 //
 // This is the claim that a session is reconstructible from its log alone, made against real compute
 // rather than an in-process fake.
-func TestStatelessReplayOnGVisor(t *testing.T) {
+func TestStatelessReplay(t *testing.T) {
 	f := newFixture(t, env("SUBSTRATE_ATESPACE", "e2e-replay"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

@@ -10,13 +10,15 @@
 # ActorTemplates are substrate API resources, not Kubernetes objects, so the suite creates its own
 # through Control with the harness image built here; the workflow only applies the WorkerPools.
 #
-# It runs in passes against one cluster so the cheap tier fails fast:
-#   1. stateless tier: gVisor + the echo harness + byte-identical replay.
+# Both tiers run on the micro-VM sandbox class, so the suite exercises the same isolation class in
+# both and covers the micro-VM path end to end. The class is staged once (substrate's
+# run-microvm-demo-kind recipe) before any tier runs. The suite then runs in passes against one
+# cluster so the cheap tier fails first:
+#   1. stateless tier: the echo harness + byte-identical replay, and a suspend under an idle stream.
 #   2. idle stream: one harness stream held idle past the router's 5m route timeout.
-#   3. stateful tier + fork, after the micro-VM class is staged (substrate's run-microvm-demo-kind
-#      recipe): the in-RAM counter driven to N, suspended to a memory snapshot and continued at N+1,
-#      which no journal replay could reconstruct, then forked k ways, with every child required to
-#      continue at N+1 independently.
+#   3. stateful tier + fork: the in-RAM counter driven to N, suspended to a memory snapshot and
+#      continued at N+1, which no journal replay could reconstruct, then forked k ways, with every
+#      child required to continue at N+1 independently.
 name: substrate-e2e
 
 on:
@@ -94,8 +96,8 @@ jobs:
           df -h /
 
       - name: Enable KVM
-        # Grant /dev/kvm via the udev rule substrate's CI uses: the stateful tier's micro-VM (kata + cloud-
-        # hypervisor) needs it, and create-kind-cluster.sh mounts it into the node. (gVisor does not.)
+        # Grant /dev/kvm via the udev rule substrate's CI uses: both tiers run on micro-VMs (kata +
+        # cloud-hypervisor), which need it, and create-kind-cluster.sh mounts it into the node.
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -113,13 +115,24 @@ jobs:
         # the digest-pinned reference, which substrate requires of an ActorTemplate image.
         run: echo "HARNESS_IMAGE=$(ko build ./cmd/harnessnode)" >> "$GITHUB_ENV"
 
-      - name: Apply the echo WorkerPool
-        # Resolve substrate's ateom-gvisor in its own module, substitute it into the manifest, apply.
+      - name: Deploy the micro-VM sandbox class
+        # Before any tier: both run on it. run-microvm-demo-kind stages the (cached) kata assets into
+        # the in-cluster object store and installs the cluster-scoped `microvm` SandboxConfig our
+        # templates use. It also re-applies ate-system (idempotent) and deploys substrate's own counter
+        # demo, whose micro-VM pool is only inert because our WorkerPool labels are repo-scoped: worker
+        # eligibility is label-matched cluster-wide with no namespace filter.
+        working-directory: _substrate
+        run: hack/run-microvm-demo-kind.sh
+
+      - name: Apply the echo micro-VM WorkerPool
+        # Resolve substrate's ateom-microvm in its own module once; the counter pool below reuses it.
         run: |
-          ATEOM_IMG="$(cd _substrate && ko build ./cmd/ateom-gvisor)"
-          sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
-              deploy/substrate/echo-workerpool.yaml | kubectl --context kind-kind apply -f -
-          hack/wait-worker-pool.sh echo-harness
+          ATEOM_MV_IMG="$(cd _substrate && ko build ./cmd/ateom-microvm)"
+          echo "ATEOM_MV_IMG=${ATEOM_MV_IMG}" >> "$GITHUB_ENV"
+          kubectl --context kind-kind apply -f deploy/substrate/namespace.yaml
+          sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
+              deploy/substrate/echo-microvm-workerpool.yaml | kubectl --context kind-kind apply -f -
+          hack/wait-worker-pool.sh echo-microvm
 
       - name: Build the conformance test binary image
         # `go test -c` rather than ko: this is a test binary, and ko builds main packages. Static
@@ -132,9 +145,11 @@ jobs:
           docker push "${E2E_IMAGE}"
 
       - name: Stateless-tier conformance (in-cluster Job)
-        # Runs before the expensive micro-VM staging below, so a break in the cheap tier fails fast.
-        # The suspend test checkpoints a session under an idle harness stream through the router.
-        run: hack/run-e2e-job.sh 'TestStatelessReplayOnGVisor|TestSuspendUnderAnIdleHarnessStream' "${E2E_IMAGE}" 900
+        # Runs before the stateful tier, so a break in the cheap tier fails first. The suspend test
+        # checkpoints a session under an idle harness stream through the router.
+        env:
+          ECHO_SANDBOX_CLASS: microvm
+        run: hack/run-e2e-job.sh 'TestStatelessReplay|TestSuspendUnderAnIdleHarnessStream' "${E2E_IMAGE}" 900
 
       - name: Idle harness stream across the router's route timeout (in-cluster Job)
         # A turn parked on a slow model call holds its Connect stream idle. The router bounds streams
@@ -144,21 +159,12 @@ jobs:
         # push, nightly and manual runs only, not on every pull request.
         if: github.event_name != 'pull_request'
         env:
+          ECHO_SANDBOX_CLASS: microvm
           E2E_IDLE_GAP: 6m30s
         run: hack/run-e2e-job.sh 'TestHarnessStreamIdlePastRouteTimeout' "${E2E_IMAGE}" 1200
 
-      - name: Deploy the micro-VM sandbox class
-        # run-microvm-demo-kind stages the (cached) kata assets into the in-cluster object store and
-        # installs the cluster-scoped `microvm` SandboxConfig our counter template uses. It also
-        # re-applies ate-system (idempotent) and deploys substrate's own counter demo, whose micro-VM
-        # pool is only inert because our WorkerPool labels are repo-scoped: worker eligibility is
-        # label-matched cluster-wide with no namespace filter.
-        working-directory: _substrate
-        run: hack/run-microvm-demo-kind.sh
-
       - name: Apply the counter micro-VM WorkerPool
         run: |
-          ATEOM_MV_IMG="$(cd _substrate && ko build ./cmd/ateom-microvm)"
           sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
               deploy/substrate/counter-microvm-workerpool.yaml | kubectl --context kind-kind apply -f -
           hack/wait-worker-pool.sh counter-microvm

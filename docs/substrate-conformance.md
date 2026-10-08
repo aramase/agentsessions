@@ -11,7 +11,7 @@ On a fresh CI runner, in one kind cluster, `agentsessions` runs on a real `ate-s
 across both capability tiers, with the tamper-evident chain verifying across the snapshot boundary, the
 gRPC harness transport unchanged, and the core importing zero substrate code:
 
-- **`STATELESS_REPLAY` on gVisor:** place the echo harness, drive a turn, and replay the journal
+- **`STATELESS_REPLAY` on a micro-VM:** place the echo harness, drive a turn, and replay the journal
   **byte-identically** with **zero** model invocations; the hash chain verifies.
 - **`REQUIRES_MEMORY_SNAPSHOT` on a micro-VM (kata + cloud-hypervisor):** place the in-RAM
   counter, drive it to N, **suspend (memory snapshot) → restore**, and the count **continues** to N+1 —
@@ -19,7 +19,9 @@ gRPC harness transport unchanged, and the core importing zero substrate code:
 - **Fork of a stateful session:** fan out k children from one parent checkpoint and every child
   **continues at N+1 independently**, with the parent still resumable at the same base.
 
-All of it runs in the `substrate-conformance` job (`.github/workflows/substrate-e2e.yml`).
+All of it runs in the `substrate-conformance` job (`.github/workflows/substrate-e2e.yml`). Both tiers
+run on the micro-VM sandbox class, so the suite exercises the same isolation class in both and covers
+the micro-VM path end to end.
 
 ## Neutrality by construction
 
@@ -212,9 +214,9 @@ Limits that come with the router, measured or read rather than assumed:
 - **Route timeout.** The router sets `--route-timeout` (5m by default, one global value) and a
   route-level stream idle timeout 30s past it (`routeIdleTimeout` in
   `cmd/atenet/internal/router/xds.go` at `fc0e3586`). `TestHarnessStreamIdlePastRouteTimeout` holds
-  a Connect stream idle, as a turn parked on a slow model call does. On kind the router tore the
-  stream down after **5m30s**, both at `362637f9` and at `fc0e3586` (held idle for 6m30s): a
-  pending `Recv` got `Internal` "stream terminated by RST_STREAM with error code: INTERNAL_ERROR",
+  a Connect stream idle, as a turn parked on a slow model call does. On kind, with the echo harness
+  on gVisor, the router tore the stream down after **5m30s**, both at `362637f9` and at `fc0e3586`
+  (held idle for 6m30s): a pending `Recv` got `Internal` "stream terminated by RST_STREAM with error code: INTERNAL_ERROR",
   not a 504. Through the Placer, which does not read while the host's model call runs, the turn
   failed only when the host sent its late reply, with a bare `EOF` (measured at `362637f9`). So a
   turn that runs longer than the route timeout fails once its stream has been idle past the idle
@@ -222,10 +224,11 @@ Limits that come with the router, measured or read rather than assumed:
   substrate issue 1291), raise the router's `--route-timeout` above the longest turn; the idle
   timeout follows it.
 - **Checkpoint drain.** Before it snapshots, the worker waits for the actor's in-flight requests to
-  finish, and an idle open Connect stream is one of them. On kind at `362637f9`, `SuspendActor` under
-  such a stream took **5m30s**: it waited for the router to reset the stream. The Placer therefore
-  closes the session's harness streams before `Suspend` or a stateful `Fork` checkpoints it, which
-  brought the same suspend to 109ms on kind at `fc0e3586` (`TestSuspendUnderAnIdleHarnessStream`).
+  finish, and an idle open Connect stream is one of them. On kind with the echo harness on gVisor, at
+  `362637f9`, `SuspendActor` under such a stream took **5m30s**: it waited for the router to reset
+  the stream. The Placer therefore closes the session's harness streams before `Suspend` or a
+  stateful `Fork` checkpoints it, which brought the same suspend to 109ms on the same setup at
+  `fc0e3586` (`TestSuspendUnderAnIdleHarnessStream`).
   That covers streams any Placer of this process's `placement.Registry` opened; a turn driven by
   another host is fenced by the log but its stream stays open until it next touches the log.
 - **No caller authentication.** The router does not check who is calling before it resumes an actor
@@ -240,10 +243,10 @@ writing a test, not writing another `main`, another Job manifest, and another co
 shell. Tests skip unless `AGENTSESSIONS_E2E=1`, so the cheap per-PR job still compiles every line of
 the suite — a driver that no longer builds fails in seconds rather than 15 minutes in.
 
-### `TestStatelessReplayOnGVisor` — stateless-replay
+### `TestStatelessReplay` — stateless-replay
 
-Places the echo harness (`STATELESS_REPLAY`, gVisor) through the `Placer`, drives one turn through
-the router, then re-dials and replays. Asserts: replay is **byte-identical**, model invocations
+Places the echo harness (`STATELESS_REPLAY`, on a micro-VM unless `ECHO_SANDBOX_CLASS=gvisor`) through
+the `Placer`, drives one turn through the router, then re-dials and replays. Asserts: replay is **byte-identical**, model invocations
 are **0** (I1), and the hash chain verifies. Same determinism triple as the unit conformance suite, now
 through the substrate router.
 
@@ -294,17 +297,17 @@ capability on `runtime/local`, accepts on substrate) is `placement`'s `TestNeutr
 (heavy — kind + KVM + micro-VM assets — but ~15 min, and the claims it checks are the ones no unit test
 can make). A concurrency group cancels a superseded run so one push does not leave two clusters
 standing. It copies substrate's own recipe: `create-kind-cluster` + `install-ate-kind`, then
-`run-microvm-demo-kind` for the stateful tier (stages the kata + cloud-hypervisor asset cache and
-installs the micro-VM SandboxConfig).
+`run-microvm-demo-kind` before either tier runs (stages the kata + cloud-hypervisor asset cache and
+installs the micro-VM SandboxConfig both templates name).
 
-The workflow applies only the WorkerPools (`deploy/substrate/*-workerpool.yaml`). ActorTemplates are
+The workflow applies only the namespace and the micro-VM WorkerPools
+(`deploy/substrate/namespace.yaml`, `echo-microvm-workerpool.yaml`, `counter-microvm-workerpool.yaml`). ActorTemplates are
 substrate API resources in an atespace, so the suite creates its own through Control with the harness
 image the workflow built (`HARNESS_IMAGE`) and waits for each golden snapshot.
 
 The suite runs in three passes against that one cluster, all through `hack/run-e2e-job.sh`: the
 stateless tier and the suspend-under-an-idle-stream check first, so a break there fails before the
-expensive micro-VM staging, then the idle-stream route-timeout check, then the stateful tier and
-fork. Each pass is the same image with a different `-test.run`, and the Job's full `go test -v`
+stateful tier runs, then the idle-stream route-timeout check, then the stateful tier and fork. Each pass is the same image with a different `-test.run`, and the Job's full `go test -v`
 output is echoed into the step, so a failure names the test and the assertion instead of surfacing an
 exit code. The nested-module test and core-neutrality gate also run per-PR in
 `.github/workflows/ci.yml`.
@@ -316,11 +319,15 @@ gh workflow run substrate-e2e.yml --ref main
 gh run watch "$(gh run list --workflow=substrate-e2e.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
 
-The micro-VM tier needs a Linux host with `/dev/kvm`; the recipe mirrors the CI steps against `hack/` in
-an agent-substrate checkout. On a host without KVM (an arm64 Mac running kind), apply
-`deploy/substrate/counter-gvisor-workerpool.yaml` and run with `COUNTER_SANDBOX_CLASS=gvisor`: a gVisor
-FULL checkpoint also captures memory, so the stateful and fork tests exercise the same paths on gVisor.
-`KIND_CLUSTER_NAME` selects the cluster for the `hack/` scripts.
+The micro-VM class needs a Linux host with `/dev/kvm`; the recipe mirrors the CI steps against `hack/` in
+an agent-substrate checkout. Each tier picks its class with its own variable, `ECHO_SANDBOX_CLASS` and
+`COUNTER_SANDBOX_CLASS`: `microvm` (the default) or `gvisor`. Any other value is refused. On a host
+without KVM (an arm64 Mac running kind), skip `run-microvm-demo-kind`, apply
+`deploy/substrate/namespace.yaml`, `echo-gvisor-workerpool.yaml` and `counter-gvisor-workerpool.yaml`,
+and run with `ECHO_SANDBOX_CLASS=gvisor COUNTER_SANDBOX_CLASS=gvisor`. A gVisor FULL checkpoint also
+captures memory, so the stateful and fork tests exercise the same code paths on gVisor; the micro-VM run
+in CI remains the reference for both tiers. `KIND_CLUSTER_NAME` selects the cluster for the `hack/`
+scripts.
 
 ## In progress
 

@@ -47,7 +47,9 @@ spec:
               value: "atenet-router.ate-system.svc:80"
             - name: HARNESS_IMAGE # digest-pinned harnessnode image under test
               value: "HARNESS_IMAGE_PLACEHOLDER"
-            - name: COUNTER_SANDBOX_CLASS # microvm (CI) or gvisor (hosts without KVM)
+            - name: ECHO_SANDBOX_CLASS # microvm (default, CI) or gvisor (hosts without KVM)
+              value: "ECHO_SANDBOX_CLASS_PLACEHOLDER"
+            - name: COUNTER_SANDBOX_CLASS # microvm (default, CI) or gvisor (hosts without KVM)
               value: "COUNTER_SANDBOX_CLASS_PLACEHOLDER"
             - name: E2E_IDLE_GAP # empty skips the long idle-stream test
               value: "E2E_IDLE_GAP_PLACEHOLDER"
