@@ -31,7 +31,7 @@ func TestMemorySnapshotSuspendResume(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
-	backend := f.backend(counterTemplate, counterDescriptor)
+	backend := f.backend(t, counterTemplateSpec, counterDescriptor)
 	if !controller.CanPlace(counterDescriptor.Capabilities, backend.Capabilities()) {
 		t.Fatal("substrate refused a REQUIRES_MEMORY_SNAPSHOT harness (CanPlace=false)")
 	}

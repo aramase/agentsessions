@@ -12,9 +12,9 @@ import (
 	"github.com/aramase/agentsessions/placement"
 )
 
-// TestStatelessReplayOnGVisor is the stateless tier on real substrate: place the echo harness
-// (ResumeActor{boot:true}), drive one turn over a direct dial to the actor's PodIP, then replay the
-// journal through the same harness and require it byte-identical with the model never invoked (I1).
+// TestStatelessReplayOnGVisor is the stateless tier on real substrate: create and place the echo
+// harness, drive one turn through the atenet-router, then replay the journal through the same harness
+// and require it byte-identical with the model never invoked (I1).
 //
 // This is the claim that a session is reconstructible from its log alone, made against real compute
 // rather than an in-process fake.
@@ -24,7 +24,7 @@ func TestStatelessReplayOnGVisor(t *testing.T) {
 	defer cancel()
 
 	desc := api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}
-	backend := f.backend(echoTemplate, desc)
+	backend := f.backend(t, echoTemplateSpec, desc)
 	session := uniqueUID("replay")
 	log := journal(t).Session(session)
 	p := placement.New(backend, echoagent.Model)
@@ -43,7 +43,7 @@ func TestStatelessReplayOnGVisor(t *testing.T) {
 		t.Fatal("placed turn produced no output")
 	}
 
-	har, closeHar, err := dialActor(inc.Address)
+	har, closeHar, err := dialActor(inc)
 	if err != nil {
 		t.Fatalf("replay dial %s: %v", inc.Address, err)
 	}

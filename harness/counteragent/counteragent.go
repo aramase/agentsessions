@@ -14,7 +14,8 @@ import (
 )
 
 // Harness is the in-RAM counter BYOH. Its state lives ONLY in process memory, so it survives
-// suspend/resume solely via a memory snapshot (ResumeActor{boot:false}), never via journal replay.
+// suspend/resume solely via a memory snapshot (a substrate ResumeActor of a FULL snapshot), never via
+// journal replay.
 // Use a pointer (the count must persist across turns, and be captured by the memory snapshot).
 type Harness struct {
 	mu    sync.Mutex
@@ -37,7 +38,7 @@ func (h *Harness) Describe(ctx context.Context) (api.Descriptor, error) {
 // Run performs one turn: increment the in-RAM counter and emit its value.
 //
 // I4 contract (the load-bearing rule for this tier): the counter is NEVER re-initialized from
-// s.History. History is empty on a memory-restored sandbox (ResumeActor{boot:false}); reconstructing
+// s.History. History is empty on a memory-restored sandbox; reconstructing
 // the count from an empty History, or resetting it to zero because History is empty, would DESTROY
 // the continuity the snapshot preserved (reset to 0 / double-apply). The count is pure process RAM:
 // the Go zero value (0) on a fresh boot, the snapshot-restored value after a memory-restore. So we

@@ -44,8 +44,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("harnessnode: configure harness: %v", err)
 	}
-	grpcAddr := env("HARNESS_ADDR", ":"+substrate.HarnessPort) // harnesswire gRPC; the driver dials PodIP here
-	readyzAddr := env("HARNESS_READYZ", ":8081")               // HTTP readyz for the ActorTemplate probe
+	grpcAddr := env("HARNESS_ADDR", ":"+substrate.HarnessPort) // harnesswire gRPC; atenet-router forwards here
+	readyzAddr := env("HARNESS_READYZ", ":8081")               // HTTP readyz for the ActorTemplate wakeup probe
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

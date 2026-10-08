@@ -3,9 +3,10 @@
 # run, so adding a capability means adding a Go test, not another Job + another driver + another
 # block of polling shell.
 #
-# In-cluster is required, not preferred: the atenet mesh is HTTP/1.1-only to actors, so a harness is
-# reached by a direct gRPC dial to PodIP:HarnessPort, which only routes from inside. Control is
-# reached over the ate-api-server ClusterIP with a projected ServiceAccount token.
+# The suite reaches each harness the way a production host does: harnesswire over h2c to the
+# atenet-router Service, with the ate-target-actor metadata naming the actor. Control is reached over
+# the ate-api-server Service with a projected ServiceAccount token. Running in-cluster keeps both on
+# their Service DNS names; no NetworkPolicy exception is needed, because nothing dials a worker.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -40,8 +41,16 @@ spec:
               value: "api.ate-system.svc"
             - name: ATEAPI_TOKEN_FILE
               value: "/var/run/secrets/tokens/ateapi-token"
-            - name: ACTORTEMPLATE_NS
-              value: "ate-agentsessions"
+            - name: ACTORTEMPLATE_ATESPACE # the suite creates its ActorTemplates here
+              value: "agentsessions-templates"
+            - name: ATENET_ROUTER_ADDR
+              value: "atenet-router.ate-system.svc:80"
+            - name: HARNESS_IMAGE # digest-pinned harnessnode image under test
+              value: "HARNESS_IMAGE_PLACEHOLDER"
+            - name: COUNTER_SANDBOX_CLASS # microvm (CI) or gvisor (hosts without KVM)
+              value: "COUNTER_SANDBOX_CLASS_PLACEHOLDER"
+            - name: E2E_IDLE_GAP # empty skips the long idle-stream test
+              value: "E2E_IDLE_GAP_PLACEHOLDER"
           volumeMounts:
             - name: ateapi-token
               mountPath: /var/run/secrets/tokens

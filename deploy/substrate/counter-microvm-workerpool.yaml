@@ -1,0 +1,28 @@
+# Stateful-tier WorkerPool: micro-VM (kata + cloud-hypervisor) workers for the in-RAM counter harness,
+# the REQUIRES_MEMORY_SNAPSHOT path a plain pod cannot provide.
+#
+# The ActorTemplate is created by the conformance suite through Control (templates_test.go). It names
+# the cluster-scoped `microvm` SandboxConfig, which substrate's run-microvm-demo-kind.sh installs
+# along with the assets it stages.
+# TODO(microvm): a dedicated agentsessions SandboxConfig referencing the same staged assets, so this
+# does not depend on the demo installing one.
+#
+# The `workload` label is deliberately NOT the demo's: worker eligibility is sandboxClass plus a label
+# selector matched over every worker in the cluster with no namespace filter, and
+# run-microvm-demo-kind.sh installs its own micro-VM pool. Keep this label unique to this repo.
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: counter-microvm
+  namespace: ate-agentsessions
+  labels:
+    workload: agentsessions-counter-microvm
+spec:
+  # A running actor claims a worker exclusively. The fork fan-out is the peak: the parent is
+  # checkpointed (worker freed) and `children` clones run at once, plus the golden build and a
+  # previous test's actor whose worker has not been released yet.
+  # integrations/substrate/e2e/fork_test.go forks 3, so 6 leaves headroom.
+  replicas: 6
+  sandboxClass: microvm
+  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-microvm

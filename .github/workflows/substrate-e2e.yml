@@ -1,19 +1,22 @@
-# Real-substrate conformance in kind. Heavy (kind + KVM + ate-system + micro-VM assets) but ~15 min and
-# stable, so it gates every PR as well as running nightly. It copies agent-substrate's own
-# pr-workflow.yaml recipe (free-disk, /dev/kvm udev rule, kind bring-up).
+# Real-substrate conformance in kind. Heavy (kind + KVM + ate-system + micro-VM assets), so it gates
+# every PR as well as running nightly. It copies agent-substrate's own pr-workflow.yaml recipe
+# (free-disk, /dev/kvm udev rule, kind bring-up).
 #
 # The suite is an ordinary Go test package (integrations/substrate/e2e), compiled with `go test -c`
-# and run as an in-cluster Job. In-cluster is required, not preferred: the atenet mesh is HTTP/1.1-only
-# to actors (Q1 resolved), so a harness is reached by a direct gRPC dial to the actor's PodIP:80,
-# not the router. A new capability is therefore a new Test function — not another driver
-# binary, another Job manifest, and another copy of the polling shell.
+# and run as an in-cluster Job. It reaches each harness the way a production host does: harnesswire
+# over h2c to the atenet-router Service, with the ate-target-actor metadata naming the actor. A new
+# capability is a new Test function, not another driver binary, Job manifest, or polling shell.
 #
-# It runs in two passes against one cluster so the cheap tier fails fast:
-#   1. stateless tier — gVisor + the echo harness + ResumeActor{boot:true} + byte-identical replay.
-#   2. stateful tier + fork, after the micro-VM class is staged (substrate's run-microvm-demo-kind
-#      recipe, kata + cloud-hypervisor asset cache): the in-RAM counter driven to N, suspended to a
-#      memory snapshot and continued at N+1 — which no journal replay could reconstruct — then forked
-#      k ways, with every child required to continue at N+1 independently.
+# ActorTemplates are substrate API resources, not Kubernetes objects, so the suite creates its own
+# through Control with the harness image built here; the workflow only applies the WorkerPools.
+#
+# It runs in passes against one cluster so the cheap tier fails fast:
+#   1. stateless tier: gVisor + the echo harness + byte-identical replay.
+#   2. idle stream: one harness stream held idle past the router's 5m route timeout.
+#   3. stateful tier + fork, after the micro-VM class is staged (substrate's run-microvm-demo-kind
+#      recipe): the in-RAM counter driven to N, suspended to a memory snapshot and continued at N+1,
+#      which no journal replay could reconstruct, then forked k ways, with every child required to
+#      continue at N+1 independently.
 name: substrate-e2e
 
 on:
@@ -41,18 +44,20 @@ concurrency:
   group: substrate-e2e-${{ github.ref }}
   cancel-in-progress: true
 
-# The agent-substrate commit our adapter's go.mod pins; keep them in lockstep so the cluster's
-# ateapi and our generated client agree. The pin is boxed in on both sides. Floor: it must be at or
-# past the ActorSnapshot lifecycle APIs (substrate #570), which the fork path clones through.
-# Ceiling: it must stay before cc858876 "worker: serve actor ingress through atunnel", which deletes
-# the PodIP:80 -> actor DNAT the harness dial needs and leaves only an mTLS listener that none but
-# the atenet router may call. The router reverse-proxies HTTP/1.1, so it cannot carry the harness
-# gRPC stream (agent-substrate#254). Do not bump this ref until #484's h2c ingress lands; see
-# docs/substrate-conformance.md.
+# The agent-substrate commit our adapter's go.mod pins; keep them in lockstep so the cluster's ate-api
+# and our generated client agree. The client decodes Actors by field number, and upstream has
+# renumbered fields before without a wire error, so a mismatch corrupts silently rather than failing.
 env:
-  SUBSTRATE_REF: b1bd558aba3c
+  SUBSTRATE_REF: 362637f900d74699f70dc8c974f43051677c4950
   KO_DOCKER_REPO: localhost:5001
   E2E_IMAGE: localhost:5001/agentsessions-e2e:${{ github.sha }}
+  # ate-setup requires an image credential provider; the kind recipe uses the k8s.io one.
+  ATE_CREDENTIAL_PROVIDER: '{"name":"k8s.io"}'
+  # ate-setup waits for the api-server before its database has converged on a cold runner, so give
+  # the rollouts more than the default budget. `rollout status` returns as soon as a rollout is
+  # ready, so this costs nothing on a healthy cluster. An env var rather than a flag because
+  # run-microvm-demo-kind.sh does not forward flags to its install step.
+  ATE_INSTALL_ROLLOUT_TIMEOUT: 10m
 
 jobs:
   substrate-conformance:
@@ -64,7 +69,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          # The adapter module tracks substrate's Go floor, which can be ahead of the root module's.
+          go-version-file: integrations/substrate/go.mod
 
       - name: Setup ko
         uses: ko-build/setup-ko@v0.10
@@ -73,16 +79,6 @@ jobs:
         run: |
           git clone https://github.com/agent-substrate/substrate _substrate
           git -C _substrate checkout "${SUBSTRATE_REF}"
-
-      - name: Relax ate-system rollout timeouts
-        # install-ate.sh waits on deployment/ate-api-server BEFORE statefulset/valkey-cluster, but the
-        # api-server crash-loops until valkey has formed a cluster ("redis: cluster has no nodes"). With
-        # the upstream 120s budget, whether the api-server converges in time is down to how fast the
-        # runner pulls images, which made the gate flaky. `rollout status` returns as soon as the
-        # rollout is ready, so a larger budget costs nothing on a healthy cluster and only buys slack on
-        # a cold one. Applied to the pinned clone, so it is deterministic.
-        working-directory: _substrate
-        run: sed -i 's/--timeout=120s/--timeout=600s/g' hack/install-ate.sh
 
       - name: Cache micro-VM assets (kata-static + cloud-hypervisor + virtiofsd)
         # Assembling the assets is fully pinned by assemble.sh (all downloads on amd64), so key the
@@ -110,34 +106,20 @@ jobs:
         working-directory: _substrate
         run: |
           hack/create-kind-cluster.sh
-          # token auth is the simpler first cut (spike §3e); cert is a later matrix dimension.
-          hack/install-ate-kind.sh --deploy-ate-system --ateapi-client-auth=token
+          hack/install-ate-kind.sh --deploy-ate-system
 
-      - name: Build the harness image (shared by both conformance tiers)
-        # Both tiers run the same harnessnode image (HARNESS_KIND selects echo vs counter), so build
-        # and push it to the local registry once and reuse the ref, instead of ko-building it twice.
-        # The manifests name the published image so they apply as written; this overrides it with a
-        # build of the commit under test, which is the whole point of running conformance in CI.
-        run: echo "HARNESS_IMG=$(ko build ./cmd/harnessnode)" >> "$GITHUB_ENV"
+      - name: Build the harness image (shared by every tier)
+        # Every tier runs the same harnessnode image (HARNESS_KIND selects echo vs counter). ko prints
+        # the digest-pinned reference, which substrate requires of an ActorTemplate image.
+        run: echo "HARNESS_IMAGE=$(ko build ./cmd/harnessnode)" >> "$GITHUB_ENV"
 
-      - name: Build + apply the echo harness ActorTemplate + WorkerPool
-        # The harness image is built once (above); resolve substrate's ateom-gvisor in its own module,
-        # substitute both refs into the manifest, apply.
+      - name: Apply the echo WorkerPool
+        # Resolve substrate's ateom-gvisor in its own module, substitute it into the manifest, apply.
         run: |
           ATEOM_IMG="$(cd _substrate && ko build ./cmd/ateom-gvisor)"
-          sed -e "s#ghcr.io/aramase/agentsessions/harnessnode:latest#${HARNESS_IMG}#" \
-              -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
-              deploy/substrate/echo-actortemplate.yaml | kubectl --context kind-kind apply -f -
-          kubectl --context kind-kind wait --for=condition=Ready \
-            actortemplate/echo-harness -n ate-agentsessions --timeout=600s
+          sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
+              deploy/substrate/echo-workerpool.yaml | kubectl --context kind-kind apply -f -
           hack/wait-worker-pool.sh echo-harness
-
-      - name: Allow the conformance Job to reach worker pods
-        # substrate's per-WorkerPool NetworkPolicy admits only the atenet-router. The suite dials the
-        # actor directly because the router cannot carry the harness gRPC stream (agent-substrate#254),
-        # so union in one extra peer. Applied after the WorkerPools exist, though ordering is not
-        # load-bearing: a NetworkPolicy selects pods whenever they appear.
-        run: kubectl --context kind-kind apply -f deploy/substrate/e2e-netpol.yaml
 
       - name: Build the conformance test binary image
         # `go test -c` rather than ko: this is a test binary, and ko builds main packages. Static
@@ -151,39 +133,45 @@ jobs:
 
       - name: Stateless-tier conformance (in-cluster Job)
         # Runs before the expensive micro-VM staging below, so a break in the cheap tier fails fast.
-        run: hack/run-e2e-job.sh 'TestStatelessReplayOnGVisor' "${E2E_IMAGE}" 600
+        # The suspend test checkpoints a session under an idle harness stream through the router.
+        run: hack/run-e2e-job.sh 'TestStatelessReplayOnGVisor|TestSuspendUnderAnIdleHarnessStream' "${E2E_IMAGE}" 900
+
+      - name: Idle harness stream across the router's route timeout (in-cluster Job)
+        # A turn parked on a slow model call holds its Connect stream idle. The router bounds every
+        # request, streams included, by --route-timeout (5m default). This pins what a host sees when
+        # a stream outlives it.
+        env:
+          E2E_IDLE_GAP: 5m30s
+        run: hack/run-e2e-job.sh 'TestHarnessStreamIdlePastRouteTimeout' "${E2E_IMAGE}" 1200
 
       - name: Deploy the micro-VM sandbox class
-        # run-microvm-demo-kind stages the (cached) kata-assets into rustfs and installs the
-        # cluster-scoped micro-VM SandboxConfig our counter-microvm ActorTemplate reuses. It also
-        # re-applies ate-system (idempotent) and deploys substrate's own counter demo, which brings up
-        # a competing micro-VM WorkerPool in ate-demo-counter-microvm. That pool is only inert because
-        # our WorkerPool labels are repo-scoped: worker eligibility is label-matched cluster-wide with
-        # no namespace filter, so a shared `workload` value would let our actor land on the demo pool.
+        # run-microvm-demo-kind stages the (cached) kata assets into the in-cluster object store and
+        # installs the cluster-scoped `microvm` SandboxConfig our counter template uses. It also
+        # re-applies ate-system (idempotent) and deploys substrate's own counter demo, whose micro-VM
+        # pool is only inert because our WorkerPool labels are repo-scoped: worker eligibility is
+        # label-matched cluster-wide with no namespace filter.
         working-directory: _substrate
-        run: hack/run-microvm-demo-kind.sh --ateapi-client-auth=token
+        run: hack/run-microvm-demo-kind.sh
 
-      - name: Build + apply the counter harness micro-VM ActorTemplate + WorkerPool
-        # Reuses the harness image built once above (HARNESS_IMG); builds substrate's ateom-microvm.
+      - name: Apply the counter micro-VM WorkerPool
         run: |
           ATEOM_MV_IMG="$(cd _substrate && ko build ./cmd/ateom-microvm)"
-          sed -e "s#ghcr.io/aramase/agentsessions/harnessnode:latest#${HARNESS_IMG}#" \
-              -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
-              deploy/substrate/counter-microvm-actortemplate.yaml | kubectl --context kind-kind apply -f -
-          kubectl --context kind-kind wait --for=condition=Ready \
-            actortemplate/counter-microvm -n ate-agentsessions --timeout=600s
+          sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
+              deploy/substrate/counter-microvm-workerpool.yaml | kubectl --context kind-kind apply -f -
           hack/wait-worker-pool.sh counter-microvm
 
       - name: Stateful-tier + fork conformance (in-cluster Job)
         # Memory continuity across suspend/restore (the differentiator a plain pod cannot do), and
         # fork: fan out k children from one parent checkpoint and require each to continue at N+1
-        # independently — the claim that a stateful fork clones RAM instead of silently cold-booting.
+        # independently, the claim that a stateful fork clones RAM instead of silently cold-booting.
+        env:
+          COUNTER_SANDBOX_CLASS: microvm
         run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestFork' "${E2E_IMAGE}" 1500
 
       - name: Dump diagnostics on failure
         if: failure()
         run: |
-          kubectl --context kind-kind get actortemplate,workerpool,jobs,pods -A -o wide || true
+          kubectl --context kind-kind get workerpool,jobs,pods -A -o wide || true
           for ns in ate-agentsessions ate-system; do
             for p in $(kubectl --context kind-kind get pods -n "$ns" -o name 2>/dev/null); do
               echo "=== logs: $ns/$p ==="

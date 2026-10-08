@@ -6,15 +6,22 @@
 # polling loop.
 #
 # Usage: hack/run-e2e-job.sh <test-regexp> <image> [timeout-seconds]
+#
+# Environment:
+#   HARNESS_IMAGE          digest-pinned harnessnode image the suite's ActorTemplates run (required)
+#   COUNTER_SANDBOX_CLASS  microvm (default) or gvisor, the counter template's sandbox class
+#   E2E_IDLE_GAP           idle gap for TestHarnessStreamIdlePastRouteTimeout; empty skips it
+#   KIND_CLUSTER_NAME      kind cluster to run in (default kind)
 set -euo pipefail
 
 TEST_RUN="${1:?usage: run-e2e-job.sh <test-regexp> <image> [timeout-seconds]}"
 IMAGE="${2:?missing image}"
 BUDGET="${3:-1200}"
+HARNESS_IMAGE="${HARNESS_IMAGE:?set HARNESS_IMAGE to the digest-pinned harnessnode image}"
 
 NAMESPACE="ate-agentsessions"
 JOB="substrate-e2e"
-KUBECTL=(kubectl --context kind-kind)
+KUBECTL=(kubectl --context "kind-${KIND_CLUSTER_NAME:-kind}")
 MANIFEST="$(dirname "$0")/../deploy/substrate/e2e-job.yaml"
 
 echo "=== running conformance tests matching /${TEST_RUN}/ ==="
@@ -22,7 +29,10 @@ echo "=== running conformance tests matching /${TEST_RUN}/ ==="
 # A previous selection left a completed Job behind; Jobs are immutable, so replace it outright.
 "${KUBECTL[@]}" delete job "${JOB}" -n "${NAMESPACE}" --ignore-not-found --wait=true
 
-sed -e "s#E2E_IMAGE#${IMAGE}#" -e "s#E2E_RUN_PLACEHOLDER#${TEST_RUN}#" "${MANIFEST}" |
+sed -e "s#E2E_IMAGE#${IMAGE}#" -e "s#E2E_RUN_PLACEHOLDER#${TEST_RUN}#" \
+	-e "s#HARNESS_IMAGE_PLACEHOLDER#${HARNESS_IMAGE}#" \
+	-e "s#COUNTER_SANDBOX_CLASS_PLACEHOLDER#${COUNTER_SANDBOX_CLASS:-microvm}#" \
+	-e "s#E2E_IDLE_GAP_PLACEHOLDER#${E2E_IDLE_GAP:-}#" "${MANIFEST}" |
 	"${KUBECTL[@]}" apply -f -
 
 result=""
@@ -50,22 +60,22 @@ if [[ "${result}" != "succeeded" ]]; then
 	echo "=== Job did not succeed (${result:-timed out after ${BUDGET}s}); describing pods ==="
 	"${KUBECTL[@]}" describe pods -n "${NAMESPACE}" -l "app=${JOB}" || true
 
-	# A dial failure is almost always about reachability rather than the test logic, and the causes
-	# are indistinguishable from an i/o timeout alone: the actor may have been placed on a worker in
-	# a different namespace, the reported pod IP may be stale, or a NetworkPolicy may be dropping the
-	# SYN. Print all three so the next reader does not have to reproduce the cluster to tell them apart.
+	# A harness call failure is usually about routing rather than the test logic: the actor may have
+	# been placed on a worker in a different namespace, or the router may have failed to resume or
+	# reach it. Print the workers, the api-server's placement decisions and the router's view so the
+	# next reader does not have to reproduce the cluster to tell them apart.
 	#
 	# Worker pods are listed across ALL namespaces on purpose. Worker eligibility is label-matched
 	# cluster-wide with no namespace filter, so an actor can legally land on a pool this repo did not
 	# deploy (substrate's demos install their own); a namespaced listing hides exactly that case.
-	echo "=== worker pods, all namespaces (the dial targets) ==="
+	echo "=== worker pods, all namespaces ==="
 	"${KUBECTL[@]}" get pods -A -l ate.dev/worker-pool \
 		-o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IP:.status.podIP,PHASE:.status.phase,POOL:'.metadata.labels.ate\.dev/worker-pool' || true
 	echo "=== worker the api-server actually picked (namespace tells you if it left ${NAMESPACE}) ==="
 	"${KUBECTL[@]}" logs -n ate-system -l app=ate-api-server --tail=-1 --prefix 2>/dev/null |
 		grep -F 'Picked worker' | tail -20 || true
-	echo "=== NetworkPolicies selecting them ==="
-	"${KUBECTL[@]}" get networkpolicy -A -o wide || true
+	echo "=== atenet-router (the harness ingress) ==="
+	"${KUBECTL[@]}" logs -n ate-system -l app=atenet-router --all-containers --tail=100 --prefix 2>/dev/null || true
 	exit 1
 fi
 echo "=== conformance tests matching /${TEST_RUN}/ PASSED ==="
