@@ -158,12 +158,16 @@ func (f *fixture) createTemplate(t *testing.T, want *atepb.ActorTemplate) string
 			got.GetContainers()[0].GetImage() + ", not this run's " + want.GetContainers()[0].GetImage() +
 			"; delete it (or use a fresh ACTORTEMPLATE_ATESPACE) and rerun"
 	case got.GetSandboxConfig().GetSandboxClass() != want.GetSandboxConfig().GetSandboxClass() ||
+		got.GetSandboxConfig().GetConfigName() != want.GetSandboxConfig().GetConfigName() ||
 		got.GetWorkerSelector().GetMatchLabels()["workload"] != want.GetWorkerSelector().GetMatchLabels()["workload"]:
-		// Same reason: a template left by a run on another sandbox class would silently test that class.
+		// Same reason: a template left by a run on another sandbox class or config would silently
+		// test that class or config.
 		return "ActorTemplate " + ref.GetAtespace() + "/" + ref.GetName() + " exists on sandbox class " +
-			got.GetSandboxConfig().GetSandboxClass().String() + " (pool " + got.GetWorkerSelector().GetMatchLabels()["workload"] +
-			"), not this run's " + want.GetSandboxConfig().GetSandboxClass().String() + " (pool " +
-			want.GetWorkerSelector().GetMatchLabels()["workload"] + "); delete it (or use a fresh ACTORTEMPLATE_ATESPACE) and rerun"
+			got.GetSandboxConfig().GetSandboxClass().String() + " (config " + got.GetSandboxConfig().GetConfigName() +
+			", pool " + got.GetWorkerSelector().GetMatchLabels()["workload"] + "), not this run's " +
+			want.GetSandboxConfig().GetSandboxClass().String() + " (config " + want.GetSandboxConfig().GetConfigName() +
+			", pool " + want.GetWorkerSelector().GetMatchLabels()["workload"] +
+			"); delete it (or use a fresh ACTORTEMPLATE_ATESPACE) and rerun"
 	}
 	for {
 		got, err := ctl.GetActorTemplate(ctx, &atepb.GetActorTemplateRequest{ActorTemplate: ref})
