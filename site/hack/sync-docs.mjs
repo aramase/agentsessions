@@ -67,7 +67,7 @@ const meta = {
   "substrate-conformance.md": {
     title: "Running on agent-substrate",
     description:
-      "Both capability tiers on a real cluster: stateless replay on gVisor and memory-snapshot continuity on a micro-VM.",
+      "Both capability tiers on a real cluster, on a micro-VM: stateless replay and memory-snapshot continuity.",
   },
 };
 

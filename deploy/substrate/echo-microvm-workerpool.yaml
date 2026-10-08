@@ -1,0 +1,25 @@
+# Stateless-tier WorkerPool: micro-VM (kata + cloud-hypervisor) workers for the echo harness. Both
+# tiers default to the micro-VM class so the suite covers the micro-VM path end to end. On a host
+# without KVM, use echo-gvisor-workerpool.yaml with ECHO_SANDBOX_CLASS=gvisor instead.
+#
+# Only the pool is a Kubernetes object. The ActorTemplate is a substrate API resource that lives in an
+# atespace, so the conformance suite creates it through Control (integrations/substrate/e2e/
+# templates_test.go) with the harness image under test. It names the cluster-scoped `microvm`
+# SandboxConfig, which substrate's run-microvm-demo-kind.sh installs along with the assets it stages.
+#
+# The `workload` label is repo-scoped on purpose: worker eligibility is sandboxClass plus a label
+# selector matched over every worker in the cluster with no namespace filter, and
+# run-microvm-demo-kind.sh installs its own micro-VM pool. Keep this label unique to this repo.
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: echo-microvm
+  namespace: ate-agentsessions
+  labels:
+    workload: agentsessions-echo-microvm
+spec:
+  # One worker for the template's golden-snapshot build and one per concurrently running actor.
+  replicas: 3
+  sandboxClass: microvm
+  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-microvm

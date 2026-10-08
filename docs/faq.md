@@ -166,5 +166,6 @@ In `api/*.proto` (Sessions, Harness, Runtime, and the shared Event). The hand-wr
 ## How do I run it on real agent-substrate?
 
 See [`substrate-conformance.md`](substrate-conformance.md). It runs in CI across both capability tiers
-(stateless-replay on gVisor and memory-snapshot continuity on a micro-VM), against a real `ate-system` in
-kind, with the core importing zero substrate code.
+(stateless-replay and memory-snapshot continuity, both on a micro-VM), against a real `ate-system` in
+kind, with the core importing zero substrate code. On a host without KVM, both tiers can run on gVisor
+instead.

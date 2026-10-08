@@ -37,8 +37,8 @@ import (
 
 // Template names the suite creates in the template atespace (see templates_test.go).
 const (
-	echoTemplate    = "echo-harness" // STATELESS_REPLAY, gVisor
-	counterTemplate = "counter"      // REQUIRES_MEMORY_SNAPSHOT, micro-VM (or gVisor, see counterTemplateSpec)
+	echoTemplate    = "echo-harness" // STATELESS_REPLAY, micro-VM (or gVisor, see sandboxFor)
+	counterTemplate = "counter"      // REQUIRES_MEMORY_SNAPSHOT, micro-VM (or gVisor, see sandboxFor)
 )
 
 func env(key, def string) string {
@@ -105,11 +105,11 @@ func newFixture(t *testing.T, atespace string) *fixture {
 
 // backend builds the substrate Runtime for a harness template, creating the template on first use.
 // Actors land in this fixture's atespace and reference the template in the shared one.
-func (f *fixture) backend(t *testing.T, spec func(string) *atepb.ActorTemplate, desc api.Descriptor) *substrate.Backend {
+func (f *fixture) backend(t *testing.T, spec func(*testing.T, string) *atepb.ActorTemplate, desc api.Descriptor) *substrate.Backend {
 	t.Helper()
-	f.ensureTemplate(t, spec)
+	name := f.ensureTemplate(t, spec)
 	return substrate.New(ateadapter.New(f.conn), f.atespace,
-		substrate.ObjectRef{Atespace: f.tmplAtespace, Name: spec(f.tmplAtespace).GetMetadata().GetName()}, desc,
+		substrate.ObjectRef{Atespace: f.tmplAtespace, Name: name}, desc,
 		substrate.WithRouter(f.router))
 }
 

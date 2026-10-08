@@ -11,9 +11,9 @@ import (
 	"github.com/aramase/agentsessions/placement"
 )
 
-// TestSessionSuspendResumeOnGVisor exercises session-level suspension on real substrate:
-// the snapshot must retain the actor that explicit Resume needs, then allow another turn.
-func TestSessionSuspendResumeOnGVisor(t *testing.T) {
+// TestSessionSuspendResume exercises session-level suspension on real substrate: the snapshot must
+// retain the actor that explicit Resume needs, then allow another turn.
+func TestSessionSuspendResume(t *testing.T) {
 	f := newFixture(t, env("SUBSTRATE_ATESPACE", "e2e-suspend"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

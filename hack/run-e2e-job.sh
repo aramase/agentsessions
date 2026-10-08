@@ -9,6 +9,7 @@
 #
 # Environment:
 #   HARNESS_IMAGE          digest-pinned harnessnode image the suite's ActorTemplates run (required)
+#   ECHO_SANDBOX_CLASS     microvm (default) or gvisor, the echo template's sandbox class
 #   COUNTER_SANDBOX_CLASS  microvm (default) or gvisor, the counter template's sandbox class
 #   E2E_IDLE_GAP           idle gap for TestHarnessStreamIdlePastRouteTimeout; empty skips it
 #   KIND_CLUSTER_NAME      kind cluster to run in (default kind)
@@ -18,13 +19,27 @@ TEST_RUN="${1:?usage: run-e2e-job.sh <test-regexp> <image> [timeout-seconds]}"
 IMAGE="${2:?missing image}"
 BUDGET="${3:-1200}"
 HARNESS_IMAGE="${HARNESS_IMAGE:?set HARNESS_IMAGE to the digest-pinned harnessnode image}"
+ECHO_SANDBOX_CLASS="${ECHO_SANDBOX_CLASS:-microvm}"
+COUNTER_SANDBOX_CLASS="${COUNTER_SANDBOX_CLASS:-microvm}"
+
+# Both tiers run on the micro-VM class unless a host without KVM opts into gvisor. Refuse anything
+# else here, before a Job is created, rather than minutes later inside the suite.
+for class in "${ECHO_SANDBOX_CLASS}" "${COUNTER_SANDBOX_CLASS}"; do
+	case "${class}" in
+	microvm | gvisor) ;;
+	*)
+		echo "unknown sandbox class '${class}': ECHO_SANDBOX_CLASS and COUNTER_SANDBOX_CLASS take microvm or gvisor" >&2
+		exit 2
+		;;
+	esac
+done
 
 NAMESPACE="ate-agentsessions"
 JOB="substrate-e2e"
 KUBECTL=(kubectl --context "kind-${KIND_CLUSTER_NAME:-kind}")
 MANIFEST="$(dirname "$0")/../deploy/substrate/e2e-job.yaml"
 
-echo "=== running conformance tests matching /${TEST_RUN}/ ==="
+echo "=== running conformance tests matching /${TEST_RUN}/ (echo: ${ECHO_SANDBOX_CLASS}, counter: ${COUNTER_SANDBOX_CLASS}) ==="
 
 # A previous selection left a completed Job behind; Jobs are immutable, so replace it outright.
 "${KUBECTL[@]}" delete job "${JOB}" -n "${NAMESPACE}" --ignore-not-found --wait=true

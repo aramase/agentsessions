@@ -1,27 +1,20 @@
-# Stateless-tier WorkerPool: gVisor workers for the echo harness.
+# Stateless-tier WorkerPool on gVisor, for hosts without KVM (for example an arm64 Mac running kind).
 #
-# Only the pool is a Kubernetes object. The ActorTemplate is a substrate API resource that lives in an
-# atespace, so the conformance suite creates it through Control (integrations/substrate/e2e/
-# templates_test.go) with the harness image under test.
+# Run the suite with ECHO_SANDBOX_CLASS=gvisor to point the echo template at this pool instead of the
+# micro-VM one (echo-microvm-workerpool.yaml). CI runs the micro-VM pool, so both tiers exercise the
+# same isolation class.
 #
 # The `workload` label is repo-scoped on purpose: worker eligibility ignores namespaces and matches
 # labels across every pool in the cluster, so a label shared with a substrate demo pool would let the
 # scheduler place our actor there.
 
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ate-agentsessions
-
----
-
 apiVersion: ate.dev/v1alpha1
 kind: WorkerPool
 metadata:
-  name: echo-harness
+  name: echo-gvisor
   namespace: ate-agentsessions
   labels:
-    workload: agentsessions-echo-harness
+    workload: agentsessions-echo-gvisor
 spec:
   # One worker for the template's golden-snapshot build and one per concurrently running actor.
   replicas: 3

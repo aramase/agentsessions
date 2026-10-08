@@ -1,0 +1,7 @@
+# The namespace every agentsessions WorkerPool and the conformance Job live in. Apply it before any
+# deploy/substrate/*-workerpool.yaml.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-agentsessions
