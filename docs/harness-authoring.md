@@ -263,8 +263,11 @@ A completion that asks for tools returns them as `ToolCall` parts in `ModelRespo
 result back to the model as a `ToolResult` part, in a message with role `tool`, whose `ID` is the call's
 `ID`. Arguments are a structured object of JSON values, not a JSON string.
 
-Running the call is still Rule 4: set `Mediation` and `IdempotencyKey` on the part's `ToolCall` and pass
-it to `sink.ToolCall`, or run it yourself and `sink.Report` the result. A tool your harness runs itself
+Running the call is still Rule 4: copy the part's `ToolCall` (`tc := *p.ToolCall`), set `Mediation` and
+`IdempotencyKey` on the copy, and pass the copy to `sink.ToolCall`; or run it yourself and `sink.Report`
+the result. Never change the `ToolCall` (or its `Args`) in the returned message in place: the message
+can share memory with the completion the host already recorded, so an in-place change alters a recorded
+event after it was hashed, and the in-memory log then fails `Verify`. A tool your harness runs itself
 runs again when the turn is replayed; use `CONTROLLER_MEDIATED` for a tool that must not.
 
 The input hash (I0) covers the tools, the tool choice, and every tool part, so on replay build the next
@@ -611,3 +614,4 @@ actually honor it, and what makes the system degrade honestly instead of silentl
 - [ ] Opaque reasoning parts are returned verbatim, with `ReasoningReplay` set.
 - [ ] Tools ride `ModelRequest.Tools`, and tool calls and results ride as parts rebuilt from the
       recorded completion.
+- [ ] A returned `ToolCall` part is copied before `Mediation` and `IdempotencyKey` are set on it.

@@ -50,7 +50,9 @@ type Part struct {
 	Data      map[string]any
 	Reasoning *ReasoningPart
 	// ToolCall is a model's request to call a tool, carried in an assistant message. Mediation
-	// and IdempotencyKey are unset on a model output; the harness sets them when it executes it.
+	// and IdempotencyKey are unset on a model output. To execute the call, copy it, set them on
+	// the copy, and pass the copy to EventSink.ToolCall: the returned message can share this
+	// pointer with the recorded completion, so changing it in place alters a hashed event.
 	ToolCall *ToolCall `json:",omitempty"`
 	// ToolResult is a tool's result fed back to the model, carried in a message with role
 	// "tool". ToolResult.ID is the ID of the ToolCall it answers.

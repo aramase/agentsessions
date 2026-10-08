@@ -425,7 +425,7 @@ opaque reasoning block. Large payloads are externalized by URI, never inlined (Â
 | file | [FilePart](#agentsessions-v1-FilePart) |  |  |
 | data | [DataPart](#agentsessions-v1-DataPart) |  |  |
 | reasoning | [ReasoningPart](#agentsessions-v1-ReasoningPart) |  |  |
-| tool_call | [ToolCall](#agentsessions-v1-ToolCall) |  | tool_call is a model&#39;s request to call a tool, carried in an assistant message. It reuses ToolCall so one id runs from the model output through EVENT_TOOL_CALL / EVENT_TOOL_RESULT to the next model input. On a model output, mediation and idempotency_key are unset; the harness sets them when it executes the call. |
+| tool_call | [ToolCall](#agentsessions-v1-ToolCall) |  | tool_call is a model&#39;s request to call a tool, carried in an assistant message. It reuses ToolCall so one id runs from the model output through EVENT_TOOL_CALL / EVENT_TOOL_RESULT to the next model input. On a model output, mediation and idempotency_key are unset; to execute the call, the harness sets them on a copy and never changes the recorded output&#39;s ToolCall. |
 | tool_result | [ToolResult](#agentsessions-v1-ToolResult) |  | tool_result is a tool&#39;s result fed back to the model, carried in a message with role &#34;tool&#34;. ToolResult.id is the id of the ToolCall it answers. |
 
 

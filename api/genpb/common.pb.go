@@ -490,8 +490,8 @@ type Part_Reasoning struct {
 type Part_ToolCall struct {
 	// tool_call is a model's request to call a tool, carried in an assistant message. It reuses
 	// ToolCall so one id runs from the model output through EVENT_TOOL_CALL / EVENT_TOOL_RESULT to the
-	// next model input. On a model output, mediation and idempotency_key are unset; the harness sets
-	// them when it executes the call.
+	// next model input. On a model output, mediation and idempotency_key are unset; to execute the
+	// call, the harness sets them on a copy and never changes the recorded output's ToolCall.
 	ToolCall *ToolCall `protobuf:"bytes,5,opt,name=tool_call,json=toolCall,proto3,oneof"`
 }
 

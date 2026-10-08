@@ -37,8 +37,8 @@ message Part {
     ReasoningPart reasoning = 4;
     // tool_call is a model's request to call a tool, carried in an assistant message. It reuses
     // ToolCall so one id runs from the model output through EVENT_TOOL_CALL / EVENT_TOOL_RESULT to the
-    // next model input. On a model output, mediation and idempotency_key are unset; the harness sets
-    // them when it executes the call.
+    // next model input. On a model output, mediation and idempotency_key are unset; to execute the
+    // call, the harness sets them on a copy and never changes the recorded output's ToolCall.
     ToolCall tool_call = 5;
     // tool_result is a tool's result fed back to the model, carried in a message with role "tool".
     // ToolResult.id is the id of the ToolCall it answers.
