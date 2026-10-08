@@ -58,6 +58,31 @@ provide.
   harness lost mid-turn is still `INTERNAL` and leaves an interrupted turn to `Resume`. Forking a
   `REQUIRES_MEMORY_SNAPSHOT` harness on a backend without memory snapshots is refused before the
   parent is checkpointed, so it no longer leaves a `SUSPEND` event on the parent.
+- The substrate backend now targets current agent-substrate (`362637f9`) instead of the `b1bd558a`
+  pin, and the two are not wire-compatible: the old client decodes a current `Actor` without an
+  error but with the wrong state and garbage for the worker address. Upgrade the backend and the
+  substrate cluster together. `integrations/substrate` now requires Go 1.27, following substrate.
+- The substrate backend reaches the harness through `atenet-router` (h2c, `ate-target-actor`
+  metadata) instead of dialing the worker pod's IP on port 80, which current substrate no longer
+  serves. The host must be able to reach `atenet-router.ate-system.svc:80`
+  (`substrate.WithRouter` overrides it). The router does not authenticate callers; see
+  [docs/security.md](docs/security.md) before running it outside a fully trusted cluster.
+- `api.Incarnation` gains `CallMetadata`, which the host attaches to every harness call.
+  `placement.Dialer` now takes the `api.Incarnation` instead of its address, so custom dialers
+  passed to `placement.WithDialer` must change signature; `placement.DefaultDial` is the stock one.
+- `Placer.Suspend` and a stateful `Placer.Fork` now close the session's open harness streams before
+  checkpointing, so a turn in flight on that session fails instead of holding the checkpoint up. On
+  kind, a suspend under an idle stream took 5m30s before this change and 131ms after.
+- Through `atenet-router`, a harness stream that stays idle for about 5m30s (the router's default
+  5m route timeout plus 30s) is reset, so a turn parked on a slower model call fails. Raise the
+  router's `--route-timeout` if turns can run that long.
+- `runtime/substrate.ControlClient.ResumeActor` drops its `boot` argument (substrate removed
+  `ResumeActorRequest.boot`); a new actor starts from its template's golden snapshot, or cold-boots
+  if none is built. `SnapshotCloner` follows substrate's Tag API (`TagActor`,
+  `CreateActorFromTag`, `DeleteTag`), `ObjectRef.Namespace` is now `ObjectRef.Atespace`, and
+  `ActorInfo` reports `Worker` and `Snapshot` instead of `PodIP` and `MeshDNS`. A stateful fork now
+  checks the parent still holds the checkpoint it took around the tag, and fails with
+  `ErrSnapshotSuperseded` if the parent was resumed and suspended in between.
 
 ## v0.1.2
 

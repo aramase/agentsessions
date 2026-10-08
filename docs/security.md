@@ -51,6 +51,28 @@ another project gets that project's sessions. Do not treat it as isolation.
 **There is no transport security.** No TLS anywhere, including between the host and a harness. Traffic
 is readable and modifiable in flight by anything on the path.
 
+**On substrate, anything in the cluster can drive any session's harness.** The substrate backend
+reaches each harness through substrate's `atenet-router`, over plaintext h2c, naming the actor in an
+`ate-target-actor: <atespace>/<actor>` header. The router does not authenticate or authorize callers:
+it resumes whichever actor the header names and proxies the call to it (substrate's threat model
+tracks this as T-04, "check client permissions before resuming actors", not yet implemented), and a
+stock install puts no NetworkPolicy in front of it. So any pod that can reach
+`atenet-router.ate-system.svc:80` can wake any actor and open a `Harness.Connect` stream to it, and
+the harness accepts the stream, because it does not authenticate the host either. Such a caller can
+feed a harness forged model results or tool results, read what the harness emits, and keep an actor
+from suspending. The journal still only records what the real host wrote, so this breaks the
+session's live state, not the integrity of its record. Only the router-to-worker hop is protected
+(mTLS with the router's SPIFFE identity, and the worker checks the actor is assigned to it).
+
+Until this is closed, run the substrate backend only in a cluster where every workload that can
+reach the router is trusted, or restrict the router with a NetworkPolicy that admits only the
+`agentsessions` host.
+
+TODO: authenticate the host to the harness, for example a per-session credential delivered at
+actor creation and checked by `harnessnode` on every Connect, so a harness talks only to its own
+session's host whatever the ingress allows. Router-side caller authorization (T-04) belongs upstream
+in substrate and would complement it, not replace it.
+
 **The harness is trusted code.** The host mediates model calls and host-executed tools, which is what
 makes replay exact, but that is a determinism mechanism, not a containment one. Whatever isolation a
 harness has comes from the `Runtime` backend underneath it, and the backends differ sharply:

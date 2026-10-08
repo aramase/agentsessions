@@ -64,7 +64,7 @@ companion determinism contract, exercised by `conformance/`):
   reasoning survives resume/fork on the stateless path.
 - **I3 — at-most-once effect re-drive.** A crash between an effect's intent and its result is re-driven
   at most once; host-executed tools carry an idempotency key so the re-drive dedups.
-- **I4 — memory-restore is not replay.** On `ResumeActor{boot:false}` the harness already holds its state
+- **I4 — memory-restore is not replay.** When a memory snapshot is restored the harness already holds its state
   in RAM, so `Start.History` is empty and the journal is **not** replayed into it (replaying would
   double-apply). The `REQUIRES_MEMORY_SNAPSHOT` harness carries this on its side by never reconstructing
   state from `History`.
@@ -88,8 +88,11 @@ The `Placer` wires Sessions to the `Runtime` SPI and owns the incarnation lifecy
   surfaced as `ErrUnplaceable` → `FailedPrecondition`. Honest degradation, before any compute or log write.
 - **Fence** — the log is the single fence authority; the Placer mints a fence and binds it to both the
   incarnation and the controller. A `Restore` mints a fresh fence so a new incarnation supersedes a zombie.
-- **Dial** — the harness is reached by dialing `Incarnation.Address`. One dial path, two address forms:
-  a `unix://` socket for `runtime/local`; a `host:port` (the actor's `PodIP`) for `runtime/substrate`.
+- **Dial** — the harness is reached by dialing `Incarnation.Address` with `Incarnation.CallMetadata` on
+  every call. One dial path, two address forms: a `unix://` socket for `runtime/local`; the
+  `atenet-router` `host:port` for `runtime/substrate`, whose `ate-target-actor` metadata names the actor.
+  Before a session is checkpointed the Placer closes its open harness streams, because substrate waits
+  for an actor's in-flight requests to drain before it snapshots.
 - **Lifecycle map** — session `Suspend → Runtime.Snapshot`, `Resume → Runtime.Restore`, session-end
   `→ Runtime.Stop`.
 - **Fork** — capability-driven. A `STATELESS_REPLAY` session replay-forks (the child cold-boots and

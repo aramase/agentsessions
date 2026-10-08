@@ -27,12 +27,12 @@ The core must not depend on substrate. The seam is a `ControlClient` interface *
 (`runtime/substrate`), a small subset of substrate's ate-api Control gRPC:
 
 ```
-CreateActor · ResumeActor{boot} · SuspendActor · DeleteActor · GetActor
+CreateActor · ResumeActor · SuspendActor · DeleteActor · GetActor
 ```
 
 `SnapshotCloner` is an optional second interface, also defined in the core, for the clone-from-snapshot
-half of fork (`TagActorSnapshot`, `CreateActor{source_snapshot}`). Keeping it separate means a control
-client that predates substrate's ActorSnapshot APIs still satisfies the base interface.
+half of fork (`CreateTag`, `CreateActor{source_tag}`, `DeleteTag`). Keeping it separate means a control
+client without substrate's Tag APIs still satisfies the base interface.
 
 - `runtime/substrate` (in the core module) implements `api.Runtime` over that interface — no substrate
   import.
@@ -44,11 +44,18 @@ client that predates substrate's ActorSnapshot APIs still satisfies the base int
 
 | `api.Runtime` | substrate Control |
 |---|---|
-| `Create` | `CreateActor` + `ResumeActor{boot:true}` (cold boot) |
+| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots) |
 | `Snapshot(EXTERNAL)` | `SuspendActor` (RAM+disk snapshot to storage, worker freed, actor SUSPENDED) |
-| `Restore` | `ResumeActor{boot:false}` (restore RAM on a possibly-different worker) |
-| `Fork` (stateless) | `CreateActor` + `ResumeActor{boot:true}` — a replay-fork; the journal reconstructs the child |
-| `Fork` (memory) | `TagActorSnapshot` + `CreateActor{source_snapshot}` + `ResumeActor{boot:false}` — clones the parent's RAM |
+| `Restore` | `ResumeActor` (restores the actor's own snapshot on a possibly-different worker) |
+| `Fork` (stateless) | `CreateActor` + `ResumeActor` — a replay-fork; the journal reconstructs the child |
+| `Fork` (memory) | `CreateTag{source_actor}` + `CreateActor{source_tag}` + `ResumeActor` — clones the parent's RAM |
+
+There is no per-resume boot flag (substrate removed `ResumeActorRequest.boot`). Substrate picks the
+source itself: the actor's own snapshot, else the template's golden snapshot, else a cold boot of the
+template spec. That is enough for `STATELESS_REPLAY`: a new actor has no snapshot of its own, and the
+golden snapshot is the harness captured right after it became ready, before any session touched it,
+so it carries no session state. A template that must cold-boot on every resume would set
+`snapshotConfig.onCommit: DATA` instead; nothing here needs that.
 | `Stop` | `SuspendActor` + `DeleteActor` |
 | `Status` | `GetActor` |
 
@@ -57,13 +64,13 @@ harness a filesystem-only backend (`runtime/local`, a plain pod) refuses via `Ca
 
 ## Fork: cloning an actor from a durable snapshot
 
-Substrate creates one immutable `ActorSnapshot` per successful `SuspendActor` and points
-`Actor.latest_snapshot` at it; a new actor can be initialized from it via
-`CreateActor{source_snapshot}` (substrate #529 / #570). That is the compute half of a session fork.
+Every successful `SuspendActor` leaves the actor holding a new external snapshot
+(`Actor.status.external_snapshot`). `CreateTag{source_actor}` copies the snapshot a SUSPENDED actor
+holds into tag-owned storage, and `CreateActor{source_tag}` seeds a new actor from that copy. That is
+the compute half of a session fork.
 
-There is no `Fork` RPC to wait for. At this pin the `AteApi` service exposes no method that forks or
-clones an actor directly; the snapshot lifecycle (`TagActorSnapshot`, `CreateActor{source_snapshot}`)
-is the primitive it provides. That is the right half of the split: the compute layer copies a sandbox,
+There is no `Fork` RPC to wait for. The Control service exposes no method that forks or clones an
+actor directly; tags are the primitive it provides. That is the right half of the split: the compute layer copies a sandbox,
 while branching the log, holding the fence, and recording lineage stay session-layer concerns this
 repo owns. A session fork is therefore something to build here, not something to request upstream.
 
@@ -80,16 +87,22 @@ How the session layer uses it:
 
 Constraints inherited from substrate, enforced or surfaced rather than papered over:
 
-- `CreateActor` accepts a source snapshot **only by tag**; a canonical snapshot reference is rejected
-  with `FailedPrecondition`. The backend therefore tags the parent snapshot (`fork-<child-uid>`,
-  atespace-scoped) before cloning.
+- `CreateActor` seeds an actor **only from a tag**, and a tag names the suspended parent **actor**,
+  capturing whichever snapshot it holds when the tag is created. The router resumes an actor on any
+  request addressed to it, so the parent can be woken and suspended again between the fork's
+  checkpoint and its tag. The backend checks on both sides of the tag that the parent is still
+  SUSPENDED holding the snapshot the fork took (a suspend always writes a new one), and otherwise
+  deletes the tag and fails with `ErrSnapshotSuperseded`.
+- The backend takes one tag per child (`fork-<child-uid>`, atespace-scoped). Each tag owns a full
+  copy of the snapshot, and a child borrows its tag's copy until its own first suspend, so the tag
+  lives as long as the child and `Stop` deletes it after deleting the child.
 - A clone requires the snapshot's **exact source `ActorTemplate`**, and templates with external
   volumes are rejected.
 - A memory clone reflects the parent's RAM **now**, so it can only realize a fork at the log head.
   Forking a stateful session at a historical seq is refused with `ErrUnplaceable` →
   `FailedPrecondition` instead of pairing an old prefix with present-day RAM.
-- A deployment predating the ActorSnapshot APIs does not satisfy the optional `SnapshotCloner`
-  interface; a stateful fork there fails loudly rather than degrading to a lossy replay-fork.
+- A control client without the Tag APIs does not satisfy the optional `SnapshotCloner` interface; a
+  stateful fork there fails loudly rather than degrading to a lossy replay-fork.
 - The child fan-out is all-or-nothing. If a child fails to provision, the ones already created are
   torn down and their tags released before the error returns, since their UIDs are never handed to
   the caller and an orphan would be unreachable. Teardown runs on a context detached from the
@@ -113,23 +126,23 @@ Two properties make the failure paths above safe, both read off substrate's susp
 
 - **`SuspendActor` is idempotent on an already-SUSPENDED actor.** Every step after the load
   fast-forwards on its `IsComplete` check, so the call is a no-op that returns the actor still
-  carrying its original `latest_snapshot`. Retrying a fork whose fan-out failed after the checkpoint
+  carrying its original external snapshot. Retrying a fork whose fan-out failed after the checkpoint
   therefore neither errors nor mints a second snapshot — it re-reads the same one.
 - **A clone that never resumed is still deletable.** `CreateActor` starts an actor at
-  `STATUS_SUSPENDED`, and `DeleteActor` accepts `SUSPENDED`, `CRASHED`, or `DELETING`. So the
+  `ACTOR_STATE_SUSPENDED`, and `DeleteActor` accepts `SUSPENDED`, `CRASHED`, or `DELETING`. So the
   suspend-then-delete teardown the backend runs works on a child that failed at `ResumeActor`, and
   rollback does not strand an actor or leak its tag.
 
 ### It is not copy-on-write
 
-`RuntimeCapabilities.CoWFork` stays **false**. Substrate restores each actor into a private per-actor
-directory (cloud-hypervisor demand-pages from it), and there is no node-local snapshot cache yet
-(substrate #690), so an N-way fan-out costs N full snapshot restores and the memory image dominates
-the transfer. Fork is cheap in the sense that it skips re-deriving state, not in the sense that
+`RuntimeCapabilities.CoWFork` stays **false**. Each fork tag copies the parent's snapshot in object
+storage, and substrate restores each actor into a private per-actor directory, so an N-way fan-out
+costs N snapshot copies and N full restores, and the memory image dominates the transfer. Fork is cheap in the sense that it skips re-deriving state, not in the sense that
 children share pages.
 
-The first green run measured a 3-way fan-out at **5.06s total, ~1.69s per child**, on a kind cluster
-with the counter harness's small memory image.
+The first green run, at the earlier substrate pin where a tag did not copy the snapshot, measured a
+3-way fan-out at **5.06s total, ~1.69s per child**, on a kind cluster with the counter harness's
+small memory image. The suite logs the fan-out time on every run.
 
 Read that as an existence proof, not a bound: it is one snapshot size on one sandbox class. How
 the cost scales with snapshot size, and whether a paused (node-local) parent changes it, has not
@@ -143,9 +156,9 @@ would discard whatever the actor already holds:
 
 | Actor state | What `Create` does | Why |
 |---|---|---|
-| absent | `CreateActor` + `ResumeActor{boot:true}` | first placement; no durable state a boot could destroy |
-| `RUNNING` | attach, return its address | the second and later turns of a session, and the first turn of a **forked child** |
-| `SUSPENDED` | `ResumeActor{boot:false}` | the RAM snapshot is what must come back |
+| absent | `CreateActor` + `ResumeActor` | first placement; the actor starts from the template's golden snapshot, which holds no session state |
+| `RUNNING` | attach, return its incarnation | the second and later turns of a session, and the first turn of a **forked child** |
+| `SUSPENDED` | `ResumeActor` | restores the actor's own snapshot: the RAM is what must come back |
 
 The forked-child row is the one that matters for this feature. A child's actor is created from the
 parent's snapshot and resumed **before** its UID is handed out, so it is already `RUNNING` when the
@@ -153,76 +166,56 @@ first turn lands; cold-booting it there would throw away the cloned RAM the fork
 the harness would never rebuild it (I4). A control-client double that accepts every `CreateActor`
 cannot see any of this, which is why it is asserted against a live cluster.
 
-## The transport: direct pod-IP dial, not the mesh
+## The transport: harnesswire through atenet-router
 
-The harness is a `harnesswire` gRPC server. The key finding (verified empirically on a live cluster):
+The harness is a `harnesswire` gRPC server on port 80 in the actor. The host reaches it the only way
+current substrate supports: through `atenet-router`, the cluster's actor ingress.
 
-- The atenet mesh (atenet-router) proxies **HTTP/1.1** to actors — its shared Envoy dynamic-forward-proxy
-  cluster sets no HTTP/2 option — so a **gRPC** harness gets an Envoy `protocol error` through the router.
-  All substrate demo actors are HTTP/1.1; there is no gRPC-actor path through the mesh.
-- But the gVisor/micro-VM sandbox exposes the harness on the **worker pod's IP**. An **in-cluster** dial
-  straight to `ActorInfo.PodIp:80` speaks h2c/gRPC cleanly, bypassing the router entirely. The
-  harnesswire transport is unchanged.
+- Every substrate incarnation carries the router address (`atenet-router.ate-system.svc:80` by default,
+  `substrate.WithRouter` to override) and `CallMetadata` of `ate-target-actor: <atespace>/<actor>`.
+  The Placer's dialer attaches that metadata to every call. The router ignores the host and
+  authority; the header alone selects the actor (substrate `internal/atenet/headers.go`).
+- The router accepts h2c and carries gRPC unary, server-streaming and bidi calls, trailers included,
+  to the actor (substrate #1183; upstream e2e `TestIngressGRPC`). It resumes a suspended actor on
+  request, then forwards over mTLS to the worker's atunnel, which checks the actor is assigned to it
+  and proxies to port 80 over the actor's private veth.
+- Substrate removed the worker pod-IP:80 ingress on purpose (substrate #559), so there is no direct
+  path to fall back on, and the conformance Job needs no NetworkPolicy exception.
 
 ```mermaid
 flowchart LR
   job["conformance Job<br/>in-cluster `go test`"]
   api["ate-api-server"]
-  actor["actor harness<br/>gVisor / micro-VM"]
-  router["atenet-router"]
+  router["atenet-router<br/>(Envoy + ext_proc)"]
+  tunnel["atunnel on the worker"]
+  actor["actor harness :80<br/>gVisor / micro-VM"]
 
-  job -->|"Control gRPC<br/>ClusterIP + SA token"| api
-  job -->|"Harness.Connect h2c<br/>direct PodIP:80"| actor
-  job -.->|"mesh is HTTP/1.1 to actors;<br/>gRPC bypasses the router"| router
+  job -->|"Control gRPC<br/>Service + SA token"| api
+  job -->|"Harness.Connect h2c<br/>ate-target-actor"| router
+  router -->|"ResumeActor if needed"| api
+  router -->|"mTLS h2"| tunnel
+  tunnel -->|"h2c over veth"| actor
 ```
 
-Because pod IPs only route in-cluster, the conformance driver runs as a **Kubernetes Job**: it reaches
-`ate-api-server` over its ClusterIP with a mounted projected ServiceAccount token (the token scheme the
-api-server's `--ateapi-client-auth=token` expects), and the actor over `PodIp:80`. It needs no Kubernetes
-API access — the pod IP comes from `ResumeActor`, not the k8s API.
+Limits that come with the router, measured or read rather than assumed:
 
-### Reaching the actor costs two concessions
-
-Substrate is closing the door on direct actor dials, deliberately. Two upstream changes block the
-path the suite needs, and they are worked around differently because only one of them can be.
-
-1. **A NetworkPolicy that admits only the router** (agent-substrate `e8951bca`, 2026-07-29).
-   atecontroller reconciles a policy per WorkerPool whose sole ingress peer is
-   `ate-system`/`app=atenet-router`. Any other dial is a dropped SYN, which surfaces as `i/o timeout`
-   rather than `connection refused`. NetworkPolicy peers are additive, so
-   `deploy/substrate/e2e-netpol.yaml` unions in exactly one more peer — the conformance Job — in the
-   ephemeral CI cluster only.
-
-2. **Removal of the pod-IP:80 ingress** (agent-substrate `cc858876`). It deletes the
-   pod-IP:80 → actor-veth:80 DNAT and leaves an mTLS listener on `:443` that authorizes callers
-   against `spiffe://cluster.local/ns/ate-system/sa/atenet-router`. No policy can work around a
-   missing NAT rule, so `SUBSTRATE_REF` and `integrations/substrate/go.mod` are held at `b1bd558aba3c`,
-   the last commit that still installs it. Do not bump the pin.
-
-The pin is boxed in on both sides and the box is one commit deep: the ActorSnapshot lifecycle APIs the
-fork path needs landed 2026-07-30, the ingress removal followed immediately, and the NetworkPolicy
-landed 2026-07-29 — before the snapshot APIs, which is why it must be worked around rather than
-pinned away. There is no commit at which fork works and direct dial is unobstructed.
-
-### Why not just use the supported path
-
-Because there is not one yet, for a gRPC actor. atunnel reverse-proxies HTTP/1.1 and Envoy's actor
-cluster explicitly pins `Http1ProtocolOptions`, so the router cannot carry gRPC. That is
-[agent-substrate#254](https://github.com/agent-substrate/substrate/issues/254), open since 2026-06-16:
-"Currently only HTTP/1.1 is supported upstream of atenet, making it impossible to serve gRPC in an
-actor." The workaround suggested there — gRPC transcoding over HTTP/1.1 — does not reach us, because
-`Harness.Connect` is bidirectionally streaming and transcoding cannot express that.
-
-The fix is in flight. [#484](https://github.com/agent-substrate/substrate/issues/484) proposes that
-"Substrate ingress standardizes on HTTP, HTTPS, and HTTP/2 (TLS and h2c)", and #715 landed the CONNECT
-machinery on 2026-08-14; what remains is dataplane work. When h2c ingress lands, the right move is to
-delete both concessions above and dial the router, because upstream is unambiguous that direct actor
-dialing is not a supported interface.
-
-Two things have to be established before that swap: what the harness transport needs in order to
-reach an actor through the router, and whether bidirectional streaming survives the CONNECT tunnel.
-Neither has been tested yet.
-
+- **Route timeout.** The router bounds streams by `--route-timeout` (5m by default, one global value)
+  plus a 30s idle timeout. `TestHarnessStreamIdlePastRouteTimeout` holds a Connect stream idle, as a
+  turn parked on a slow model call does. On kind at `362637f9` the router reset it after **5m30s**:
+  a pending `Recv` got `Internal` "stream terminated by RST_STREAM with error code: INTERNAL_ERROR".
+  Through the Placer, which does not read while the host's model call runs, the turn failed only when
+  the host sent its late reply, with a bare `EOF`. A turn that can run past 5m30s needs the router's
+  timeout raised until substrate offers a per-route or streaming timeout.
+- **Checkpoint drain.** Before it snapshots, the worker waits for the actor's in-flight requests to
+  finish, and an idle open Connect stream is one of them. On kind at `362637f9`, `SuspendActor` under
+  such a stream took **5m30s**: it waited for the router to reset the stream. The Placer therefore
+  closes the session's harness streams before `Suspend` or a stateful `Fork` checkpoints it, which
+  brought the same suspend to 131ms (`TestSuspendUnderAnIdleHarnessStream`). That covers streams this
+  process opened; a turn driven by another host is fenced by the log but its stream stays open until
+  it next touches the log.
+- **No caller authentication.** The router does not check who is calling before it resumes an actor
+  and proxies to it, so any pod that can reach it can drive any harness. See
+  [security.md](security.md).
 
 ## The suite (`integrations/substrate/e2e`)
 
@@ -234,10 +227,10 @@ the suite — a driver that no longer builds fails in seconds rather than 15 min
 
 ### `TestStatelessReplayOnGVisor` — stateless-replay
 
-Places the echo harness (`STATELESS_REPLAY`, gVisor) through the `Placer`, drives one turn over the
-direct pod-IP dial, then re-dials and replays. Asserts: replay is **byte-identical**, model invocations
+Places the echo harness (`STATELESS_REPLAY`, gVisor) through the `Placer`, drives one turn through
+the router, then re-dials and replays. Asserts: replay is **byte-identical**, model invocations
 are **0** (I1), and the hash chain verifies. Same determinism triple as the unit conformance suite, now
-over the substrate mesh.
+through the substrate router.
 
 ### `TestMemorySnapshotSuspendResume` — memory continuity
 
@@ -289,9 +282,13 @@ standing. It copies substrate's own recipe: `create-kind-cluster` + `install-ate
 `run-microvm-demo-kind` for the stateful tier (stages the kata + cloud-hypervisor asset cache and
 installs the micro-VM SandboxConfig).
 
-The suite runs in two passes against that one cluster, both through `hack/run-e2e-job.sh`: the
-stateless tier first, so a break there fails before the expensive micro-VM staging, then the stateful
-tier and fork. Each pass is the same image with a different `-test.run`, and the Job's full `go test -v`
+The workflow applies only the WorkerPools (`deploy/substrate/*-workerpool.yaml`). ActorTemplates are
+substrate API resources in an atespace, so the suite creates its own through Control with the harness
+image the workflow built (`HARNESS_IMAGE`) and waits for each golden snapshot.
+
+The suite runs in three passes against that one cluster, all through `hack/run-e2e-job.sh`: the
+stateless tier and the suspend-under-an-idle-stream check first, so a break there fails before the
+expensive micro-VM staging, then the idle-stream route-timeout check, then the stateful tier and fork. Each pass is the same image with a different `-test.run`, and the Job's full `go test -v`
 output is echoed into the step, so a failure names the test and the assertion instead of surfacing an
 exit code. The nested-module test and core-neutrality gate also run per-PR in
 `.github/workflows/ci.yml`.
@@ -303,8 +300,11 @@ gh workflow run substrate-e2e.yml --ref main
 gh run watch "$(gh run list --workflow=substrate-e2e.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
 
-Local reproduction needs a Linux host with `/dev/kvm` (micro-VM); the recipe mirrors the CI steps against
-`hack/` in an agent-substrate checkout.
+The micro-VM tier needs a Linux host with `/dev/kvm`; the recipe mirrors the CI steps against `hack/` in
+an agent-substrate checkout. On a host without KVM (an arm64 Mac running kind), apply
+`deploy/substrate/counter-gvisor-workerpool.yaml` and run with `COUNTER_SANDBOX_CLASS=gvisor`: a gVisor
+FULL checkpoint also captures memory, so the stateful and fork tests exercise the same paths on gVisor.
+`KIND_CLUSTER_NAME` selects the cluster for the `hack/` scripts.
 
 ## In progress
 
@@ -314,11 +314,11 @@ Local reproduction needs a Linux host with `/dev/kvm` (micro-VM); the recipe mir
   session-level suspend/resume work through the `Placer` for the general memory harness. `Placer.Fork`
   sidesteps this today by calling `Runtime.Snapshot` directly, because a fork's parent must survive as
   the branch point.
-- **Fork tag lifecycle.** A fork tags the parent snapshot (`fork-<child-uid>`) so `CreateActor` can
-  reference it, and a tag is a retention pin. The tag name is derived from the child session UID, so
-  `Stop` releases it when the child is torn down and a failed fork releases it on the way out. A
-  long-lived child therefore holds one pin on its parent's snapshot for as long as it exists, which
-  is correct but means upstream snapshot GC (substrate #664) still governs the ceiling.
+- **Fork tag lifecycle.** A fork tags the parent (`fork-<child-uid>`) so `CreateActor` can seed the
+  child from it, and each tag owns a full copy of the parent's snapshot. The tag name is derived from
+  the child session UID, so `Stop` deletes it after the child and a failed fork deletes it on the way
+  out. One tag per fan-out instead of per child would save N-1 copies, but a shared tag can only be
+  deleted once every child has suspended at least once.
 - **Controller-side I4.** `controller.Exec` sends the full journal as `Start.History` even on the
   post-restore turn; for the general case the controller should send empty `History` on memory-restore.
   The counter's harness-side I4 carries the stateful tier today.
