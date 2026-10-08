@@ -86,6 +86,11 @@ type ControlClient interface {
 // decides "create it" vs "attach to it" without knowing that the client underneath speaks gRPC.
 var ErrActorNotFound = errors.New("substrate: actor not found")
 
+// ErrTagExists is what a SnapshotCloner must return (or wrap) from TagActor when a tag of that name
+// already exists, finished or left pending by an earlier attempt. It tells the backend the tag is
+// not this attempt's to clean up.
+var ErrTagExists = errors.New("substrate: tag already exists")
+
 // SnapshotID addresses an atespace-owned substrate Tag.
 type SnapshotID struct {
 	Atespace string
@@ -103,7 +108,9 @@ type SnapshotID struct {
 type SnapshotCloner interface {
 	// TagActor tags the external snapshot the SUSPENDED source actor holds right now. The tag gets
 	// its own copy of that snapshot, so suspending or deleting the source afterwards cannot collect
-	// it. The tag lives in the source actor's atespace.
+	// it. The tag lives in the source actor's atespace. Substrate reserves the tag's name before it
+	// copies, so a call that fails may still leave a pending tag behind; a name that was already
+	// taken fails with ErrTagExists.
 	TagActor(ctx context.Context, source ActorRef, tag SnapshotID) error
 	// CreateActorFromTag creates actor seeded from the snapshot behind tag. Substrate requires the
 	// actor's template to be the one the snapshot was taken under.
@@ -387,6 +394,12 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		return api.Incarnation{}, err
 	}
 	if err := cloner.TagActor(ctx, parent, tag); err != nil {
+		// Substrate reserves the tag before it copies the snapshot, so a failed or timed-out create
+		// can leave a pending tag holding a partial copy, and the atespace cannot be deleted while it
+		// remains. Release it, unless the name was already taken: that tag is not this attempt's.
+		if !errors.Is(err, ErrTagExists) {
+			b.releaseForkTag(ctx, cloner, child)
+		}
 		return api.Incarnation{}, fmt.Errorf("substrate: tag parent %q: %w", parent.Name, err)
 	}
 	if err := b.requireSnapshot(ctx, parent, ref.ExternalURI); err != nil {

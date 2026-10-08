@@ -109,6 +109,9 @@ func (ad *Adapter) GetActor(ctx context.Context, actor substrate.ActorRef) (subs
 // the ATESPACE scope: it may seed actors only in the source's atespace, which is all a fork needs
 // because the child is created alongside its parent. Publishing (cross-atespace reuse) is
 // deliberately not done here.
+//
+// A name already taken, whether by a finished tag or one a failed create left pending, is reported
+// as substrate.ErrTagExists, so the backend does not delete a tag this call did not reserve.
 func (ad *Adapter) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
 	_, err := ad.ctl.CreateTag(ctx, &atepb.CreateTagRequest{
 		Tag: &atepb.Tag{
@@ -117,6 +120,9 @@ func (ad *Adapter) TagActor(ctx context.Context, source substrate.ActorRef, tag 
 			SourceActor: objectRef(source),
 		},
 	})
+	if status.Code(err) == codes.AlreadyExists {
+		return fmt.Errorf("%w: %s/%s: %w", substrate.ErrTagExists, tag.Atespace, tag.Name, err)
+	}
 	return err
 }
 

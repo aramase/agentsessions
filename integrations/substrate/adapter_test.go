@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -24,6 +25,7 @@ type fakeControl struct {
 	lastTag    *atepb.Tag
 	actor      *atepb.Actor
 	getErr     error
+	tagErr     error
 }
 
 func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
@@ -57,6 +59,9 @@ func (f *fakeControl) CreateTag(_ context.Context, in *atepb.CreateTagRequest, _
 	f.calls = append(f.calls, "tag:"+tg.GetSourceActor().GetAtespace()+"/"+tg.GetSourceActor().GetName()+
 		"->"+tg.GetMetadata().GetAtespace()+"/"+tg.GetMetadata().GetName())
 	f.lastTag = tg
+	if f.tagErr != nil {
+		return nil, f.tagErr
+	}
 	return tg, nil
 }
 func (f *fakeControl) DeleteTag(_ context.Context, in *atepb.DeleteTagRequest, _ ...grpc.CallOption) (*atepb.Tag, error) {
@@ -116,13 +121,28 @@ func TestResumeMapsActorState(t *testing.T) {
 }
 
 // The pinned pre-WorkerAssignment client decoded a current Actor without error but read the status
-// message's bytes as a pod IP and the state as UNSPECIFIED. Decode real wire bytes, not a struct
-// literal, so a field renumbering upstream fails here instead of silently on a cluster.
+// message's bytes as a pod IP and the state as UNSPECIFIED. The bytes here are encoded by hand with
+// the field numbers of ateapi.proto at substrate 362637f9, not by the generated package, so a
+// regenerated client whose numbering no longer matches that server fails here instead of silently
+// on a cluster:
+//
+//	Actor.status = 7; ActorStatus.state = 1, worker_assignment = 2, external_snapshot = 4;
+//	WorkerAssignment.worker_pod = 3; ExternalSnapshot.snapshot_uri = 1; ACTOR_STATE_RUNNING = 2.
 func TestGetActorDecodesCurrentWireFormat(t *testing.T) {
-	wire, err := proto.Marshal(runningActor())
-	if err != nil {
-		t.Fatal(err)
+	message := func(num protowire.Number, body []byte) []byte {
+		b := protowire.AppendTag(nil, num, protowire.BytesType)
+		return protowire.AppendBytes(b, body)
 	}
+	str := func(num protowire.Number, v string) []byte {
+		b := protowire.AppendTag(nil, num, protowire.BytesType)
+		return protowire.AppendString(b, v)
+	}
+	var st []byte
+	st = protowire.AppendVarint(protowire.AppendTag(st, 1, protowire.VarintType), 2)
+	st = append(st, message(2, str(3, "echo-harness-7d9f-abcde"))...)
+	st = append(st, message(4, str(1, "gs://b/atespaces/space/actors/u1/snapshots/s1"))...)
+	wire := message(7, st)
+
 	var decoded atepb.Actor
 	if err := proto.Unmarshal(wire, &decoded); err != nil {
 		t.Fatal(err)
@@ -132,8 +152,24 @@ func TestGetActorDecodesCurrentWireFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Status != substrate.StatusRunning || info.Worker != "echo-harness-7d9f-abcde" {
-		t.Fatalf("decoded info=%+v, want a running actor on its worker", info)
+	if info.Status != substrate.StatusRunning || info.Worker != "echo-harness-7d9f-abcde" ||
+		info.Snapshot != "gs://b/atespaces/space/actors/u1/snapshots/s1" {
+		t.Fatalf("decoded info=%+v, want a running actor on its worker holding its snapshot", info)
+	}
+}
+
+// A tag name that is already taken was not reserved by this call. The backend must be able to tell,
+// so it does not delete someone else's tag while cleaning up its own failed attempt.
+func TestTagActorReportsAlreadyExistsAsSentinel(t *testing.T) {
+	f := &fakeControl{tagErr: status.Error(codes.AlreadyExists, "Tag space/fork-c already exists")}
+	err := FromClient(f).TagActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "p"}, substrate.SnapshotID{Atespace: "space", Name: "fork-c"})
+	if !errors.Is(err, substrate.ErrTagExists) {
+		t.Fatalf("err=%v want ErrTagExists", err)
+	}
+	f.tagErr = status.Error(codes.Unavailable, "object store unavailable")
+	err = FromClient(f).TagActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "p"}, substrate.SnapshotID{Atespace: "space", Name: "fork-c"})
+	if err == nil || errors.Is(err, substrate.ErrTagExists) {
+		t.Fatalf("err=%v want a failure that is not ErrTagExists", err)
 	}
 }
 
