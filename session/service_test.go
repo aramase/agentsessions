@@ -1026,8 +1026,21 @@ func TestSessionsRegistryHostToolResume(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(recs) != 7 || recs[3].Event.Result == nil || recs[3].Event.Result.ID != "service-call" || recs[4].Event.Message.Text() != "service-call:original-receipt" || recs[5].Event.Kind != api.EventEnd || recs[6].Event.Lifecycle == nil || recs[6].Event.Lifecycle.Kind != api.LifecycleResume {
+			if len(recs) != 7 || recs[3].Event.Kind != api.EventToolResult || recs[4].Event.Kind != api.EventOutput || recs[5].Event.Kind != api.EventEnd || recs[6].Event.Lifecycle == nil || recs[6].Event.Lifecycle.Kind != api.LifecycleResume {
 				t.Fatalf("resume did not complete the tool turn: %+v", recs)
+			}
+			var result *api.ToolResult
+			var output string
+			for _, rec := range recs {
+				switch rec.Event.Kind {
+				case api.EventToolResult:
+					result = rec.Event.Result
+				case api.EventOutput:
+					output = rec.Event.Message.Text()
+				}
+			}
+			if result == nil || result.ID != "service-call" || output != "service-call:original-receipt" {
+				t.Fatalf("resume lost tool correlation or receipt: result=%+v output=%q", result, output)
 			}
 			if err := log.Verify(); err != nil {
 				t.Fatal(err)

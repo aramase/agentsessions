@@ -992,21 +992,25 @@ func TestPlacerHostToolExecRecordsIntentBeforeEffect(t *testing.T) {
 		t.Fatal(err)
 	}
 	recs := assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventToolResult, api.EventOutput, api.EventEnd)
-	if effects != 1 || recs[3].Event.Result.ID != "call-1" || recs[3].Event.Result.Output["receipt"] != "receipt-1" || recs[4].Event.Message.Text() != "call-1:receipt-1" {
-		t.Fatalf("effect/result roundtrip: effects=%d result=%+v output=%q", effects, recs[3].Event.Result, recs[4].Event.Message.Text())
+	result := toolEvent(t, recs, api.EventToolResult).Result
+	output := toolEvent(t, recs, api.EventOutput).Message.Text()
+	if effects != 1 || result == nil || result.ID != "call-1" || result.Output["receipt"] != "receipt-1" || output != "call-1:receipt-1" {
+		t.Fatalf("effect/result roundtrip: effects=%d result=%+v output=%q", effects, result, output)
 	}
 }
 
 func TestPlacerHostToolFailures(t *testing.T) {
+	errExecutor := errors.New("host policy denied charge")
 	for _, tc := range []struct {
 		name, key, wantError string
+		wantErr              error
 		executor             bool
 		wantKinds            []api.EventKind
 		wantAttempts         int
 	}{
-		{"missing executor", "k1", "no tool executor configured", false, []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventError}, 0},
-		{"empty key", "", controller.ErrMissingIdempotencyKey.Error(), true, []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventError}, 0},
-		{"executor error", "k1", "host policy denied charge", true, []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventError}, 1},
+		{"missing executor", "k1", "no tool executor configured", nil, false, []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventError}, 0},
+		{"empty key", "", controller.ErrMissingIdempotencyKey.Error(), controller.ErrMissingIdempotencyKey, true, []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventError}, 0},
+		{"executor error", "k1", errExecutor.Error(), errExecutor, true, []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventError}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, err := sqlitelog.Open(":memory:")
@@ -1020,12 +1024,16 @@ func TestPlacerHostToolFailures(t *testing.T) {
 			if tc.executor {
 				opts = append(opts, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					attempts++
-					return api.ToolResult{}, errors.New("host policy denied charge")
+					return api.ToolResult{}, errExecutor
 				}))
 			}
 			p := newLocalPlacer(t, hostToolHarness{key: tc.key}, opts...)
 			_, err = p.Exec(context.Background(), log, "tool-failure", []api.Message{*api.TextMessage("user", "charge")}, 0)
-			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("exec error = %v, want %v", err, tc.wantErr)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantError) {
 				t.Fatalf("exec error = %v, want %q", err, tc.wantError)
 			}
 			if attempts != tc.wantAttempts {
@@ -1107,8 +1115,9 @@ func TestPlacerHostToolResumeServesCompletedPrefixWithoutExecutor(t *testing.T) 
 		t.Fatal(err)
 	}
 	recs := assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventToolResult, api.EventOutput, api.EventEnd, api.EventLifecycle)
-	if recs[4].Event.Message.Text() != "call-1:original-receipt" {
-		t.Fatalf("recorded receipt was not served: %+v", recs[4].Event)
+	output := toolEvent(t, recs, api.EventOutput)
+	if output.Message.Text() != "call-1:original-receipt" {
+		t.Fatalf("recorded receipt was not served: %+v", output)
 	}
 }
 
@@ -1134,7 +1143,9 @@ func TestPlacerHostToolResumeRedrivesTerminalIntentWithOriginalKey(t *testing.T)
 		t.Fatal(err)
 	}
 	recs := assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventToolResult, api.EventOutput, api.EventEnd, api.EventLifecycle)
-	if recs[3].Event.Result.ID != "call-1" || recs[4].Event.Message.Text() != "call-1:recovered" {
+	result := toolEvent(t, recs, api.EventToolResult).Result
+	output := toolEvent(t, recs, api.EventOutput).Message.Text()
+	if result == nil || result.ID != "call-1" || output != "call-1:recovered" {
 		t.Fatalf("recovered result lost correlation or receipt: %+v", recs)
 	}
 }
@@ -1313,7 +1324,9 @@ func TestPlacerHostToolResumeDedupsAfterReopeningJournalAndExecutor(t *testing.T
 		t.Fatal(err)
 	}
 	recs := assertToolKinds(t, recoveredLog, api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventToolResult, api.EventOutput, api.EventEnd, api.EventLifecycle)
-	if recs[3].Event.Result.ID != "call-1" || recs[3].Event.Result.Output["receipt"] != "receipt-1" || recs[4].Event.Message.Text() != "call-1:receipt-1" {
+	result := toolEvent(t, recs, api.EventToolResult).Result
+	output := toolEvent(t, recs, api.EventOutput).Message.Text()
+	if result == nil || result.ID != "call-1" || result.Output["receipt"] != "receipt-1" || output != "call-1:receipt-1" {
 		t.Fatalf("recovery did not serve the original receipt: %+v", recs)
 	}
 	var effects, receipts int
