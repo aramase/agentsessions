@@ -125,7 +125,9 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   that the checkpoint claimed its connection and writes nothing. Ending a stream only cancels the
   turn, so the checkpoint then waits, bounded by the caller's context, until every ended turn has
   made its fence call or returned. Only then is the second fence minted, the one the SUSPEND record
-  is written under, so no turn of this Placer can fail the record after the parent is already cold.
+  is written under, so no turn on this host can fail the record after the parent is already cold.
+  The connections and the checkpoint mark are per session and shared by every Placer of a
+  `placement.Registry`, so a turn routed to a different harness by `ExecRequest.harness` is covered.
   If the context ends first, the fork aborts before it snapshots. `Suspend` waits the same way
   before it snapshots. A turn driven by another process is outside this: only the log fences it.
 

@@ -190,7 +190,38 @@ func TestForkEndsTheParentsOpenHarnessStreamBeforeTheCheckpoint(t *testing.T) {
 	testCheckpointEndsOpenStream(t, forkCheckpoint)
 }
 
-func testCheckpointEndsOpenStream(t *testing.T, checkpoint func(*placement.Placer, *sqlitelog.Log, string) error) {
+// session.Service routes a turn by ExecRequest.harness but a Suspend or Fork by the session's
+// recorded harness, so the turn and the checkpoint can run on different Placers of one Registry.
+// The checkpoint must still end the turn's stream.
+func TestSuspendEndsAStreamOpenedByAnotherPlacerOfTheRegistry(t *testing.T) {
+	testCheckpointEndsOpenStream(t, suspendCheckpoint, registryPair)
+}
+
+func TestForkEndsAParentStreamOpenedByAnotherPlacerOfTheRegistry(t *testing.T) {
+	testCheckpointEndsOpenStream(t, forkCheckpoint, registryPair)
+}
+
+// placerPair returns the Placer a checkpoint runs on and the one a turn runs on.
+type placerPair func(t *testing.T, b placement.Backend, model func(context.Context, api.ModelRequest) (api.ModelResponse, error)) (checkpoint, turn *placement.Placer)
+
+// samePlacer runs the turn and the checkpoint on one Placer.
+func samePlacer(_ *testing.T, b placement.Backend, model func(context.Context, api.ModelRequest) (api.ModelResponse, error)) (*placement.Placer, *placement.Placer) {
+	p := placement.New(b, model)
+	return p, p
+}
+
+// registryPair runs them on two Placers of one Registry: the session's default harness and an
+// override, as ExecRequest.harness selects.
+func registryPair(t *testing.T, b placement.Backend, model func(context.Context, api.ModelRequest) (api.ModelResponse, error)) (*placement.Placer, *placement.Placer) {
+	t.Helper()
+	def, other := placement.New(b, model), placement.New(b, model)
+	if _, err := placement.NewRegistry("default", map[string]*placement.Placer{"default": def, "other": other}); err != nil {
+		t.Fatal(err)
+	}
+	return def, other
+}
+
+func testCheckpointEndsOpenStream(t *testing.T, checkpoint func(*placement.Placer, *sqlitelog.Log, string) error, pair ...placerPair) {
 	t.Helper()
 	hs := startHarnessServer(t, echoagent.Harness{})
 	store, err := sqlitelog.Open(":memory:")
@@ -221,11 +252,15 @@ func testCheckpointEndsOpenStream(t *testing.T, checkpoint func(*placement.Place
 			}
 		},
 	}
-	p := placement.New(backend, model)
+	mk := placerPair(samePlacer)
+	if len(pair) > 0 {
+		mk = pair[0]
+	}
+	p, turn := mk(t, backend, model)
 
 	execErr := make(chan error, 1)
 	go func() {
-		_, err := p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		_, err := turn.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
 		execErr <- err
 	}()
 	select {
@@ -307,7 +342,17 @@ func TestForkRefusesATurnOnTheParentDuringTheCheckpoint(t *testing.T) {
 	testCheckpointRefusesANewTurn(t, forkCheckpoint)
 }
 
-func testCheckpointRefusesANewTurn(t *testing.T, checkpoint func(*placement.Placer, *sqlitelog.Log, string) error) {
+// The refusal is per session, not per Placer: a turn routed to another harness of the same
+// Registry must not open a stream under the checkpoint either.
+func TestSuspendRefusesATurnOnAnotherPlacerOfTheRegistry(t *testing.T) {
+	testCheckpointRefusesANewTurn(t, suspendCheckpoint, registryPair)
+}
+
+func TestForkRefusesAParentTurnOnAnotherPlacerOfTheRegistry(t *testing.T) {
+	testCheckpointRefusesANewTurn(t, forkCheckpoint, registryPair)
+}
+
+func testCheckpointRefusesANewTurn(t *testing.T, checkpoint func(*placement.Placer, *sqlitelog.Log, string) error, pair ...placerPair) {
 	t.Helper()
 	hs := startHarnessServer(t, echoagent.Harness{})
 	store, err := sqlitelog.Open(":memory:")
@@ -317,13 +362,18 @@ func testCheckpointRefusesANewTurn(t *testing.T, checkpoint func(*placement.Plac
 	defer store.Close()
 	log := store.Session("s1")
 
-	var p *placement.Placer
+	var turn *placement.Placer
 	var execErr error
 	backend := &routedBackend{address: hs.addr, desc: memDescriptor}
 	backend.onSnapshot = func() {
-		_, execErr = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		_, execErr = turn.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
 	}
-	p = placement.New(backend, echoagent.Model)
+	mk := placerPair(samePlacer)
+	if len(pair) > 0 {
+		mk = pair[0]
+	}
+	var p *placement.Placer
+	p, turn = mk(t, backend, echoagent.Model)
 	if err := checkpoint(p, log, "s1"); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}

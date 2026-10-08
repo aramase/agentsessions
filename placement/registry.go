@@ -27,6 +27,12 @@ type Registry struct {
 // NewRegistry builds a registry over the named placers. defaultHarness names the entry used when a
 // caller does not specify one, and must itself be registered: a default that resolves to nothing
 // would turn every unqualified request into an error at call time rather than at startup.
+//
+// The placers are switched to one shared set of per-session connections and checkpoint marks.
+// session.Service routes a turn by ExecRequest.harness but a Suspend or Fork by the session's
+// recorded harness, so the two can land on different Placers; sharing the set is what lets a
+// checkpoint end, and refuse, a turn whichever Placer runs it. Call NewRegistry before any of the
+// placers runs a turn, and give each Placer to one registry only.
 func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, error) {
 	if len(placers) == 0 {
 		return nil, errors.New("placement: registry needs at least one harness")
@@ -45,9 +51,16 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, 
 	if _, ok := placers[defaultHarness]; !ok {
 		return nil, fmt.Errorf("placement: default harness %q is not registered", defaultHarness)
 	}
+	shared := &sessionSet{shared: true}
 	byName := make(map[string]*Placer, len(placers))
 	for name, p := range placers {
+		if p.sessions.shared {
+			return nil, fmt.Errorf("placement: harness %q: placer already belongs to another registry", name)
+		}
 		byName[name] = p
+	}
+	for _, p := range byName {
+		p.sessions = shared
 	}
 	return &Registry{byName: byName, defaultHarness: defaultHarness}, nil
 }

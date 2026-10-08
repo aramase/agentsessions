@@ -72,8 +72,11 @@ provide.
   passed to `placement.WithDialer` must change signature; `placement.DefaultDial` is the stock one.
 - `Placer.Suspend` and a stateful `Placer.Fork` now fence the log and close the session's open
   harness streams before checkpointing, and refuse new turns on that session until the checkpoint
-  is recorded, so nothing holds the checkpoint up. On kind, a suspend under an idle stream took
-  5m30s before this change and 131ms after. Two behavior changes follow:
+  is recorded, so nothing holds the checkpoint up. This holds across every Placer of a
+  `placement.Registry`, so a turn that `ExecRequest.harness` routed to another harness is covered:
+  `placement.NewRegistry` gives its Placers one shared per-session state, and now fails if a Placer
+  already belongs to another registry. On kind, a suspend under an idle stream took
+  5m30s before this change and 131ms after. Three behavior changes follow:
   - Before it snapshots, the checkpoint waits until every turn whose stream it closed has minted
     its fence or returned, bounded by the caller's context. If the context ends first, the
     checkpoint fails before snapshotting and records nothing.
