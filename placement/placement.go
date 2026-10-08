@@ -13,6 +13,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -246,10 +247,10 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	fenceFinished(nil)
 	inc.FenceToken = fence // Placer-owned: the incarnation carries the token Suspend/Resume will need
-	// A checkpoint may have ended this connection while the fence was being minted. Stop before the
-	// controller writes anything under a fence that is already being superseded.
-	if ctx.Err() != nil {
-		return inc, turnError(ctx, ctx.Err())
+	// A checkpoint may have begun while the fence was being minted. Stop before the controller writes
+	// anything under a fence the checkpoint's does not cover.
+	if err := live.checkSuperseded(ctx); err != nil {
+		return inc, err
 	}
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer),
 		controller.WithStart(cfg.config, cfg.resumeFromSeq))
@@ -450,6 +451,22 @@ type liveHarness struct {
 	once    sync.Once
 	close   func() error
 	err     error
+	// superseded is set, under Placer.mu, by the checkpoint that collects this connection, BEFORE
+	// that checkpoint mints its fence. A turn whose fence is newer than the checkpoint's is not
+	// fenced by it, but is guaranteed to observe this flag, so it checks the flag after minting.
+	superseded atomic.Bool
+}
+
+// checkSuperseded fails with errSuperseded if a checkpoint has claimed this connection or already
+// ended it. The turn calls it right after minting its fence and before it writes anything.
+func (l *liveHarness) checkSuperseded(ctx context.Context) error {
+	if l.superseded.Load() {
+		return errSuperseded
+	}
+	if ctx.Err() != nil {
+		return turnError(ctx, ctx.Err())
+	}
+	return nil
 }
 
 // end cancels the turn's context, which ends its Connect stream, and closes the connection. It is
@@ -522,9 +539,11 @@ func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
 }
 
 // beginCheckpoint marks the session as being checkpointed, so openHarness refuses new connections
-// for it, and returns the connections already open. Taking the mark and the set under one lock is
-// what leaves no window for a turn to slip a stream in between. Every call must be paired with
-// endCheckpoint.
+// for it, and returns the connections already open, each marked superseded. Taking the mark and the
+// set under one lock is what leaves no window for a turn to slip a stream in between. The caller
+// mints its fence after this returns, so a turn that mints a newer fence still sees the superseded
+// mark (checkSuperseded) and writes nothing. A connection stays marked even if the checkpoint
+// aborts. Every call must be paired with endCheckpoint.
 func (p *Placer) beginCheckpoint(sessionUID string) []*liveHarness {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -534,6 +553,7 @@ func (p *Placer) beginCheckpoint(sessionUID string) []*liveHarness {
 	p.checkpoints[sessionUID]++
 	open := make([]*liveHarness, 0, len(p.live[sessionUID]))
 	for l := range p.live[sessionUID] {
+		l.superseded.Store(true)
 		open = append(open, l)
 	}
 	return open
@@ -555,7 +575,8 @@ func (p *Placer) endCheckpoint(sessionUID string) {
 // just fenced from talking to a harness that will be frozen mid-call.
 //
 // The caller mints its fence first, so the turn being ended can no longer write: it records no
-// ERROR for an interruption the host caused, and it returns errSuperseded.
+// ERROR for an interruption the host caused, and it returns errSuperseded. A turn that minted a newer
+// fence in between is stopped by the superseded mark beginCheckpoint set (checkSuperseded).
 //
 // It covers connections opened by THIS Placer only. A turn driven by another process is fenced by
 // the log as before, but its stream stays open until that turn next touches the log or returns.
@@ -674,6 +695,9 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	fenceFinished(nil)
 	inc.FenceToken = fence
+	if err := live.checkSuperseded(ctx); err != nil {
+		return err
+	}
 	c, err := controller.New(log, p.model, p.controllerOpts(fence, sessionUID, controller.Observer{})...)
 	if err != nil {
 		return err
@@ -854,8 +878,7 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	// so no new turn opens a harness stream on the parent until the checkpoint is recorded.
 	open := p.beginCheckpoint(parentUID)
 	defer p.endCheckpoint(parentUID)
-	fence, err := parent.NewFence()
-	if err != nil {
+	if _, err := parent.NewFence(); err != nil {
 		return api.SnapshotRef{}, err
 	}
 	// A turn could still have committed in the window before that fence landed. Re-check now, while
@@ -867,6 +890,21 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 		return api.SnapshotRef{}, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
 	}
 	p.endHarnesses(ctx, parentUID, open)
+	// A turn this Placer had open may have minted a newer fence between ours and endHarnesses. It
+	// wrote nothing (checkSuperseded), but its fence would leave ours stale and fail the SUSPEND
+	// append after the parent is already cold. Every local stream is ended and no new one can open,
+	// so mint the fence the record is written under now, and re-check the head while aborting is
+	// still free.
+	fence, err := parent.NewFence()
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	if head, err = parent.Head(); err != nil {
+		return api.SnapshotRef{}, err
+	}
+	if atSeq != head {
+		return api.SnapshotRef{}, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
+	}
 	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID}, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, err

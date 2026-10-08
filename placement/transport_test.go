@@ -478,3 +478,123 @@ func TestSuspendWithNoOpenStreamStillCheckpoints(t *testing.T) {
 		t.Fatalf("snapshots=%d want 1", backend.snapshots)
 	}
 }
+
+// gatedStore holds the turn's fence mint until the checkpoint has minted its own, then holds the
+// checkpoint until the turn has either reached the model or returned. That forces the one ordering
+// the checkpoint's own fence does not cover: a turn already registered when the checkpoint began
+// mints a NEWER fence just before the checkpoint ends its stream.
+type gatedStore struct {
+	eventlog.Store
+
+	mu              sync.Mutex
+	fences          int
+	turnAtFence     chan struct{} // closed when the turn asks for its fence
+	checkpointFence chan struct{} // closed once the checkpoint's fence is minted
+	turnMoved       <-chan struct{}
+	turnDone        <-chan struct{}
+}
+
+func (g *gatedStore) NewFence() (int64, error) {
+	g.mu.Lock()
+	g.fences++
+	n := g.fences
+	g.mu.Unlock()
+	switch n {
+	case 1: // the turn's
+		close(g.turnAtFence)
+		<-g.checkpointFence
+		return g.Store.NewFence()
+	case 2: // the checkpoint's, minted before it ends the turn's stream
+		f, err := g.Store.NewFence()
+		close(g.checkpointFence)
+		select {
+		case <-g.turnMoved:
+		case <-g.turnDone:
+		case <-time.After(10 * time.Second):
+		}
+		return f, err
+	default:
+		return g.Store.NewFence()
+	}
+}
+
+// A turn that registered before the checkpoint began but mints its fence after the checkpoint's is
+// not fenced by it. The checkpoint still ends that turn's stream, so the turn must not be allowed to
+// write under its newer fence: it would journal the host's interruption as a harness ERROR.
+func TestSuspendSupersedesATurnThatMintsANewerFence(t *testing.T) {
+	testCheckpointSupersedesNewerFence(t, func(p *placement.Placer, log eventlog.Store, uid string) error {
+		_, err := p.Suspend(context.Background(), log, uid)
+		return err
+	})
+}
+
+// A stateful fork must do the same, and must not abort because the turn advanced the parent's head
+// under the newer fence.
+func TestForkSupersedesAParentTurnThatMintsANewerFence(t *testing.T) {
+	testCheckpointSupersedesNewerFence(t, func(p *placement.Placer, log eventlog.Store, uid string) error {
+		head, err := log.Head()
+		if err != nil {
+			return err
+		}
+		store, err := sqlitelog.Open(":memory:")
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		return p.Fork(context.Background(), log, uid, []placement.ForkChild{{UID: uid + "-child", Log: store.Session(uid + "-child")}}, head)
+	})
+}
+
+func testCheckpointSupersedesNewerFence(t *testing.T, checkpoint func(*placement.Placer, eventlog.Store, string) error) {
+	t.Helper()
+	hs := startHarnessServer(t, echoagent.Harness{})
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	modelCalled, turnDone := make(chan struct{}), make(chan struct{})
+	model := func(ctx context.Context, _ api.ModelRequest) (api.ModelResponse, error) {
+		close(modelCalled)
+		<-ctx.Done()
+		return api.ModelResponse{}, ctx.Err()
+	}
+	log := &gatedStore{
+		Store:           store.Session("s1"),
+		turnAtFence:     make(chan struct{}),
+		checkpointFence: make(chan struct{}),
+		turnMoved:       modelCalled,
+		turnDone:        turnDone,
+	}
+	p := placement.New(&routedBackend{address: hs.addr, desc: memDescriptor}, model)
+
+	var execErr error
+	go func() {
+		defer close(turnDone)
+		_, execErr = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+	}()
+	select {
+	case <-log.turnAtFence: // registered, so the checkpoint will see and end its stream
+	case <-turnDone:
+		t.Fatalf("turn returned before minting its fence: %v", execErr)
+	}
+	if err := checkpoint(p, log, "s1"); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	select {
+	case <-turnDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the superseded turn never returned")
+	}
+	if !errors.Is(execErr, placement.ErrCheckpointing) || !errors.Is(execErr, eventlog.ErrFenced) {
+		t.Fatalf("superseded turn returned %v, want ErrCheckpointing and eventlog.ErrFenced", execErr)
+	}
+	kinds := journalKinds(t, log)
+	if slices.Contains(kinds, api.EventError) {
+		t.Fatalf("journal %v records the checkpoint's interruption as a harness ERROR", kinds)
+	}
+	if kinds[len(kinds)-1] != api.EventLifecycle {
+		t.Fatalf("journal %v does not end in the checkpoint's SUSPEND", kinds)
+	}
+}
