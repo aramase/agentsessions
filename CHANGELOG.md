@@ -13,6 +13,8 @@ provide.
   that `main` previously accepted. Resume also rejects harnesses that leave recorded effects
   unconsumed instead of marking the turn complete. Journals containing handled tool executor
   failures remain recoverable without re-executing nonterminal intents that have no result.
+  Handled pre-intent mediation rejections remain recoverable when no recorded tool call is next,
+  without relaxing mediation identity checks on actual recorded calls.
 - Every new execution records `EXECUTION_START`, including default-config turns, so interrupted
   recovery can reject partially committed inputs. Binaries older than this release fail chain
   verification with a `content_hash` mismatch for sessions containing this event. Rollback is not

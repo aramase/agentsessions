@@ -61,6 +61,8 @@ func TestToolCallDivergenceFailsBeforeResultsOrEffects(t *testing.T) {
 		{"list order", func(c *api.ToolCall) { c.Args["order"] = []any{2, 1} }},
 		{"key", func(c *api.ToolCall) { c.IdempotencyKey = "different" }},
 		{"mediation", func(c *api.ToolCall) { c.Mediation = api.MediationRequiresApproval }},
+		{"in-harness mediation", func(c *api.ToolCall) { c.Mediation = api.MediationInHarnessReported }},
+		{"unspecified mediation", func(c *api.ToolCall) { c.Mediation = "" }},
 	}
 	for _, path := range []string{"replay", "resume result", "resume intent"} {
 		for _, change := range changes {
@@ -857,6 +859,136 @@ func TestRecoveryContinuesAfterHandledExecutorFailure(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type handlesMediationRejectionHarness struct {
+	call       api.ToolCall
+	emitOutput bool
+	interrupt  bool
+	toolError  error
+}
+
+func (*handlesMediationRejectionHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+	return (&callHarness{}).Describe(ctx)
+}
+
+func (h *handlesMediationRejectionHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	_, h.toolError = sink.ToolCall(ctx, h.call)
+	if h.emitOutput {
+		if err := sink.Output(ctx, "handled"); err != nil {
+			return err
+		}
+	}
+	if h.interrupt {
+		return errToolInterrupted
+	}
+	return nil
+}
+
+// Latching a pre-intent mediation rejection or consuming its OUTPUT would prevent the same
+// harness that handled the live rejection from successfully replaying or completing recovery.
+func TestHandledMediationRejectionPreservesContinuation(t *testing.T) {
+	for _, mediation := range []api.Mediation{
+		api.MediationRequiresApproval, api.MediationInHarnessReported, "",
+	} {
+		for _, path := range []string{"replay output", "replay exhausted", "resume output", "resume live tail"} {
+			t.Run(fmt.Sprintf("%s/%s", mediation, path), func(t *testing.T) {
+				log := memStore(t)
+				call := recordedToolCall()
+				call.Mediation = mediation
+				attempts := 0
+				executor := func(context.Context, api.ToolCall) (api.ToolResult, error) {
+					attempts++
+					return api.ToolResult{}, errors.New("unexpected tool execution")
+				}
+				original, err := controller.New(log, echoModel, controller.WithToolExecutor(executor))
+				if err != nil {
+					t.Fatal(err)
+				}
+				recovery := path == "resume output" || path == "resume live tail"
+				h := &handlesMediationRejectionHarness{
+					call: call, emitOutput: path == "replay output" || path == "resume output", interrupt: recovery,
+				}
+				err = original.Exec(t.Context(), h, []api.Message{msg("read")}, 0)
+				if recovery && !errors.Is(err, errToolInterrupted) || !recovery && err != nil {
+					t.Fatalf("fixture execution: %v", err)
+				}
+				assertMediationRejection(t, h.toolError, mediation)
+				before, err := log.Read(1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, rec := range before {
+					if rec.Event.Kind == api.EventToolCall || rec.Event.Kind == api.EventToolResult {
+						t.Fatalf("live rejection recorded a tool effect: %s", rec.Event.Kind)
+					}
+				}
+				fresh, err := controller.New(log, echoModel, controller.WithToolExecutor(executor))
+				if err != nil {
+					t.Fatal(err)
+				}
+				h = &handlesMediationRejectionHarness{call: call, emitOutput: path != "replay exhausted"}
+				if recovery {
+					if resumed, err := fresh.Resume(t.Context(), h); !resumed || err != nil {
+						t.Fatalf("handled mediation rejection prevented recovery: resumed=%v err=%v", resumed, err)
+					}
+				} else {
+					outputs, err := fresh.Replay(t.Context(), h)
+					if err != nil {
+						t.Fatalf("handled mediation rejection prevented replay: %v", err)
+					}
+					if path == "replay output" && !reflect.DeepEqual(outputs, []string{"handled"}) || path == "replay exhausted" && len(outputs) != 0 {
+						t.Fatalf("wrong replay output: %v", outputs)
+					}
+				}
+				assertMediationRejection(t, h.toolError, mediation)
+				if attempts != 0 || original.ModelInvocations() != 0 || fresh.ModelInvocations() != 0 {
+					t.Fatalf("mediation rejection invoked live effects: tools=%d", attempts)
+				}
+				after, err := log.Read(1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !recovery {
+					if !reflect.DeepEqual(before, after) {
+						t.Fatal("replay changed journal")
+					}
+				} else {
+					wantTail := []api.EventKind{api.EventEnd}
+					if path == "resume live tail" {
+						wantTail = []api.EventKind{api.EventOutput, api.EventEnd}
+					}
+					tail := after[len(before):]
+					if len(tail) != len(wantTail) {
+						t.Fatalf("resume appended unexpected events: %+v", tail)
+					}
+					for i, kind := range wantTail {
+						if tail[i].Event.Kind != kind {
+							t.Fatalf("resume event %d = %s, want %s", i, tail[i].Event.Kind, kind)
+						}
+					}
+					outputs, err := fresh.Replay(t.Context(), &handlesMediationRejectionHarness{call: call, emitOutput: true})
+					if err != nil || !reflect.DeepEqual(outputs, []string{"handled"}) {
+						t.Fatalf("recovered turn did not replay: outputs=%v err=%v", outputs, err)
+					}
+				}
+				if err := log.Verify(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func assertMediationRejection(t *testing.T, err error, mediation api.Mediation) {
+	t.Helper()
+	if err == nil || errors.Is(err, controller.ErrReplayDiverged) {
+		t.Fatalf("want handleable mediation rejection, got %v", err)
+	}
+	// Approval has no live sentinel; preserve that generic rejection without matching its text.
+	if mediation != api.MediationRequiresApproval && !errors.Is(err, controller.ErrUnmediatedToolCall) {
+		t.Fatalf("want unmediated tool rejection, got %v", err)
 	}
 }
 

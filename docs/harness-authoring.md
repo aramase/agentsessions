@@ -193,8 +193,10 @@ recover the original error: replay returns a bounded generic error for a matched
 result, and resume does the same when another recorded effect follows that intent, without
 re-executing it. Only a terminal unresolved intent is re-driven under its recorded key; the harness
 may handle a re-drive error and finish. Keyless controller-mediated calls are rejected before
-intent and consume no recorded effects during replay or resume. Identity and result-correlation
-mismatches remain fatal even if the harness handles their errors.
+intent and consume no recorded effects during replay or resume. Unsupported approval and invalid
+mediation rejections are also handleable without consuming evidence when no `TOOL_CALL` is next
+(or the recorded stream is exhausted). If a `TOOL_CALL` is next, its mediation must still match.
+Identity and result-correlation mismatches remain fatal even if the harness handles their errors.
 
 ### Rule 5: pass reasoning parts back verbatim
 

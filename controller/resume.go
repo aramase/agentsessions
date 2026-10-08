@@ -159,6 +159,9 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 	if s.i < len(s.stream) {
 		call, ok := s.recordedNext(api.EventToolCall)
 		if !ok {
+			if err := toolMediationError(tc.Mediation); err != nil {
+				return api.ToolResult{}, err
+			}
 			s.failure = fmt.Errorf("%w: resume expected a recorded tool call, found none", ErrReplayDiverged)
 			return api.ToolResult{}, s.failure
 		}

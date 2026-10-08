@@ -56,13 +56,8 @@ func (s *liveSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResul
 	//     yet implemented, so fail closed rather than execute unapproved.
 	//   - anything else (UNSPECIFIED, or IN_HARNESS_REPORTED which must use Report): reject, so an
 	//     unmediated keyless call cannot slip through and execute/re-drive without dedup (I3 bypass).
-	switch call.Mediation {
-	case api.MediationControllerMediated:
-		// handled below
-	case api.MediationRequiresApproval:
-		return api.ToolResult{}, errors.New("controller: REQUIRES_APPROVAL mediation is not yet implemented")
-	default:
-		return api.ToolResult{}, fmt.Errorf("%w (got %q)", ErrUnmediatedToolCall, call.Mediation)
+	if err := toolMediationError(call.Mediation); err != nil {
+		return api.ToolResult{}, err
 	}
 	// Every host-executed tool MUST carry an idempotency key: the crash-recovery re-drive (§3/I3)
 	// dedups on it. Reject before recording, so a keyless call leaves no unrecoverable intent.
@@ -73,6 +68,19 @@ func (s *liveSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResul
 		return api.ToolResult{}, err
 	}
 	return s.execTool(ctx, call)
+}
+
+// toolMediationError is the live pre-intent rejection. Replay may reproduce it only when no
+// TOOL_CALL is next; recorded call evidence must still pass the identity check.
+func toolMediationError(mediation api.Mediation) error {
+	switch mediation {
+	case api.MediationControllerMediated:
+		return nil
+	case api.MediationRequiresApproval:
+		return errors.New("controller: REQUIRES_APPROVAL mediation is not yet implemented")
+	default:
+		return fmt.Errorf("%w (got %q)", ErrUnmediatedToolCall, mediation)
+	}
 }
 
 // execTool runs a controller-mediated tool and write-ahead records its TOOL_RESULT. The TOOL_CALL
@@ -187,6 +195,9 @@ func (s *replaySink) ToolCall(_ context.Context, tc api.ToolCall) (api.ToolResul
 	}
 	call, ok := s.nextOf(api.EventToolCall)
 	if !ok {
+		if err := toolMediationError(tc.Mediation); err != nil {
+			return api.ToolResult{}, err
+		}
 		s.failure = fmt.Errorf("%w: replay expected a recorded tool call, found none", ErrReplayDiverged)
 		return api.ToolResult{}, s.failure
 	}
