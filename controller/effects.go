@@ -176,27 +176,35 @@ func (s *replaySink) Output(_ context.Context, delta string) error {
 	return nil
 }
 
-func (s *replaySink) ToolCall(_ context.Context, tc api.ToolCall) (_ api.ToolResult, err error) {
-	defer func() {
-		if err != nil {
-			s.failure = err
-		}
-	}()
+func (s *replaySink) ToolCall(_ context.Context, tc api.ToolCall) (api.ToolResult, error) {
 	if s.failure != nil {
 		return api.ToolResult{}, s.failure
 	}
+	// Live rejects keyless calls before recording intent. Do not consume a later valid call
+	// while reproducing that handleable rejection.
+	if tc.Mediation == api.MediationControllerMediated && tc.IdempotencyKey == "" {
+		return api.ToolResult{}, ErrMissingIdempotencyKey
+	}
 	call, ok := s.nextOf(api.EventToolCall)
 	if !ok {
-		return api.ToolResult{}, fmt.Errorf("%w: replay expected a recorded tool call, found none", ErrReplayDiverged)
+		s.failure = fmt.Errorf("%w: replay expected a recorded tool call, found none", ErrReplayDiverged)
+		return api.ToolResult{}, s.failure
 	}
 	if err := matchToolCall(tc, call.ToolCall); err != nil {
+		s.failure = err
 		return api.ToolResult{}, err
 	}
 	tr, ok := s.nextOf(api.EventToolResult)
 	if !ok {
-		return api.ToolResult{}, fmt.Errorf("%w: replay expected a recorded tool result, found none", ErrReplayDiverged)
+		// Older writers leave no result when the harness handles an executor error. There is
+		// no diagnostic payload to recover, and the next effect belongs to the continuation.
+		return api.ToolResult{}, errors.New("controller: recorded tool call has no result")
 	}
-	return recordedToolResult(call.ToolCall, tr.Result)
+	result, err := recordedToolResult(call.ToolCall, tr.Result)
+	if err != nil {
+		s.failure = err
+	}
+	return result, err
 }
 
 func (s *replaySink) Report(context.Context, api.ToolResult) error {

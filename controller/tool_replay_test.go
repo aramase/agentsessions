@@ -160,23 +160,14 @@ func TestMalformedToolEvidenceFailsClosed(t *testing.T) {
 		name   string
 		events []api.Event
 		call   api.ToolCall
-		replay bool
 	}{
-		{"no recorded call", []api.Event{{Kind: api.EventToolResult, Result: &result}}, base, true},
-		{"missing call", []api.Event{{Kind: api.EventToolCall}, {Kind: api.EventToolResult, Result: &result}}, base, true},
-		{"missing result", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}, {Kind: api.EventToolResult}}, base, true},
-		{"wrong result id", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}, {Kind: api.EventToolResult, Result: &api.ToolResult{ID: "wrong"}}}, base, true},
-		{"no recorded result", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}}, base, true},
-		{"nonterminal intent output", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}, {Kind: api.EventOutput, Message: api.TextMessage("assistant", "unexpected")}}, base, false},
-		{"nonterminal intent call", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}, {Kind: api.EventToolCall, ToolCall: &base}}, base, false},
-		{"nonterminal intent usage", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}, {Kind: api.EventUsage, Usage: &api.Usage{}}}, base, false},
-		{"nonterminal intent model", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}, {Kind: api.EventModelCall, ModelCall: &api.ModelCall{ID: "model-1"}}}, base, false},
+		{"no recorded call", []api.Event{{Kind: api.EventToolResult, Result: &result}}, base},
+		{"missing call", []api.Event{{Kind: api.EventToolCall}, {Kind: api.EventToolResult, Result: &result}}, base},
+		{"missing result payload", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}, {Kind: api.EventToolResult}}, base},
+		{"wrong result id", []api.Event{{Kind: api.EventToolCall, ToolCall: &base}, {Kind: api.EventToolResult, Result: &api.ToolResult{ID: "wrong"}}}, base},
 	}
 	for _, test := range cases {
 		for _, recovery := range []bool{false, true} {
-			if !recovery && !test.replay {
-				continue
-			}
 			t.Run(test.name+map[bool]string{false: "/replay", true: "/resume"}[recovery], func(t *testing.T) {
 				log := memStore(t)
 				appendToolEvidence(t, log, test.events, !recovery)
@@ -193,13 +184,6 @@ func TestMalformedToolEvidenceFailsClosed(t *testing.T) {
 					_, err = c.Resume(t.Context(), h)
 				} else {
 					_, err = c.Replay(t.Context(), h)
-				}
-				// A terminal intent without result is the one valid recovery window.
-				if recovery && test.name == "no recorded result" {
-					if err != nil || attempts != 1 {
-						t.Fatalf("terminal recovery: attempts=%d err=%v", attempts, err)
-					}
-					return
 				}
 				if !errors.Is(err, controller.ErrReplayDiverged) || attempts != 0 || len(h.results) != 0 {
 					t.Fatalf("want malformed-evidence divergence: attempts=%d results=%d err=%v", attempts, len(h.results), err)
@@ -258,6 +242,11 @@ func TestRecoveryRejectsInvalidRecordedToolIntent(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// A keyless emitted call is rejected before intent on the live path. Emit a valid
+				// key here so recovery must inspect (and reject) the invalid recorded intent.
+				if call.IdempotencyKey == "" {
+					call.IdempotencyKey = "key-1"
+				}
 				h := &callHarness{calls: []api.ToolCall{call}}
 				if path == "replay" {
 					_, err = c.Replay(t.Context(), h)
@@ -294,10 +283,11 @@ func (h handledToolErrorHarness) Run(ctx context.Context, _ *api.Start, sink api
 
 func TestHandledToolDivergenceCannotActivateLiveEffectsOrVerify(t *testing.T) {
 	for _, test := range []struct {
-		name              string
-		badKey, badResult bool
+		name                           string
+		badKey, badResult, wrongResult bool
 	}{
-		{name: "changed call"}, {name: "invalid terminal key", badKey: true}, {name: "missing result payload", badResult: true},
+		{name: "changed call"}, {name: "invalid terminal key", badKey: true},
+		{name: "missing result payload", badResult: true}, {name: "wrong result correlation", wrongResult: true},
 	} {
 		for _, replay := range []bool{false, true} {
 			if replay && test.badKey {
@@ -312,11 +302,15 @@ func TestHandledToolDivergenceCannotActivateLiveEffectsOrVerify(t *testing.T) {
 				events := []api.Event{{Kind: api.EventToolCall, ToolCall: &call}}
 				if test.badResult {
 					events = append(events, api.Event{Kind: api.EventToolResult})
+				} else if test.wrongResult {
+					events = append(events, api.Event{Kind: api.EventToolResult, Result: &api.ToolResult{ID: "different"}})
 				} else if replay {
 					events = append(events, api.Event{Kind: api.EventToolResult, Result: &api.ToolResult{ID: call.ID}})
 				}
 				appendToolEvidence(t, log, events, replay)
-				if !test.badKey && !test.badResult {
+				if test.badKey {
+					call.IdempotencyKey = "key-1"
+				} else if !test.badResult && !test.wrongResult {
 					call.ID = "different"
 				}
 				tools, models := 0, 0
@@ -410,12 +404,16 @@ func TestToolArgumentPresenceRemainsDistinct(t *testing.T) {
 		recorded, emitted map[string]any
 	}{
 		{"absent vs empty", nil, map[string]any{}},
+		{"unconvertible emitted args", nil, map[string]any{"unsupported": make(chan int)}},
+		{"unconvertible recorded args", map[string]any{"unsupported": make(chan int)}, nil},
+		{"both unconvertible", map[string]any{"unsupported": make(chan int)}, map[string]any{"unsupported": make(chan int)}},
 		{"missing vs null", map[string]any{}, map[string]any{"x": nil}},
 		{"object vs list", map[string]any{"x": map[string]any{}}, map[string]any{"x": []any{}}},
 	} {
 		for _, path := range []string{"replay", "resume result", "resume intent"} {
 			t.Run(path+"/"+test.name, func(t *testing.T) {
-				log := memStore(t)
+				// The memory store preserves raw Go args; SQLite has already converted them.
+				log := eventlog.AsStore(eventlog.New())
 				call := recordedToolCall()
 				call.Args = test.recorded
 				events := []api.Event{{Kind: api.EventToolCall, ToolCall: &call}}
@@ -428,8 +426,9 @@ func TestToolArgumentPresenceRemainsDistinct(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				call.Args = test.emitted
-				h := &callHarness{calls: []api.ToolCall{call}}
+				emitted := call
+				emitted.Args = test.emitted
+				h := &callHarness{calls: []api.ToolCall{emitted}}
 				if path == "replay" {
 					_, err = c.Replay(t.Context(), h)
 				} else {
@@ -681,59 +680,216 @@ func TestForkCutAtToolCallChecksIdentityBeforeRedrive(t *testing.T) {
 	}
 }
 
-type continuesAfterToolFailureHarness struct{ call api.ToolCall }
+// This harness handles the first tool error, then emits further effects. Recovery must return an
+// error without consuming those effects or stealing the later call's receipt.
+type continuesAfterToolFailureHarness struct {
+	calls     []api.ToolCall
+	interrupt bool
+	toolError error
+	results   []api.ToolResult
+}
 
-func (continuesAfterToolFailureHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+func (*continuesAfterToolFailureHarness) Describe(ctx context.Context) (api.Descriptor, error) {
 	return (&callHarness{}).Describe(ctx)
 }
 
-func (h continuesAfterToolFailureHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
-	_, _ = sink.ToolCall(ctx, h.call)
+func (h *continuesAfterToolFailureHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	_, h.toolError = sink.ToolCall(ctx, h.calls[0])
+	for _, call := range h.calls[1:] {
+		result, err := sink.ToolCall(ctx, call)
+		if err != nil {
+			return err
+		}
+		h.results = append(h.results, result)
+	}
 	if err := sink.Output(ctx, "handled tool failure"); err != nil {
 		return err
 	}
-	return errToolInterrupted
+	if err := sink.Usage(ctx, api.Usage{InputTokens: 1}); err != nil {
+		return err
+	}
+	if _, err := sink.Model(ctx, api.ModelRequest{Model: "test"}); err != nil {
+		return err
+	}
+	if h.interrupt {
+		return errToolInterrupted
+	}
+	return nil
 }
 
-// Main does not journal executor failures as TOOL_RESULT. A harness can handle that failure and
-// append another effect before interruption. Recovery cannot safely correlate or re-drive it.
-func TestRecoveryFailsClosedAfterHandledExecutorFailure(t *testing.T) {
-	log := memStore(t)
-	h := continuesAfterToolFailureHarness{call: recordedToolCall()}
-	original, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
-		return api.ToolResult{}, errors.New("executor failed")
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := original.Exec(t.Context(), h, []api.Message{msg("read")}, 0); !errors.Is(err, errToolInterrupted) {
-		t.Fatalf("fixture: %v", err)
-	}
-	recs, err := log.Read(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var intent, output int64
-	for _, rec := range recs {
-		switch rec.Event.Kind {
-		case api.EventToolCall:
-			intent = rec.Seq
-		case api.EventOutput:
-			output = rec.Seq
-		case api.EventToolResult:
-			t.Fatal("fixture unexpectedly journaled an executor failure receipt")
+func TestCompletedTurnReplaysHandledToolFailures(t *testing.T) {
+	for _, keyless := range []bool{false, true} {
+		for _, laterCall := range []bool{false, true} {
+			t.Run(fmt.Sprintf("keyless=%v/later-call=%v", keyless, laterCall), func(t *testing.T) {
+				log := memStore(t)
+				failed := recordedToolCall()
+				if keyless {
+					failed.IdempotencyKey = ""
+				}
+				calls := []api.ToolCall{failed}
+				if laterCall {
+					next := recordedToolCall()
+					next.ID, next.IdempotencyKey = "call-2", "key-2"
+					calls = append(calls, next)
+				}
+				original, err := controller.New(log, echoModel, controller.WithToolExecutor(func(_ context.Context, call api.ToolCall) (api.ToolResult, error) {
+					if call.ID == "call-1" {
+						return api.ToolResult{}, errToolInterrupted
+					}
+					return api.ToolResult{Output: map[string]any{"receipt": "second"}}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				h := &continuesAfterToolFailureHarness{calls: calls}
+				if err := original.Exec(t.Context(), h, []api.Message{msg("read")}, 0); err != nil {
+					t.Fatal(err)
+				}
+				want := errToolInterrupted
+				if keyless {
+					want = controller.ErrMissingIdempotencyKey
+				}
+				if !errors.Is(h.toolError, want) {
+					t.Fatalf("live tool error = %v, want %v", h.toolError, want)
+				}
+				before, err := log.Read(1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fresh, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+					t.Fatal("replay invoked executor")
+					return api.ToolResult{}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				replayed := &continuesAfterToolFailureHarness{calls: calls}
+				outputs, err := fresh.Replay(t.Context(), replayed)
+				if err != nil {
+					t.Fatalf("handled tool error prevented replay: %v", err)
+				}
+				assertRecordedToolFailure(t, replayed.toolError, keyless)
+				if !reflect.DeepEqual(outputs, []string{"handled tool failure", "echo:"}) || fresh.ModelInvocations() != 0 || fresh.ToolInvocations() != 0 {
+					t.Fatalf("wrong replay outputs/effects: %v", outputs)
+				}
+				if laterCall && (len(replayed.results) != 1 || replayed.results[0].ID != "call-2" || replayed.results[0].Output["receipt"] != "second") {
+					t.Fatalf("later receipt misassociated: %+v", replayed.results)
+				}
+				after, err := log.Read(1)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("replay changed journal: %v", err)
+				}
+			})
 		}
 	}
-	if intent == 0 || output != intent+1 {
-		t.Fatal("fixture lacks an intent followed by a handled-failure output")
+}
+
+func assertRecordedToolFailure(t *testing.T, err error, keyless bool) {
+	t.Helper()
+	if keyless {
+		if !errors.Is(err, controller.ErrMissingIdempotencyKey) {
+			t.Fatalf("keyless error = %v", err)
+		}
+		return
 	}
-	attempts := 0
-	fresh, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) { attempts++; return api.ToolResult{}, nil }))
-	if err != nil {
-		t.Fatal(err)
+	// The legacy journal has no failure payload to recover. Return only a bounded generic
+	// diagnostic, not fabricated success or a fidelity error that makes recovery impossible.
+	if err == nil || errors.Is(err, controller.ErrReplayDiverged) || len(err.Error()) > 128 {
+		t.Fatalf("want bounded non-divergence recorded failure, got %v", err)
 	}
-	if _, err := fresh.Resume(t.Context(), h); !errors.Is(err, controller.ErrReplayDiverged) || attempts != 0 {
-		t.Fatalf("uncertain intent re-driven: attempts=%d err=%v", attempts, err)
+}
+
+func TestRecoveryContinuesAfterHandledExecutorFailure(t *testing.T) {
+	for _, keyless := range []bool{false, true} {
+		for _, laterCall := range []bool{false, true} {
+			t.Run(fmt.Sprintf("keyless=%v/later-call=%v", keyless, laterCall), func(t *testing.T) {
+				log := memStore(t)
+				failed := recordedToolCall()
+				if keyless {
+					failed.IdempotencyKey = ""
+				}
+				calls := []api.ToolCall{failed}
+				if laterCall {
+					next := recordedToolCall()
+					next.ID, next.IdempotencyKey = "call-2", "key-2"
+					calls = append(calls, next)
+				}
+				original, err := controller.New(log, echoModel, controller.WithToolExecutor(func(_ context.Context, call api.ToolCall) (api.ToolResult, error) {
+					if call.ID == "call-1" {
+						return api.ToolResult{}, errToolInterrupted
+					}
+					return api.ToolResult{Output: map[string]any{"receipt": "second"}}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := original.Exec(t.Context(), &continuesAfterToolFailureHarness{calls: calls, interrupt: true}, []api.Message{msg("read")}, 0); !errors.Is(err, errToolInterrupted) {
+					t.Fatalf("fixture: %v", err)
+				}
+				before, err := log.Head()
+				if err != nil {
+					t.Fatal(err)
+				}
+				fresh, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+					t.Fatal("handled failure repeated an effect")
+					return api.ToolResult{}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				h := &continuesAfterToolFailureHarness{calls: calls}
+				if resumed, err := fresh.Resume(t.Context(), h); !resumed || err != nil {
+					t.Fatalf("handled failure prevented completion: resumed=%v err=%v", resumed, err)
+				}
+				assertRecordedToolFailure(t, h.toolError, keyless)
+				if laterCall && (len(h.results) != 1 || h.results[0].ID != "call-2" || h.results[0].Output["receipt"] != "second") {
+					t.Fatalf("later receipt misassociated: %+v", h.results)
+				}
+				if fresh.ModelInvocations() != 0 || fresh.ToolInvocations() != 0 {
+					t.Fatal("recorded prefix invoked live effects")
+				}
+				tail, err := log.Read(before + 1)
+				if err != nil || len(tail) != 1 || tail[0].Event.Kind != api.EventEnd {
+					t.Fatalf("resume should append only END: tail=%+v err=%v", tail, err)
+				}
+				if resumed, err := fresh.Resume(t.Context(), h); resumed || err != nil {
+					t.Fatalf("completed turn resumed again: resumed=%v err=%v", resumed, err)
+				}
+			})
+		}
+	}
+}
+
+func TestRecoveryHandlesTerminalToolRedriveErrors(t *testing.T) {
+	// An executor may itself return ErrReplayDiverged: provenance, not errors.Is, determines
+	// whether to latch. The executor error must remain handleable just like any live error.
+	for _, executorErr := range []error{nil, errToolInterrupted, controller.ErrReplayDiverged} {
+		t.Run(fmt.Sprint(executorErr), func(t *testing.T) {
+			log := memStore(t)
+			call := recordedToolCall()
+			appendToolEvidence(t, log, []api.Event{{Kind: api.EventToolCall, ToolCall: &call}}, false)
+			attempts := 0
+			c, err := controller.New(log, echoModel, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+				attempts++
+				return api.ToolResult{}, executorErr
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := &continuesAfterToolFailureHarness{calls: []api.ToolCall{call}}
+			if resumed, err := c.Resume(t.Context(), h); !resumed || err != nil {
+				t.Fatalf("redrive prevented completion: resumed=%v err=%v", resumed, err)
+			}
+			if !errors.Is(h.toolError, executorErr) || attempts != 1 || c.ModelInvocations() != 1 {
+				t.Fatalf("redrive error/effects: toolErr=%v attempts=%d models=%d", h.toolError, attempts, c.ModelInvocations())
+			}
+			// A failed re-drive followed by handled output is now nonterminal evidence. Replay
+			// must not retry it, and must still correlate the recorded model/output suffix.
+			h = &continuesAfterToolFailureHarness{calls: []api.ToolCall{call}}
+			if _, err := c.Replay(t.Context(), h); err != nil || attempts != 1 || c.ModelInvocations() != 1 {
+				t.Fatalf("redrive completion did not replay: attempts=%d err=%v", attempts, err)
+			}
+		})
 	}
 }
 

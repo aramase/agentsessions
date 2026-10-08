@@ -147,32 +147,39 @@ func (s *resumeSink) Output(ctx context.Context, delta string) error {
 	return s.live.Output(ctx, delta)
 }
 
-func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (_ api.ToolResult, err error) {
+func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
 	if s.failure != nil {
 		return api.ToolResult{}, s.failure
 	}
+	// A keyless live rejection has no intent in the prefix. Reproduce it without consuming
+	// another call's evidence, just as on replay.
+	if tc.Mediation == api.MediationControllerMediated && tc.IdempotencyKey == "" {
+		return api.ToolResult{}, ErrMissingIdempotencyKey
+	}
 	if s.i < len(s.stream) {
-		defer func() {
-			if err != nil {
-				s.failure = err
-			}
-		}()
 		call, ok := s.recordedNext(api.EventToolCall)
 		if !ok {
-			return api.ToolResult{}, fmt.Errorf("%w: resume expected a recorded tool call, found none", ErrReplayDiverged)
+			s.failure = fmt.Errorf("%w: resume expected a recorded tool call, found none", ErrReplayDiverged)
+			return api.ToolResult{}, s.failure
 		}
 		if err := matchToolCall(tc, call.ToolCall); err != nil {
+			s.failure = err
 			return api.ToolResult{}, err
 		}
 		if tr, ok := s.recordedNext(api.EventToolResult); ok {
-			return recordedToolResult(call.ToolCall, tr.Result)
+			result, err := recordedToolResult(call.ToolCall, tr.Result)
+			if err != nil {
+				s.failure = err
+			}
+			return result, err
 		}
-		// Only a terminal intent can be safely re-driven. A following effect without a result
-		// provides no receipt to correlate. Main can also write this shape when a harness handles
-		// an executor failure and continues; fail closed rather than repeat an uncertain effect.
+		// A following effect proves the harness continued after the unresolved call. Return a
+		// bounded failure without repeating the uncertain effect or consuming its continuation.
 		if s.i != len(s.stream) {
-			return api.ToolResult{}, fmt.Errorf("%w: tool intent has no result before the next recorded effect", ErrReplayDiverged)
+			return api.ToolResult{}, errors.New("controller: recorded tool call has no result")
 		}
+		// Only a terminal intent is re-driven under its recorded key. Executor errors are live
+		// outcomes, not evidence failures: the harness may handle them and finish the turn.
 		return s.live.execTool(ctx, *call.ToolCall)
 	}
 	return s.live.ToolCall(ctx, tc)

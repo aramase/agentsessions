@@ -9,6 +9,10 @@ provide.
 
 ### Compatibility
 
+- Replay and interrupted-turn resume now reject tool-call identity and result-correlation mismatches
+  that `main` previously accepted. Resume also rejects harnesses that leave recorded effects
+  unconsumed instead of marking the turn complete. Journals containing handled tool executor
+  failures remain recoverable without re-executing nonterminal intents that have no result.
 - Every new execution records `EXECUTION_START`, including default-config turns, so interrupted
   recovery can reject partially committed inputs. Binaries older than this release fail chain
   verification with a `content_hash` mismatch for sessions containing this event. Rollback is not

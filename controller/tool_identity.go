@@ -42,6 +42,9 @@ func matchToolCall(emitted api.ToolCall, recorded *api.ToolCall) error {
 	// and the conversion's existing precision limitations rather than reinterpret old evidence.
 	want := wire.ToolCallFromProto(wire.ToolCallToProto(recorded)).Args
 	got := wire.ToolCallFromProto(wire.ToolCallToProto(&emitted)).Args
+	if recorded.Args != nil && want == nil || emitted.Args != nil && got == nil {
+		return fmt.Errorf("%w: tool arguments could not be represented in the journal", ErrReplayDiverged)
+	}
 	if !reflect.DeepEqual(got, want) {
 		return fmt.Errorf("%w: tool arguments mismatch", ErrReplayDiverged)
 	}

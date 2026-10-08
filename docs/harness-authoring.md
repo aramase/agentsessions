@@ -185,7 +185,16 @@ Replay and recorded-prefix recovery compare that identity before serving a resul
 intent. Keep arguments JSON-shaped: booleans, strings, null, numbers, string-keyed objects and lists.
 Use finite numbers; integers should stay within −9,007,199,254,740,991 to +9,007,199,254,740,991, and
 fractional values must tolerate float64 rounding. These are author obligations for the existing
-protobuf representation, not a guarantee of strict argument validation.
+protobuf representation, not a guarantee of strict argument validation. Non-nil arguments that
+cannot be represented by the journal conversion are rejected as replay divergence.
+
+A harness may handle an executor error and continue. Journals without failure receipts cannot
+recover the original error: replay returns a bounded generic error for a matched intent with no
+result, and resume does the same when another recorded effect follows that intent, without
+re-executing it. Only a terminal unresolved intent is re-driven under its recorded key; the harness
+may handle a re-drive error and finish. Keyless controller-mediated calls are rejected before
+intent and consume no recorded effects during replay or resume. Identity and result-correlation
+mismatches remain fatal even if the harness handles their errors.
 
 ### Rule 5: pass reasoning parts back verbatim
 
