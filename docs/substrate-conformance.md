@@ -211,17 +211,17 @@ Limits that come with the router, measured or read rather than assumed:
 
 - **Route timeout.** The router bounds streams by `--route-timeout` (5m by default, one global value)
   plus a 30s idle timeout. `TestHarnessStreamIdlePastRouteTimeout` holds a Connect stream idle, as a
-  turn parked on a slow model call does. On kind at `362637f9` the router reset it after **5m30s**:
-  a pending `Recv` got `Internal` "stream terminated by RST_STREAM with error code: INTERNAL_ERROR".
+  turn parked on a slow model call does. On kind the router reset it after **5m30s**, both at
+  `362637f9` and at `fc0e3586` (held idle for 6m30s): a pending `Recv` got `Internal` "stream terminated by RST_STREAM with error code: INTERNAL_ERROR".
   Through the Placer, which does not read while the host's model call runs, the turn failed only when
-  the host sent its late reply, with a bare `EOF`. A turn that can run past 5m30s needs the router's
+  the host sent its late reply, with a bare `EOF` (measured at `362637f9`). A turn that can run past 5m30s needs the router's
   timeout raised until substrate offers a per-route or streaming timeout.
 - **Checkpoint drain.** Before it snapshots, the worker waits for the actor's in-flight requests to
   finish, and an idle open Connect stream is one of them. On kind at `362637f9`, `SuspendActor` under
   such a stream took **5m30s**: it waited for the router to reset the stream. The Placer therefore
   closes the session's harness streams before `Suspend` or a stateful `Fork` checkpoints it, which
-  brought the same suspend to 131ms (`TestSuspendUnderAnIdleHarnessStream`). That covers streams this
-  process opened; a turn driven by another host is fenced by the log but its stream stays open until
+  brought the same suspend to 109ms on kind at `fc0e3586` (`TestSuspendUnderAnIdleHarnessStream`).
+  That covers streams any Placer of this process's `placement.Registry` opened; a turn driven by another host is fenced by the log but its stream stays open until
   it next touches the log.
 - **No caller authentication.** The router does not check who is calling before it resumes an actor
   and proxies to it, so any pod that can reach it can drive any harness. See
