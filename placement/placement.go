@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -30,6 +32,25 @@ import (
 // unplaceable harness never provisions compute or writes to the log; session.Service surfaces it as
 // codes.FailedPrecondition.
 var ErrUnplaceable = errors.New("placement: harness cannot be placed on this runtime")
+
+// ErrHarnessUnavailable is returned when the harness could not be reached to describe itself. It is
+// only ever raised by the admission check, which runs before any compute is provisioned or anything
+// is written to the log, so retrying is safe; session.Service surfaces it as codes.Unavailable. It is
+// not raised when the caller's own deadline or cancellation ended the check: that is
+// ErrAdmissionInterrupted, because resending the same expired call cannot succeed.
+var ErrHarnessUnavailable = errors.New("placement: harness unavailable")
+
+// describeTimeout bounds how long admission waits for a harness to describe itself. Describe is a
+// small unary call that every harness answers without doing any work, so a harness that has not
+// answered in this long is treated as unavailable rather than left to hold the call.
+var describeTimeout = 10 * time.Second
+
+// ErrAdmissionInterrupted is returned when the caller's own deadline or cancellation ended the
+// admission check before the harness answered. It also wraps the context's error, so errors.Is
+// reports context.DeadlineExceeded or context.Canceled. Like ErrHarnessUnavailable it is only raised
+// before any compute is provisioned or anything is written to the log; session.Service surfaces it as
+// codes.DeadlineExceeded or codes.Canceled. A turn interrupted after admission does not wrap it.
+var ErrAdmissionInterrupted = errors.New("placement: admission interrupted")
 
 // Backend is the compute Runtime the Placer drives. It exposes the harness DESCRIPTOR so the Placer
 // can gate CanPlace before Create (placement must not provision compute to learn a harness's needs);
@@ -155,33 +176,9 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
 
-	// Placement gate (honest degradation): read the harness descriptor in-process and refuse a
-	// harness the backend cannot host BEFORE provisioning any compute or writing to the log — e.g. a
-	// REQUIRES_MEMORY_SNAPSHOT harness on a filesystem-only backend.
-	resolveFinished := observability.StartDebug(ctx, p.logger, "placement", "resolve_execution_path", "session_uid", sessionUID)
-	desc, err := p.backend.Describe(ctx)
-	if err != nil {
-		resolveFinished(err, "error_kind", "describe_harness_failed")
+	if _, err := p.admit(ctx, sessionUID); err != nil {
 		return api.Incarnation{}, err
 	}
-	if !controller.CanPlace(desc.Capabilities, p.backend.Capabilities()) {
-		err = fmt.Errorf("%w: harness %q needs %s but the runtime provides MemorySnapshot=%v",
-			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, p.backend.Capabilities().MemorySnapshot)
-		resolveFinished(err,
-			"error_kind", "unplaceable",
-			"decision", "refused",
-			"harness_id", desc.ID,
-			"resumability", desc.Capabilities.Resumability,
-			"runtime_memory_snapshot", p.backend.Capabilities().MemorySnapshot,
-		)
-		return api.Incarnation{}, err
-	}
-	resolveFinished(nil,
-		"decision", "accepted",
-		"harness_id", desc.ID,
-		"resumability", desc.Capabilities.Resumability,
-		"runtime_memory_snapshot", p.backend.Capabilities().MemorySnapshot,
-	)
 
 	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute", "session_uid", sessionUID)
 	inc, err = p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID})
@@ -223,6 +220,64 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return inc, err
 	}
 	return inc, nil
+}
+
+// admit is the placement gate (honest degradation), shared by every path that drives a harness:
+// Exec, Resume and Fork. It reads the harness descriptor and refuses a harness the backend cannot
+// host BEFORE provisioning any compute or writing to the log, e.g. a REQUIRES_MEMORY_SNAPSHOT harness
+// on a filesystem-only backend.
+//
+// It runs on every path, not once per session, because the descriptor is not guaranteed to be fixed:
+// a backend that asks a live harness reports whatever harness is answering, and that can change
+// between an interrupted turn and its Resume. Replaying into a harness the backend cannot host is the "resumed
+// wrongly" case this gate exists to prevent.
+func (p *Placer) admit(ctx context.Context, sessionUID string) (desc api.Descriptor, err error) {
+	resolveFinished := observability.StartDebug(ctx, p.logger, "placement", "resolve_execution_path", "session_uid", sessionUID)
+	// Bound the check on its own. A harness that accepts the connection and then never answers
+	// Describe would otherwise hold a call with no deadline forever. WithTimeout keeps an earlier
+	// caller deadline.
+	dctx, cancel := context.WithTimeout(ctx, describeTimeout)
+	defer cancel()
+	desc, err = p.backend.Describe(dctx)
+	if err != nil {
+		switch c := status.Code(err); {
+		case ctx.Err() != nil:
+			// The caller's deadline or cancellation ended the check, not the harness: gRPC reports
+			// that as DeadlineExceeded or Canceled too, so the context decides. Keep the caller's
+			// cause so the service answers DEADLINE_EXCEEDED or CANCELLED rather than an outage.
+			// The backend's error is formatted with %v so that only the caller's cause is in the
+			// chain: a backend error wrapping its own context error must not change the code.
+			err = fmt.Errorf("%w: describe harness: %w: %v", ErrAdmissionInterrupted, ctx.Err(), err)
+		case dctx.Err() != nil || c == codes.Unavailable || c == codes.DeadlineExceeded:
+			// A refused or reset connection is Unavailable. A harness that did not answer within
+			// describeTimeout, including a peer that accepts the connection but never completes the
+			// handshake, is the harness's fault while the caller's context is still live, and so is
+			// a DeadlineExceeded the peer reports itself. Nothing has been provisioned or journaled,
+			// so all of them are a retryable outage.
+			err = fmt.Errorf("%w: %w", ErrHarnessUnavailable, err)
+		}
+		resolveFinished(err, "error_kind", "describe_harness_failed")
+		return api.Descriptor{}, err
+	}
+	if !controller.CanPlace(desc.Capabilities, p.backend.Capabilities()) {
+		err = fmt.Errorf("%w: harness %q needs %s but the runtime provides MemorySnapshot=%v",
+			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, p.backend.Capabilities().MemorySnapshot)
+		resolveFinished(err,
+			"error_kind", "unplaceable",
+			"decision", "refused",
+			"harness_id", desc.ID,
+			"resumability", desc.Capabilities.Resumability,
+			"runtime_memory_snapshot", p.backend.Capabilities().MemorySnapshot,
+		)
+		return api.Descriptor{}, err
+	}
+	resolveFinished(nil,
+		"decision", "accepted",
+		"harness_id", desc.ID,
+		"resumability", desc.Capabilities.Resumability,
+		"runtime_memory_snapshot", p.backend.Capabilities().MemorySnapshot,
+	)
+	return desc, nil
 }
 
 // defaultDial reaches a harnesswire server by address form: runtime/local passes a unix-socket
@@ -307,6 +362,11 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
 
+	// Gate before Restore, exactly as Exec does before Create: Resume re-drives an interrupted turn,
+	// so it must not reach a harness the backend cannot host.
+	if _, err := p.admit(ctx, sessionUID); err != nil {
+		return err
+	}
 	sourceFinished := observability.StartDebug(ctx, p.logger, "placement", "resolve_resume_source", "session_uid", sessionUID)
 	ref, err := lastSuspendRef(log, sessionUID)
 	if err != nil {
@@ -385,6 +445,8 @@ func placementErrorKind(err error) string {
 		return ""
 	case errors.Is(err, ErrUnplaceable):
 		return "unplaceable"
+	case errors.Is(err, ErrHarnessUnavailable):
+		return "harness_unavailable"
 	case errors.Is(err, eventlog.ErrConflict):
 		return "conflict"
 	case errors.Is(err, eventlog.ErrFenced):
@@ -496,7 +558,7 @@ const rollbackTimeout = 30 * time.Second
 // provision. That is a recoverable state (Resume brings the parent back), not a leak, but it does
 // mean a retry must fork at the new head rather than the original seq.
 func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUID string, atSeq int64) (api.SnapshotRef, error) {
-	desc, err := p.backend.Describe(ctx)
+	desc, err := p.admit(ctx, parentUID)
 	if err != nil {
 		return api.SnapshotRef{}, err
 	}

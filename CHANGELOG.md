@@ -32,6 +32,16 @@ provide.
   stored it on the child, and returned it from `GetSession` and `ListSessions`; callers must now
   omit it to fork. `Session.identity` on `CreateSession` remains recorded provenance, not
   authorization, and is unchanged.
+- `Resume` and `Fork` now run the same `CanPlace` check as `Exec` before touching compute or the
+  journal, and a refusal is `FAILED_PRECONDITION` (`Resume` previously returned `INTERNAL` for any
+  placement error). A harness that cannot be reached to describe itself when the call is admitted
+  is `UNAVAILABLE` rather than `INTERNAL` on `Exec`, `Resume`, and `Fork`, and nothing is
+  journaled; one that has not answered within 10 seconds counts as unreachable, so a call with no
+  deadline cannot be held by a harness that never answers. If the call's own deadline runs out, or the caller cancels, while the harness is being
+  described, the call is `DEADLINE_EXCEEDED` or `CANCELLED` instead, also with nothing journaled. A
+  harness lost mid-turn is still `INTERNAL` and leaves an interrupted turn to `Resume`. Forking a
+  `REQUIRES_MEMORY_SNAPSHOT` harness on a backend without memory snapshots is refused before the
+  parent is checkpointed, so it no longer leaves a `SUSPEND` event on the parent.
 
 ## v0.1.2
 
