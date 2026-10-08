@@ -48,7 +48,7 @@ concurrency:
 # and our generated client agree. The client decodes Actors by field number, and upstream has
 # renumbered fields before without a wire error, so a mismatch corrupts silently rather than failing.
 env:
-  SUBSTRATE_REF: 362637f900d74699f70dc8c974f43051677c4950
+  SUBSTRATE_REF: fc0e3586a6de7cf1b896b948d05df7d5ef8b8870
   KO_DOCKER_REPO: localhost:5001
   E2E_IMAGE: localhost:5001/agentsessions-e2e:${{ github.sha }}
   # ate-setup requires an image credential provider; the kind recipe uses the k8s.io one.

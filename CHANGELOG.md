@@ -58,7 +58,7 @@ provide.
   harness lost mid-turn is still `INTERNAL` and leaves an interrupted turn to `Resume`. Forking a
   `REQUIRES_MEMORY_SNAPSHOT` harness on a backend without memory snapshots is refused before the
   parent is checkpointed, so it no longer leaves a `SUSPEND` event on the parent.
-- The substrate backend now targets current agent-substrate (`362637f9`) instead of the `b1bd558a`
+- The substrate backend now targets current agent-substrate (`fc0e3586`) instead of the `b1bd558a`
   pin, and the two are not wire-compatible: the old client decodes a current `Actor` without an
   error but with the wrong state and garbage for the worker address. Upgrade the backend and the
   substrate cluster together. `integrations/substrate` now requires Go 1.27, following substrate.
