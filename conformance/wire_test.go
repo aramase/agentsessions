@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -44,6 +45,61 @@ func wireHarnessFrom(t *testing.T, h api.Harness) api.Harness {
 	}
 	t.Cleanup(func() { conn.Close() })
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn))
+}
+
+type descriptorHarness struct {
+	descriptor api.Descriptor
+}
+
+func (h descriptorHarness) Describe(context.Context) (api.Descriptor, error) {
+	return h.descriptor, nil
+}
+
+func (descriptorHarness) Run(context.Context, *api.Start, api.EventSink) error {
+	return errors.New("descriptor harness only supports Describe")
+}
+
+func TestWireDescribeRoundTrip(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		tools []api.ToolSpec
+	}{
+		{
+			name: "multiple tools",
+			tools: []api.ToolSpec{
+				{Name: "report", Description: "Report local work", Mediation: api.MediationInHarnessReported},
+				{Name: "lookup", Description: "Look up a record", Mediation: api.MediationControllerMediated},
+				{Name: "charge", Description: "Request a charge", Mediation: api.MediationRequiresApproval},
+				{Name: "default", Description: "Use unspecified mediation"},
+			},
+		},
+		{name: "no tools"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			want := api.Descriptor{
+				ID:     "declared-tools",
+				Models: []string{"model-b", "model-a"},
+				Tools:  test.tools,
+				Capabilities: api.Capabilities{
+					Resumability:    api.ResumabilityRequiresMemorySnapshot,
+					ForkSafe:        true,
+					RequiresGPU:     true,
+					Streaming:       true,
+					ReasoningReplay: true,
+				},
+			}
+			har := wireHarnessFrom(t, descriptorHarness{descriptor: want})
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			got, err := har.Describe(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("Describe round-trip = %#v, want %#v", got, want)
+			}
+		})
+	}
 }
 
 // failHarness fails its run without emitting anything; the Server terminates the stream with
