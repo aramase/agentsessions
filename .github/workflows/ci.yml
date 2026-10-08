@@ -17,11 +17,11 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # buf breaking compares the change against the main branch
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -98,7 +98,7 @@ jobs:
           go run github.com/rhysd/actionlint/cmd/actionlint@latest
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
@@ -128,9 +128,9 @@ jobs:
       run:
         working-directory: integrations/substrate
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: integrations/substrate/go.mod
 
@@ -144,7 +144,7 @@ jobs:
       - run: go test -race ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
           working-directory: integrations/substrate
@@ -158,9 +158,9 @@ jobs:
     # FAILS CLOSED on a tampered record. Kept a separate job so its Python venv setup is isolated.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
