@@ -123,9 +123,12 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   which is a wider API change than this path warrants.
 - Ending the parent's harness streams sits between two fences. The first stops an in-flight turn
   from writing an `ERROR` for the interruption; a turn that mints a newer fence in that window sees
-  that the checkpoint claimed its connection and writes nothing. The second fence, minted after the
-  streams are ended, is the one the SUSPEND record is written under, so that turn's fence cannot
-  fail the record after the parent is already cold.
+  that the checkpoint claimed its connection and writes nothing. Ending a stream only cancels the
+  turn, so the checkpoint then waits, bounded by the caller's context, until every ended turn has
+  made its fence call or returned. Only then is the second fence minted, the one the SUSPEND record
+  is written under, so no turn of this Placer can fail the record after the parent is already cold.
+  If the context ends first, the fork aborts before it snapshots. A turn driven by another process
+  is outside this: only the log fences it.
 
 Two properties make the failure paths above safe, both read off substrate's suspend/delete workflows
 (`cmd/ateapi/internal/controlapi/`) rather than assumed:

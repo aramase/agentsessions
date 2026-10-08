@@ -114,8 +114,11 @@ provide.
   passed to `placement.WithDialer` must change signature; `placement.DefaultDial` is the stock one.
 - A stateful `Placer.Fork` now fences the parent's log and closes its open harness streams before
   checkpointing it, and refuses new turns on the parent until the checkpoint is recorded, so
-  nothing holds the checkpoint up; on kind, a checkpoint under an idle stream took 5m30s. Two
+  nothing holds the checkpoint up; on kind, a checkpoint under an idle stream took 5m30s. Three
   behavior changes follow:
+  - Before it snapshots, the fork waits until every turn whose stream it closed has minted its
+    fence or returned, bounded by the caller's context. If the context ends first, the fork fails
+    before snapshotting and records nothing.
   - A fork that reaches its checkpoint supersedes the parent's in-flight turn even if the checkpoint
     then fails. The turn stops as an incomplete execution (no `ERROR` event), the parent stays live,
     and the caller runs the next turn or retries the fork at the new head.
