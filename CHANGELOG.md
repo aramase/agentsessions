@@ -128,6 +128,14 @@ provide.
   - A turn superseded by a fork's checkpoint, or started while one runs, returns an error wrapping
     the new `placement.ErrCheckpointing` (the superseded turn also wraps `eventlog.ErrFenced`).
     `Exec` and `Resume` report it as `ABORTED`, which callers retry.
+- The substrate conformance suite (`integrations/substrate/e2e`) runs both tiers on the micro-VM
+  sandbox class by default; the stateless tier used gVisor before. A host without KVM opts each
+  tier back into gVisor with `ECHO_SANDBOX_CLASS=gvisor` and `COUNTER_SANDBOX_CLASS=gvisor`, after
+  applying `deploy/substrate/namespace.yaml`, `echo-gvisor-workerpool.yaml` (formerly
+  `echo-workerpool.yaml`, which also created the Namespace) and `counter-gvisor-workerpool.yaml`
+  with the worker image resolved, as `docs/substrate-conformance.md` shows.
+  `TestStatelessReplayOnGVisor` is now `TestStatelessReplay`, and `TestSessionSuspendResumeOnGVisor`
+  is now `TestSessionSuspendResume`.
 - Through `atenet-router`, a harness stream that stays idle for about 5m30s (the router's default
   5m route timeout plus 30s) is reset with `RST_STREAM` (gRPC `Internal`; measured on kind at
   substrate `fc0e3586` with the stream held idle for 6m30s), so a turn parked on a slower model

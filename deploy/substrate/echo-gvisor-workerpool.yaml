@@ -4,6 +4,10 @@
 # micro-VM one (echo-microvm-workerpool.yaml). CI runs the micro-VM pool, so both tiers exercise the
 # same isolation class.
 #
+# workerImage is a ko:// import path that the WorkerPool controller passes to its Pods unchanged:
+# build ateom-gvisor with ko and substitute its digest before applying (see the no-KVM recipe in
+# docs/substrate-conformance.md).
+#
 # The `workload` label is repo-scoped on purpose: worker eligibility ignores namespaces and matches
 # labels across every pool in the cluster, so a label shared with a substrate demo pool would let the
 # scheduler place our actor there.
