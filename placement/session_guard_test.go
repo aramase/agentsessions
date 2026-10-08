@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/sqlitelog"
@@ -89,6 +90,13 @@ func (b failingGuardBackend) Restore(context.Context, api.SnapshotRef) (api.Inca
 	return api.Incarnation{}, b.err
 }
 
+type failingGuardStore struct {
+	eventlog.Store
+	err error
+}
+
+func (s failingGuardStore) NewFence() (int64, error) { return 0, s.err }
+
 // Exercise each operation's deferred release, including backend and journal error returns.
 func TestSessionGuardDrainsAfterOperations(t *testing.T) {
 	for _, failure := range []string{"none", "backend", "journal"} {
@@ -98,6 +106,7 @@ func TestSessionGuardDrainsAfterOperations(t *testing.T) {
 				t.Cleanup(func() { _ = backend.Close() })
 				var b Backend = backend
 				backendErr := errors.New("backend failed")
+				journalErr := errors.New("journal failed")
 				if failure == "backend" {
 					b = failingGuardBackend{Backend: backend, err: backendErr}
 				}
@@ -107,11 +116,9 @@ func TestSessionGuardDrainsAfterOperations(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = store.Close() })
-				log := store.Session("session")
+				var log eventlog.Store = store.Session("session")
 				if failure == "journal" {
-					if err := store.Close(); err != nil {
-						t.Fatal(err)
-					}
+					log = failingGuardStore{Store: log, err: journalErr}
 				}
 				for range 2 {
 					switch operation {
@@ -129,8 +136,8 @@ func TestSessionGuardDrainsAfterOperations(t *testing.T) {
 					if failure == "backend" && !errors.Is(err, backendErr) {
 						t.Fatalf("want backend failure, got %v", err)
 					}
-					if failure == "journal" && err == nil {
-						t.Fatal("closed journal accepted operation")
+					if failure == "journal" && !errors.Is(err, journalErr) {
+						t.Fatalf("want journal failure, got %v", err)
 					}
 					if n := guardEntries(p); n != 0 {
 						t.Fatalf("%s retained %d guards after %s", operation, n, failure)
