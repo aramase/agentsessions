@@ -12,10 +12,13 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -47,6 +50,9 @@ type Placer struct {
 	stream  controller.StreamFunc
 	dial    Dialer
 	logger  *slog.Logger
+
+	// Stable per-session locks live for this Placer's lifetime; they do not fence other Placers.
+	sessionLocks sync.Map // session UID -> *sync.Mutex
 }
 
 // Dialer opens a Harness.Connect client to the harness at a runtime-specific address and returns a
@@ -132,6 +138,17 @@ func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 	return p
 }
 
+// trySessionLock serializes Exec/Suspend/Resume through their compute and journal transitions.
+// Refuse overlap rather than queueing a request whose cursor may be stale by the time it runs.
+func (p *Placer) trySessionLock(sessionUID string) (*sync.Mutex, error) {
+	value, _ := p.sessionLocks.LoadOrStore(sessionUID, new(sync.Mutex))
+	lock := value.(*sync.Mutex)
+	if !lock.TryLock() {
+		return nil, status.Error(codes.Aborted, "placement: another operation is in progress for this session")
+	}
+	return lock, nil
+}
+
 // Exec places one turn: Create the incarnation, mint the fence from the log and stamp it on the
 // incarnation, bind a controller to that same token, and drive the (placed) harness. The log stays the
 // single fence authority; the returned incarnation carries the fence for Suspend/Resume (step 5).
@@ -154,6 +171,12 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	defer func() {
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
+
+	lock, err := p.trySessionLock(sessionUID)
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	defer lock.Unlock()
 
 	// Placement gate (honest degradation): read the harness descriptor in-process and refuse a
 	// harness the backend cannot host BEFORE provisioning any compute or writing to the log — e.g. a
@@ -279,6 +302,12 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	finish := observability.StartDebug(ctx, p.logger, "placement", "suspend", "session_uid", sessionUID)
 	defer func() { finish(err, "error_kind", placementErrorKind(err)) }()
 
+	lock, err := p.trySessionLock(sessionUID)
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	defer lock.Unlock()
+
 	inc := api.Incarnation{ID: sessionUID}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
@@ -304,6 +333,12 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	defer func() {
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
+
+	lock, err := p.trySessionLock(sessionUID)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	sourceFinished := observability.StartDebug(ctx, p.logger, "placement", "resolve_resume_source", "session_uid", sessionUID)
 	ref, err := lastSuspendRef(log, sessionUID)

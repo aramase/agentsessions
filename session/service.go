@@ -604,6 +604,9 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	}
 	log := s.store.Session(req.GetSession())
 	if _, err := placer.Suspend(ctx, log, req.GetSession()); err != nil {
+		if status.Code(err) == codes.Aborted {
+			return nil, err
+		}
 		return nil, status.Errorf(codes.Internal, "suspend: %v", err)
 	}
 	// The SUSPEND append already moved the stored compute_state projection, so re-reading is
@@ -628,6 +631,9 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	}
 	log := s.store.Session(req.GetSession())
 	if err := placer.Resume(ctx, log, req.GetSession()); err != nil {
+		if status.Code(err) == codes.Aborted {
+			return nil, err
+		}
 		if errors.Is(err, controller.ErrIncompleteInvocation) {
 			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
 		}
@@ -642,6 +648,8 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 
 func execError(err error) error {
 	switch {
+	case status.Code(err) == codes.Aborted:
+		return err
 	case errors.Is(err, placement.ErrUnplaceable):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):

@@ -23,11 +23,13 @@ import (
 // compute but retains the actor and its captured state; deleting makes restoration impossible.
 // Snapshots and tags are actual registry entries so fork-pin assertions cannot pass vacuously.
 type suspendControl struct {
-	actors      map[substrate.ActorRef]*suspendActor
-	snapshots   map[substrate.SnapshotID]suspendSnapshot
-	tags        map[substrate.SnapshotID]substrate.SnapshotID
-	calls       []string
-	snapshotErr error
+	actors       map[substrate.ActorRef]*suspendActor
+	snapshots    map[substrate.SnapshotID]suspendSnapshot
+	tags         map[substrate.SnapshotID]substrate.SnapshotID
+	calls        []string
+	snapshotErr  error
+	afterSuspend func()
+	afterResume  func()
 }
 
 type suspendActor struct {
@@ -86,6 +88,11 @@ func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef, 
 		a.turns = snapshot.turns
 	}
 	a.status, a.worker = substrate.StatusRunning, true
+	if c.afterResume != nil {
+		hook := c.afterResume
+		c.afterResume = nil
+		hook()
+	}
 	return substrate.ActorInfo{Status: a.status, PodIP: ref.Name}, nil
 }
 
@@ -104,6 +111,11 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 	a.snapshot = substrate.SnapshotID{Atespace: ref.Atespace, Name: fmt.Sprintf("snap-%s-%d", ref.Name, len(c.snapshots)+1)}
 	c.snapshots[a.snapshot] = suspendSnapshot{turns: a.turns, template: a.template}
 	a.status, a.worker = substrate.StatusSuspended, false
+	if c.afterSuspend != nil {
+		hook := c.afterSuspend
+		c.afterSuspend = nil
+		hook()
+	}
 	return a.snapshot.Name, nil
 }
 
@@ -282,6 +294,91 @@ func assertSuspendRef(t *testing.T, log eventlog.Store, ref api.SnapshotRef) {
 	if last.Kind != api.EventLifecycle || last.Lifecycle == nil || last.Lifecycle.Kind != api.LifecycleSuspend ||
 		last.Lifecycle.Snapshot == nil || *last.Lifecycle.Snapshot != ref {
 		t.Fatalf("last record must carry the returned SUSPEND ref: %+v", last)
+	}
+}
+
+// Overlapping operations must fail before changing compute or the journal. In particular, Exec
+// inside SuspendActor must not restart the actor before the Placer records SUSPEND.
+func TestPlacerSessionOperationsRejectOverlap(t *testing.T) {
+	for _, memory := range []bool{false, true} {
+		for _, outer := range []string{"Exec", "Suspend", "Resume"} {
+			for _, overlap := range []string{"Exec", "Suspend", "Resume"} {
+				t.Run(fmt.Sprintf("memory=%v/%s/%s", memory, outer, overlap), func(t *testing.T) {
+					ctx := context.Background()
+					ctl := newSuspendControl()
+					p, backend := newSuspendPlacer(t, ctl, memory)
+					store := newSuspendStore(t)
+					log, independent := store.Session("session"), store.Session("independent")
+					execSuspendTurn(t, p, independent, "independent", "other")
+					if outer != "Exec" {
+						execSuspendTurn(t, p, log, "session", "first")
+					}
+					if outer == "Resume" {
+						if _, err := p.Suspend(ctx, log, "session"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					invoke := func(operation string, log eventlog.Store, uid string) error {
+						switch operation {
+						case "Exec":
+							head, err := log.Head()
+							if err != nil {
+								return err
+							}
+							_, err = p.Exec(ctx, log, uid, []api.Message{*api.TextMessage("user", "next")}, head)
+							return err
+						case "Suspend":
+							_, err := p.Suspend(ctx, log, uid)
+							return err
+						default:
+							return p.Resume(ctx, log, uid)
+						}
+					}
+					called := false
+					hook := func() {
+						called = true
+						before := suspendRecords(t, log)
+						actor := ctl.actors[substrate.ActorRef{Atespace: "space", Name: "session"}]
+						state := *actor
+						if err := invoke(overlap, log, "session"); status.Code(err) != codes.Aborted {
+							t.Fatalf("overlapping %s during %s: want Aborted, got %v", overlap, outer, err)
+						}
+						if *actor != state || !reflect.DeepEqual(suspendRecords(t, log), before) {
+							t.Fatal("rejected overlap changed the actor or journal")
+						}
+						// One session's operation must not prevent another session from progressing.
+						if err := invoke(overlap, independent, "independent"); err != nil {
+							t.Fatalf("independent session %s during %s: %v", overlap, outer, err)
+						}
+					}
+					if outer == "Suspend" {
+						ctl.afterSuspend = hook
+					} else {
+						ctl.afterResume = hook
+					}
+					if err := invoke(outer, log, "session"); err != nil {
+						t.Fatalf("outer %s: %v", outer, err)
+					}
+					if !called {
+						t.Fatal("operation did not reach the overlap window")
+					}
+					state, err := backend.Status(ctx, api.Incarnation{ID: "session"})
+					want := api.ComputeLive
+					if outer == "Suspend" {
+						want = api.ComputeCold
+					}
+					if err != nil || state != want {
+						t.Fatalf("outer %s left compute=%s, err=%v; want %s", outer, state, err, want)
+					}
+					// The same operation can retry after the outer call releases the session guard.
+					if err := invoke(overlap, log, "session"); err != nil {
+						t.Fatalf("retry %s after %s: %v", overlap, outer, err)
+					}
+					suspendRecords(t, log)
+					suspendRecords(t, independent)
+				})
+			}
+		}
 	}
 }
 

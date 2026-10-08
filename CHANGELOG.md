@@ -15,6 +15,10 @@ provide.
 
 ### Compatibility
 
+- Overlapping `Exec`, `Suspend`, and `Resume` calls for one session on the same Placer now return
+  gRPC `ABORTED` without changing compute or the journal. Retry after the in-flight operation finishes;
+  other sessions remain independent. This guard is local to a Placer, not cross-host fencing.
+
 - `Runtime.Snapshot(..., SnapshotExternal)` owns the cold transition: capture state, release dedicated
   compute where applicable, and retain any handle needed by `Restore`. Out-of-tree runtimes that only
   capture state must implement that transition themselves; the Placer no longer calls `Stop` afterward.
