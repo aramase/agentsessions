@@ -45,6 +45,35 @@ func richMessage() *api.Message {
 	}
 }
 
+// toolCallMessage is an assistant message asking for two tool calls, as a model output carries it.
+func toolCallMessage() *api.Message {
+	return &api.Message{
+		Role: "assistant",
+		Parts: []api.Part{
+			{Text: &api.TextPart{Text: "checking"}},
+			{ToolCall: &api.ToolCall{ID: "c1", Tool: "get_weather", Args: map[string]any{
+				"city": "Paris", "days": float64(2), "units": map[string]any{"temp": "C"}, "tags": []any{"a", true},
+			}}},
+			{ToolCall: &api.ToolCall{ID: "c2", Tool: "now"}},
+		},
+	}
+}
+
+// toolResultMessage feeds results back to the model, with content that nests other part kinds.
+func toolResultMessage() *api.Message {
+	return &api.Message{
+		Role: "tool",
+		Parts: []api.Part{
+			{ToolResult: &api.ToolResult{ID: "c1", Output: map[string]any{"temp": float64(21)}, Content: []api.Part{
+				{Text: &api.TextPart{Text: "sunny"}},
+				{Data: map[string]any{"temp": float64(21)}},
+				{File: &api.FilePart{MIME: "image/png", URI: "blob://map", Digest: "sha256:ff"}},
+			}}},
+			{ToolResult: &api.ToolResult{ID: "c2", IsError: true, Error: "clock unavailable"}},
+		},
+	}
+}
+
 func TestEventRoundTrip(t *testing.T) {
 	actor := api.IdentityRef{Principal: "agent://a", Issuer: "entra", Subject: "sub-1"}
 	cases := map[string]api.Event{
@@ -70,6 +99,14 @@ func TestEventRoundTrip(t *testing.T) {
 			ExecutionID: "e1", SchemaVersion: 1, Timestamp: ts, Kind: api.EventOutput,
 			Message: richMessage(), Actor: actor,
 		},
+		"output_tool_calls": {
+			ExecutionID: "e1", SchemaVersion: 1, Timestamp: ts, Kind: api.EventOutput,
+			Message: toolCallMessage(), Actor: actor,
+		},
+		"input_tool_results": {
+			ExecutionID: "e1", SchemaVersion: 1, Timestamp: ts, Kind: api.EventInput,
+			Message: toolResultMessage(), Actor: actor,
+		},
 		"model_call": {
 			Kind: api.EventModelCall,
 			ModelCall: &api.ModelCall{
@@ -90,6 +127,13 @@ func TestEventRoundTrip(t *testing.T) {
 				ID: "t1", Output: map[string]any{"hits": float64(3)},
 				OutputURI: "blob://out", OutputDigest: "sha256:ee", IsError: false,
 			},
+		},
+		"tool_result_content": {
+			Kind: api.EventToolResult,
+			Result: &api.ToolResult{ID: "t1", Content: []api.Part{
+				{Text: &api.TextPart{Text: "3 hits"}},
+				{Data: map[string]any{"hits": float64(3)}},
+			}},
 		},
 		"approval_request": {Kind: api.EventApprovalRequest, Approval: &api.ApprovalRequest{ToolCallID: "t1", Reason: "policy"}},
 		"approval_result":  {Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{ToolCallID: "t1", Approved: true, Reason: "ok"}},
@@ -139,6 +183,9 @@ func TestHashStableAcrossWire(t *testing.T) {
 		{Kind: api.EventInput, Message: api.TextMessage("user", "drive")},
 		{Kind: api.EventModelCall, ModelCall: &api.ModelCall{Model: "m", Params: map[string]string{"a": "b"}, InputHash: "h", ID: "c1"}},
 		{Kind: api.EventOutput, Message: richMessage()},
+		{Kind: api.EventOutput, Message: toolCallMessage()},
+		{Kind: api.EventInput, Message: toolResultMessage()},
+		{Kind: api.EventToolResult, Result: toolResultMessage().Parts[0].ToolResult},
 	}
 	for i, ev := range events {
 		direct := eventlog.New()
@@ -184,5 +231,87 @@ func TestToolSpecRoundTrip(t *testing.T) {
 	}
 	if got := wire.ToolSpecFromProto(nil); !reflect.DeepEqual(got, api.ToolSpec{}) {
 		t.Fatalf("ToolSpecFromProto(nil) = %#v, want zero value", got)
+	}
+}
+
+// TestToolPartsOnTheWire pins that the new Part cases are the reused ToolCall / ToolResult messages
+// with structured (Struct) arguments, not a JSON string.
+func TestToolPartsOnTheWire(t *testing.T) {
+	p := wire.MessageToProto(toolCallMessage())
+	tc := p.GetParts()[1].GetToolCall()
+	if tc == nil {
+		t.Fatalf("part 1 = %v, want a tool_call", p.GetParts()[1])
+	}
+	if tc.GetId() != "c1" || tc.GetTool() != "get_weather" || tc.GetArgs().GetFields()["city"].GetStringValue() != "Paris" {
+		t.Fatalf("tool_call = %v", tc)
+	}
+	if tc.GetMediation() != v1.Mediation_MEDIATION_UNSPECIFIED || tc.GetIdempotencyKey() != "" {
+		t.Fatalf("a model output's tool_call carries mediation %v / key %q", tc.GetMediation(), tc.GetIdempotencyKey())
+	}
+	tr := wire.MessageToProto(toolResultMessage()).GetParts()[0].GetToolResult()
+	if tr.GetId() != "c1" || len(tr.GetContent()) != 3 || tr.GetContent()[0].GetText().GetText() != "sunny" {
+		t.Fatalf("tool_result = %v", tr)
+	}
+}
+
+func TestToolDefinitionsRoundTrip(t *testing.T) {
+	want := []api.ToolDefinition{
+		{Name: "get_weather", Description: "Current weather", InputSchema: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"city": map[string]any{"type": "string"}},
+			"required":   []any{"city"},
+		}},
+		{Name: "now"},
+	}
+	blob, err := proto.Marshal(&v1.ModelCall{Tools: wire.ToolDefinitionsToProto(want)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded v1.ModelCall
+	if err := proto.Unmarshal(blob, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if got := wire.ToolDefinitionsFromProto(decoded.GetTools()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("tool definitions round-trip = %#v, want %#v", got, want)
+	}
+	if got := wire.ToolDefinitionsToProto(nil); got != nil {
+		t.Fatalf("ToolDefinitionsToProto(nil) = %v, want nil", got)
+	}
+	if got := wire.ToolDefinitionsFromProto(nil); got != nil {
+		t.Fatalf("ToolDefinitionsFromProto(nil) = %v, want nil", got)
+	}
+}
+
+func TestToolChoiceRoundTrip(t *testing.T) {
+	for _, want := range []*api.ToolChoice{
+		nil,
+		{},
+		{Mode: api.ToolChoiceAuto},
+		{Mode: api.ToolChoiceNone},
+		{Mode: api.ToolChoiceRequired},
+		{Mode: api.ToolChoiceRequired, Name: "get_weather"},
+	} {
+		p, err := wire.ToolChoiceToProto(want)
+		if err != nil {
+			t.Fatalf("ToolChoiceToProto(%#v): %v", want, err)
+		}
+		got, err := wire.ToolChoiceFromProto(p)
+		if err != nil {
+			t.Fatalf("ToolChoiceFromProto(%v): %v", p, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("tool choice round-trip = %#v, want %#v", got, want)
+		}
+	}
+}
+
+// Proto3 enums are open: a mode this build does not know must not quietly become the provider
+// default, which could let the model call a tool the harness ruled out.
+func TestToolChoiceRejectsUnknownMode(t *testing.T) {
+	if _, err := wire.ToolChoiceFromProto(&v1.ToolChoice{Mode: v1.ToolChoice_Mode(99)}); err == nil {
+		t.Fatal("ToolChoiceFromProto accepted an unknown mode")
+	}
+	if _, err := wire.ToolChoiceToProto(&api.ToolChoice{Mode: "ANY"}); err == nil {
+		t.Fatal("ToolChoiceToProto accepted an unknown mode")
 	}
 }

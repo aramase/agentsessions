@@ -164,6 +164,58 @@ func (EventKind) EnumDescriptor() ([]byte, []int) {
 	return file_common_proto_rawDescGZIP(), []int{1}
 }
 
+type ToolChoice_Mode int32
+
+const (
+	ToolChoice_MODE_UNSPECIFIED ToolChoice_Mode = 0 // provider default
+	ToolChoice_MODE_AUTO        ToolChoice_Mode = 1 // the model decides whether to call a tool
+	ToolChoice_MODE_NONE        ToolChoice_Mode = 2 // the model must not call a tool
+	ToolChoice_MODE_REQUIRED    ToolChoice_Mode = 3 // the model must call at least one tool
+)
+
+// Enum value maps for ToolChoice_Mode.
+var (
+	ToolChoice_Mode_name = map[int32]string{
+		0: "MODE_UNSPECIFIED",
+		1: "MODE_AUTO",
+		2: "MODE_NONE",
+		3: "MODE_REQUIRED",
+	}
+	ToolChoice_Mode_value = map[string]int32{
+		"MODE_UNSPECIFIED": 0,
+		"MODE_AUTO":        1,
+		"MODE_NONE":        2,
+		"MODE_REQUIRED":    3,
+	}
+)
+
+func (x ToolChoice_Mode) Enum() *ToolChoice_Mode {
+	p := new(ToolChoice_Mode)
+	*p = x
+	return p
+}
+
+func (x ToolChoice_Mode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ToolChoice_Mode) Descriptor() protoreflect.EnumDescriptor {
+	return file_common_proto_enumTypes[2].Descriptor()
+}
+
+func (ToolChoice_Mode) Type() protoreflect.EnumType {
+	return &file_common_proto_enumTypes[2]
+}
+
+func (x ToolChoice_Mode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ToolChoice_Mode.Descriptor instead.
+func (ToolChoice_Mode) EnumDescriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{11, 0}
+}
+
 type Lifecycle_Kind int32
 
 const (
@@ -206,11 +258,11 @@ func (x Lifecycle_Kind) String() string {
 }
 
 func (Lifecycle_Kind) Descriptor() protoreflect.EnumDescriptor {
-	return file_common_proto_enumTypes[2].Descriptor()
+	return file_common_proto_enumTypes[3].Descriptor()
 }
 
 func (Lifecycle_Kind) Type() protoreflect.EnumType {
-	return &file_common_proto_enumTypes[2]
+	return &file_common_proto_enumTypes[3]
 }
 
 func (x Lifecycle_Kind) Number() protoreflect.EnumNumber {
@@ -219,7 +271,7 @@ func (x Lifecycle_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Lifecycle_Kind.Descriptor instead.
 func (Lifecycle_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{17, 0}
+	return file_common_proto_rawDescGZIP(), []int{19, 0}
 }
 
 // ResourceMetadata is carried by every top-level resource.
@@ -317,6 +369,8 @@ type Part struct {
 	//	*Part_File
 	//	*Part_Data
 	//	*Part_Reasoning
+	//	*Part_ToolCall
+	//	*Part_ToolResult
 	Part          isPart_Part `protobuf_oneof:"part"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -395,6 +449,24 @@ func (x *Part) GetReasoning() *ReasoningPart {
 	return nil
 }
 
+func (x *Part) GetToolCall() *ToolCall {
+	if x != nil {
+		if x, ok := x.Part.(*Part_ToolCall); ok {
+			return x.ToolCall
+		}
+	}
+	return nil
+}
+
+func (x *Part) GetToolResult() *ToolResult {
+	if x != nil {
+		if x, ok := x.Part.(*Part_ToolResult); ok {
+			return x.ToolResult
+		}
+	}
+	return nil
+}
+
 type isPart_Part interface {
 	isPart_Part()
 }
@@ -415,6 +487,20 @@ type Part_Reasoning struct {
 	Reasoning *ReasoningPart `protobuf:"bytes,4,opt,name=reasoning,proto3,oneof"`
 }
 
+type Part_ToolCall struct {
+	// tool_call is a model's request to call a tool, carried in an assistant message. It reuses
+	// ToolCall so one id runs from the model output through EVENT_TOOL_CALL / EVENT_TOOL_RESULT to the
+	// next model input. On a model output, mediation and idempotency_key are unset; the harness sets
+	// them when it executes the call.
+	ToolCall *ToolCall `protobuf:"bytes,5,opt,name=tool_call,json=toolCall,proto3,oneof"`
+}
+
+type Part_ToolResult struct {
+	// tool_result is a tool's result fed back to the model, carried in a message with role "tool".
+	// ToolResult.id is the id of the ToolCall it answers.
+	ToolResult *ToolResult `protobuf:"bytes,6,opt,name=tool_result,json=toolResult,proto3,oneof"`
+}
+
 func (*Part_Text) isPart_Part() {}
 
 func (*Part_File) isPart_Part() {}
@@ -422,6 +508,10 @@ func (*Part_File) isPart_Part() {}
 func (*Part_Data) isPart_Part() {}
 
 func (*Part_Reasoning) isPart_Part() {}
+
+func (*Part_ToolCall) isPart_Part() {}
+
+func (*Part_ToolResult) isPart_Part() {}
 
 type TextPart struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -950,8 +1040,8 @@ func (x *Origin) GetAttributes() map[string]string {
 
 // ModelCall is a model REQUEST emitted by the harness (EVENT_MODEL_CALL). The host records
 // it with input_hash and answers via ControllerFrame.ModelResult (correlated by id). The
-// completion (text + reasoning parts) is recorded separately as an EVENT_OUTPUT message.
-// Under STATELESS_REPLAY the harness never calls a provider directly.
+// completion (text, reasoning, and tool_call parts) is recorded separately as an EVENT_OUTPUT
+// message. Under STATELESS_REPLAY the harness never calls a provider directly.
 type ModelCall struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Model     string                 `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
@@ -961,7 +1051,13 @@ type ModelCall struct {
 	// messages is the request context the host needs to INVOKE the model on the live path. It is
 	// wire-only: the host records the call with input_hash alone (messages stripped), since the
 	// recorded form only needs the hash to re-check I0 on replay.
-	Messages      []*Message `protobuf:"bytes,5,rep,name=messages,proto3" json:"messages,omitempty"`
+	Messages []*Message `protobuf:"bytes,5,rep,name=messages,proto3" json:"messages,omitempty"`
+	// tools are the definitions offered to the model on this call. Wire-only like messages: the
+	// recorded form keeps input_hash, which covers them.
+	Tools []*ToolDefinition `protobuf:"bytes,6,rep,name=tools,proto3" json:"tools,omitempty"`
+	// tool_choice constrains whether and which tool the model calls. Wire-only like messages and
+	// covered by input_hash. Unset means the provider default.
+	ToolChoice    *ToolChoice `protobuf:"bytes,7,opt,name=tool_choice,json=toolChoice,proto3" json:"tool_choice,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1031,6 +1127,137 @@ func (x *ModelCall) GetMessages() []*Message {
 	return nil
 }
 
+func (x *ModelCall) GetTools() []*ToolDefinition {
+	if x != nil {
+		return x.Tools
+	}
+	return nil
+}
+
+func (x *ModelCall) GetToolChoice() *ToolChoice {
+	if x != nil {
+		return x.ToolChoice
+	}
+	return nil
+}
+
+// ToolDefinition is a tool offered to a model on one call. It aligns with an MCP Tool (name,
+// description, inputSchema). It differs from the harness's ToolSpec, which declares a tool and its
+// default mediation to the host; ToolDefinition is what the model sees.
+type ToolDefinition struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	InputSchema   *structpb.Struct       `protobuf:"bytes,3,opt,name=input_schema,json=inputSchema,proto3" json:"input_schema,omitempty"` // JSON Schema object describing the tool's arguments
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolDefinition) Reset() {
+	*x = ToolDefinition{}
+	mi := &file_common_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolDefinition) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolDefinition) ProtoMessage() {}
+
+func (x *ToolDefinition) ProtoReflect() protoreflect.Message {
+	mi := &file_common_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolDefinition.ProtoReflect.Descriptor instead.
+func (*ToolDefinition) Descriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ToolDefinition) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ToolDefinition) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *ToolDefinition) GetInputSchema() *structpb.Struct {
+	if x != nil {
+		return x.InputSchema
+	}
+	return nil
+}
+
+// ToolChoice constrains whether and which tool the model calls.
+type ToolChoice struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Mode  ToolChoice_Mode        `protobuf:"varint,1,opt,name=mode,proto3,enum=agentsessions.v1.ToolChoice_Mode" json:"mode,omitempty"`
+	// name forces one specific tool. It is meaningful only with MODE_REQUIRED.
+	Name          string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ToolChoice) Reset() {
+	*x = ToolChoice{}
+	mi := &file_common_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ToolChoice) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ToolChoice) ProtoMessage() {}
+
+func (x *ToolChoice) ProtoReflect() protoreflect.Message {
+	mi := &file_common_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ToolChoice.ProtoReflect.Descriptor instead.
+func (*ToolChoice) Descriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ToolChoice) GetMode() ToolChoice_Mode {
+	if x != nil {
+		return x.Mode
+	}
+	return ToolChoice_MODE_UNSPECIFIED
+}
+
+func (x *ToolChoice) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
 type Usage struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Model           string                 `protobuf:"bytes,1,opt,name=model,proto3" json:"model,omitempty"`
@@ -1043,7 +1270,7 @@ type Usage struct {
 
 func (x *Usage) Reset() {
 	*x = Usage{}
-	mi := &file_common_proto_msgTypes[10]
+	mi := &file_common_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1055,7 +1282,7 @@ func (x *Usage) String() string {
 func (*Usage) ProtoMessage() {}
 
 func (x *Usage) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[10]
+	mi := &file_common_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1068,7 +1295,7 @@ func (x *Usage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Usage.ProtoReflect.Descriptor instead.
 func (*Usage) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{10}
+	return file_common_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Usage) GetModel() string {
@@ -1113,7 +1340,7 @@ type ToolCall struct {
 
 func (x *ToolCall) Reset() {
 	*x = ToolCall{}
-	mi := &file_common_proto_msgTypes[11]
+	mi := &file_common_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1125,7 +1352,7 @@ func (x *ToolCall) String() string {
 func (*ToolCall) ProtoMessage() {}
 
 func (x *ToolCall) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[11]
+	mi := &file_common_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1138,7 +1365,7 @@ func (x *ToolCall) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCall.ProtoReflect.Descriptor instead.
 func (*ToolCall) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{11}
+	return file_common_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ToolCall) GetId() string {
@@ -1177,20 +1404,24 @@ func (x *ToolCall) GetIdempotencyKey() string {
 }
 
 type ToolResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Output        *structpb.Struct       `protobuf:"bytes,2,opt,name=output,proto3" json:"output,omitempty"`
-	OutputUri     string                 `protobuf:"bytes,3,opt,name=output_uri,json=outputUri,proto3" json:"output_uri,omitempty"`          // externalized large output (MCP resource_link), else inline `output`
-	OutputDigest  string                 `protobuf:"bytes,6,opt,name=output_digest,json=outputDigest,proto3" json:"output_digest,omitempty"` // content digest of output_uri target (chain covers externalized bytes)
-	IsError       bool                   `protobuf:"varint,4,opt,name=is_error,json=isError,proto3" json:"is_error,omitempty"`
-	Error         string                 `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Id           string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Output       *structpb.Struct       `protobuf:"bytes,2,opt,name=output,proto3" json:"output,omitempty"`
+	OutputUri    string                 `protobuf:"bytes,3,opt,name=output_uri,json=outputUri,proto3" json:"output_uri,omitempty"`          // externalized large output (MCP resource_link), else inline `output`
+	OutputDigest string                 `protobuf:"bytes,6,opt,name=output_digest,json=outputDigest,proto3" json:"output_digest,omitempty"` // content digest of output_uri target (chain covers externalized bytes)
+	IsError      bool                   `protobuf:"varint,4,opt,name=is_error,json=isError,proto3" json:"is_error,omitempty"`
+	Error        string                 `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
+	// content is the model-facing result (MCP CallToolResult.content: text, file, structured data).
+	// A harness records on EVENT_TOOL_RESULT the same ToolResult it feeds back as a tool_result part,
+	// so history rebuilt from the journal can give the model what it saw live.
+	Content       []*Part `protobuf:"bytes,7,rep,name=content,proto3" json:"content,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ToolResult) Reset() {
 	*x = ToolResult{}
-	mi := &file_common_proto_msgTypes[12]
+	mi := &file_common_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1202,7 +1433,7 @@ func (x *ToolResult) String() string {
 func (*ToolResult) ProtoMessage() {}
 
 func (x *ToolResult) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[12]
+	mi := &file_common_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1215,7 +1446,7 @@ func (x *ToolResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolResult.ProtoReflect.Descriptor instead.
 func (*ToolResult) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{12}
+	return file_common_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ToolResult) GetId() string {
@@ -1260,6 +1491,13 @@ func (x *ToolResult) GetError() string {
 	return ""
 }
 
+func (x *ToolResult) GetContent() []*Part {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
 // Approval is modeled as durable log entries: an unresolved request, later resolved by a
 // decision — so compute can suspend while awaiting a human/policy decision (§7).
 type ApprovalRequest struct {
@@ -1272,7 +1510,7 @@ type ApprovalRequest struct {
 
 func (x *ApprovalRequest) Reset() {
 	*x = ApprovalRequest{}
-	mi := &file_common_proto_msgTypes[13]
+	mi := &file_common_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1284,7 +1522,7 @@ func (x *ApprovalRequest) String() string {
 func (*ApprovalRequest) ProtoMessage() {}
 
 func (x *ApprovalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[13]
+	mi := &file_common_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1297,7 +1535,7 @@ func (x *ApprovalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalRequest.ProtoReflect.Descriptor instead.
 func (*ApprovalRequest) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{13}
+	return file_common_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ApprovalRequest) GetToolCallId() string {
@@ -1325,7 +1563,7 @@ type ApprovalResult struct {
 
 func (x *ApprovalResult) Reset() {
 	*x = ApprovalResult{}
-	mi := &file_common_proto_msgTypes[14]
+	mi := &file_common_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1337,7 +1575,7 @@ func (x *ApprovalResult) String() string {
 func (*ApprovalResult) ProtoMessage() {}
 
 func (x *ApprovalResult) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[14]
+	mi := &file_common_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1350,7 +1588,7 @@ func (x *ApprovalResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApprovalResult.ProtoReflect.Descriptor instead.
 func (*ApprovalResult) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{14}
+	return file_common_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ApprovalResult) GetToolCallId() string {
@@ -1384,7 +1622,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_common_proto_msgTypes[15]
+	mi := &file_common_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1396,7 +1634,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[15]
+	mi := &file_common_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1409,7 +1647,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{15}
+	return file_common_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Error) GetCode() int32 {
@@ -1436,7 +1674,7 @@ type HarnessEnd struct {
 
 func (x *HarnessEnd) Reset() {
 	*x = HarnessEnd{}
-	mi := &file_common_proto_msgTypes[16]
+	mi := &file_common_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1448,7 +1686,7 @@ func (x *HarnessEnd) String() string {
 func (*HarnessEnd) ProtoMessage() {}
 
 func (x *HarnessEnd) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[16]
+	mi := &file_common_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1461,7 +1699,7 @@ func (x *HarnessEnd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HarnessEnd.ProtoReflect.Descriptor instead.
 func (*HarnessEnd) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{16}
+	return file_common_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *HarnessEnd) GetState() string {
@@ -1499,7 +1737,7 @@ type Lifecycle struct {
 
 func (x *Lifecycle) Reset() {
 	*x = Lifecycle{}
-	mi := &file_common_proto_msgTypes[17]
+	mi := &file_common_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1511,7 +1749,7 @@ func (x *Lifecycle) String() string {
 func (*Lifecycle) ProtoMessage() {}
 
 func (x *Lifecycle) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[17]
+	mi := &file_common_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1524,7 +1762,7 @@ func (x *Lifecycle) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Lifecycle.ProtoReflect.Descriptor instead.
 func (*Lifecycle) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{17}
+	return file_common_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Lifecycle) GetKind() Lifecycle_Kind {
@@ -1589,7 +1827,7 @@ type ExecutionStart struct {
 
 func (x *ExecutionStart) Reset() {
 	*x = ExecutionStart{}
-	mi := &file_common_proto_msgTypes[18]
+	mi := &file_common_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1601,7 +1839,7 @@ func (x *ExecutionStart) String() string {
 func (*ExecutionStart) ProtoMessage() {}
 
 func (x *ExecutionStart) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[18]
+	mi := &file_common_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1614,7 +1852,7 @@ func (x *ExecutionStart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutionStart.ProtoReflect.Descriptor instead.
 func (*ExecutionStart) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{18}
+	return file_common_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ExecutionStart) GetConfig() []byte {
@@ -1670,7 +1908,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_common_proto_msgTypes[19]
+	mi := &file_common_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1682,7 +1920,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[19]
+	mi := &file_common_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1695,7 +1933,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{19}
+	return file_common_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Event) GetExecutionId() string {
@@ -1927,7 +2165,7 @@ type LogRecord struct {
 
 func (x *LogRecord) Reset() {
 	*x = LogRecord{}
-	mi := &file_common_proto_msgTypes[20]
+	mi := &file_common_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1939,7 +2177,7 @@ func (x *LogRecord) String() string {
 func (*LogRecord) ProtoMessage() {}
 
 func (x *LogRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[20]
+	mi := &file_common_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1952,7 +2190,7 @@ func (x *LogRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogRecord.ProtoReflect.Descriptor instead.
 func (*LogRecord) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{20}
+	return file_common_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *LogRecord) GetSeq() int64 {
@@ -2003,12 +2241,15 @@ const file_common_proto_rawDesc = "" +
 	"\vcreate_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"createTime\x12;\n" +
 	"\vupdate_time\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"updateTime\"\xe5\x01\n" +
+	"updateTime\"\xe1\x02\n" +
 	"\x04Part\x120\n" +
 	"\x04text\x18\x01 \x01(\v2\x1a.agentsessions.v1.TextPartH\x00R\x04text\x120\n" +
 	"\x04file\x18\x02 \x01(\v2\x1a.agentsessions.v1.FilePartH\x00R\x04file\x120\n" +
 	"\x04data\x18\x03 \x01(\v2\x1a.agentsessions.v1.DataPartH\x00R\x04data\x12?\n" +
-	"\treasoning\x18\x04 \x01(\v2\x1f.agentsessions.v1.ReasoningPartH\x00R\treasoningB\x06\n" +
+	"\treasoning\x18\x04 \x01(\v2\x1f.agentsessions.v1.ReasoningPartH\x00R\treasoning\x129\n" +
+	"\ttool_call\x18\x05 \x01(\v2\x1a.agentsessions.v1.ToolCallH\x00R\btoolCall\x12?\n" +
+	"\vtool_result\x18\x06 \x01(\v2\x1c.agentsessions.v1.ToolResultH\x00R\n" +
+	"toolResultB\x06\n" +
 	"\x04part\"\x1e\n" +
 	"\bTextPart\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\"\x80\x01\n" +
@@ -2049,17 +2290,33 @@ const file_common_proto_rawDesc = "" +
 	"attributes\x1a=\n" +
 	"\x0fAttributesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x83\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xfa\x02\n" +
 	"\tModelCall\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12?\n" +
 	"\x06params\x18\x02 \x03(\v2'.agentsessions.v1.ModelCall.ParamsEntryR\x06params\x12\x1d\n" +
 	"\n" +
 	"input_hash\x18\x03 \x01(\tR\tinputHash\x12\x0e\n" +
 	"\x02id\x18\x04 \x01(\tR\x02id\x125\n" +
-	"\bmessages\x18\x05 \x03(\v2\x19.agentsessions.v1.MessageR\bmessages\x1a9\n" +
+	"\bmessages\x18\x05 \x03(\v2\x19.agentsessions.v1.MessageR\bmessages\x126\n" +
+	"\x05tools\x18\x06 \x03(\v2 .agentsessions.v1.ToolDefinitionR\x05tools\x12=\n" +
+	"\vtool_choice\x18\a \x01(\v2\x1c.agentsessions.v1.ToolChoiceR\n" +
+	"toolChoice\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x90\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x82\x01\n" +
+	"\x0eToolDefinition\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
+	"\vdescription\x18\x02 \x01(\tR\vdescription\x12:\n" +
+	"\finput_schema\x18\x03 \x01(\v2\x17.google.protobuf.StructR\vinputSchema\"\xa6\x01\n" +
+	"\n" +
+	"ToolChoice\x125\n" +
+	"\x04mode\x18\x01 \x01(\x0e2!.agentsessions.v1.ToolChoice.ModeR\x04mode\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"M\n" +
+	"\x04Mode\x12\x14\n" +
+	"\x10MODE_UNSPECIFIED\x10\x00\x12\r\n" +
+	"\tMODE_AUTO\x10\x01\x12\r\n" +
+	"\tMODE_NONE\x10\x02\x12\x11\n" +
+	"\rMODE_REQUIRED\x10\x03\"\x90\x01\n" +
 	"\x05Usage\x12\x14\n" +
 	"\x05model\x18\x01 \x01(\tR\x05model\x12!\n" +
 	"\finput_tokens\x18\x02 \x01(\x03R\vinputTokens\x12#\n" +
@@ -2070,7 +2327,7 @@ const file_common_proto_rawDesc = "" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12+\n" +
 	"\x04args\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x04args\x129\n" +
 	"\tmediation\x18\x04 \x01(\x0e2\x1b.agentsessions.v1.MediationR\tmediation\x12'\n" +
-	"\x0fidempotency_key\x18\x05 \x01(\tR\x0eidempotencyKey\"\xc2\x01\n" +
+	"\x0fidempotency_key\x18\x05 \x01(\tR\x0eidempotencyKey\"\xf4\x01\n" +
 	"\n" +
 	"ToolResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12/\n" +
@@ -2079,7 +2336,8 @@ const file_common_proto_rawDesc = "" +
 	"output_uri\x18\x03 \x01(\tR\toutputUri\x12#\n" +
 	"\routput_digest\x18\x06 \x01(\tR\foutputDigest\x12\x19\n" +
 	"\bis_error\x18\x04 \x01(\bR\aisError\x12\x14\n" +
-	"\x05error\x18\x05 \x01(\tR\x05error\"K\n" +
+	"\x05error\x18\x05 \x01(\tR\x05error\x120\n" +
+	"\acontent\x18\a \x03(\v2\x16.agentsessions.v1.PartR\acontent\"K\n" +
 	"\x0fApprovalRequest\x12 \n" +
 	"\ftool_call_id\x18\x01 \x01(\tR\n" +
 	"toolCallId\x12\x16\n" +
@@ -2174,76 +2432,86 @@ func file_common_proto_rawDescGZIP() []byte {
 	return file_common_proto_rawDescData
 }
 
-var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_common_proto_goTypes = []any{
 	(Mediation)(0),                // 0: agentsessions.v1.Mediation
 	(EventKind)(0),                // 1: agentsessions.v1.EventKind
-	(Lifecycle_Kind)(0),           // 2: agentsessions.v1.Lifecycle.Kind
-	(*ResourceMetadata)(nil),      // 3: agentsessions.v1.ResourceMetadata
-	(*Part)(nil),                  // 4: agentsessions.v1.Part
-	(*TextPart)(nil),              // 5: agentsessions.v1.TextPart
-	(*FilePart)(nil),              // 6: agentsessions.v1.FilePart
-	(*DataPart)(nil),              // 7: agentsessions.v1.DataPart
-	(*ReasoningPart)(nil),         // 8: agentsessions.v1.ReasoningPart
-	(*Message)(nil),               // 9: agentsessions.v1.Message
-	(*IdentityRef)(nil),           // 10: agentsessions.v1.IdentityRef
-	(*Origin)(nil),                // 11: agentsessions.v1.Origin
-	(*ModelCall)(nil),             // 12: agentsessions.v1.ModelCall
-	(*Usage)(nil),                 // 13: agentsessions.v1.Usage
-	(*ToolCall)(nil),              // 14: agentsessions.v1.ToolCall
-	(*ToolResult)(nil),            // 15: agentsessions.v1.ToolResult
-	(*ApprovalRequest)(nil),       // 16: agentsessions.v1.ApprovalRequest
-	(*ApprovalResult)(nil),        // 17: agentsessions.v1.ApprovalResult
-	(*Error)(nil),                 // 18: agentsessions.v1.Error
-	(*HarnessEnd)(nil),            // 19: agentsessions.v1.HarnessEnd
-	(*Lifecycle)(nil),             // 20: agentsessions.v1.Lifecycle
-	(*ExecutionStart)(nil),        // 21: agentsessions.v1.ExecutionStart
-	(*Event)(nil),                 // 22: agentsessions.v1.Event
-	(*LogRecord)(nil),             // 23: agentsessions.v1.LogRecord
-	nil,                           // 24: agentsessions.v1.Origin.AttributesEntry
-	nil,                           // 25: agentsessions.v1.ModelCall.ParamsEntry
-	(*timestamppb.Timestamp)(nil), // 26: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),       // 27: google.protobuf.Struct
+	(ToolChoice_Mode)(0),          // 2: agentsessions.v1.ToolChoice.Mode
+	(Lifecycle_Kind)(0),           // 3: agentsessions.v1.Lifecycle.Kind
+	(*ResourceMetadata)(nil),      // 4: agentsessions.v1.ResourceMetadata
+	(*Part)(nil),                  // 5: agentsessions.v1.Part
+	(*TextPart)(nil),              // 6: agentsessions.v1.TextPart
+	(*FilePart)(nil),              // 7: agentsessions.v1.FilePart
+	(*DataPart)(nil),              // 8: agentsessions.v1.DataPart
+	(*ReasoningPart)(nil),         // 9: agentsessions.v1.ReasoningPart
+	(*Message)(nil),               // 10: agentsessions.v1.Message
+	(*IdentityRef)(nil),           // 11: agentsessions.v1.IdentityRef
+	(*Origin)(nil),                // 12: agentsessions.v1.Origin
+	(*ModelCall)(nil),             // 13: agentsessions.v1.ModelCall
+	(*ToolDefinition)(nil),        // 14: agentsessions.v1.ToolDefinition
+	(*ToolChoice)(nil),            // 15: agentsessions.v1.ToolChoice
+	(*Usage)(nil),                 // 16: agentsessions.v1.Usage
+	(*ToolCall)(nil),              // 17: agentsessions.v1.ToolCall
+	(*ToolResult)(nil),            // 18: agentsessions.v1.ToolResult
+	(*ApprovalRequest)(nil),       // 19: agentsessions.v1.ApprovalRequest
+	(*ApprovalResult)(nil),        // 20: agentsessions.v1.ApprovalResult
+	(*Error)(nil),                 // 21: agentsessions.v1.Error
+	(*HarnessEnd)(nil),            // 22: agentsessions.v1.HarnessEnd
+	(*Lifecycle)(nil),             // 23: agentsessions.v1.Lifecycle
+	(*ExecutionStart)(nil),        // 24: agentsessions.v1.ExecutionStart
+	(*Event)(nil),                 // 25: agentsessions.v1.Event
+	(*LogRecord)(nil),             // 26: agentsessions.v1.LogRecord
+	nil,                           // 27: agentsessions.v1.Origin.AttributesEntry
+	nil,                           // 28: agentsessions.v1.ModelCall.ParamsEntry
+	(*timestamppb.Timestamp)(nil), // 29: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),       // 30: google.protobuf.Struct
 }
 var file_common_proto_depIdxs = []int32{
-	26, // 0: agentsessions.v1.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
-	26, // 1: agentsessions.v1.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
-	5,  // 2: agentsessions.v1.Part.text:type_name -> agentsessions.v1.TextPart
-	6,  // 3: agentsessions.v1.Part.file:type_name -> agentsessions.v1.FilePart
-	7,  // 4: agentsessions.v1.Part.data:type_name -> agentsessions.v1.DataPart
-	8,  // 5: agentsessions.v1.Part.reasoning:type_name -> agentsessions.v1.ReasoningPart
-	27, // 6: agentsessions.v1.DataPart.data:type_name -> google.protobuf.Struct
-	4,  // 7: agentsessions.v1.ReasoningPart.summary:type_name -> agentsessions.v1.Part
-	4,  // 8: agentsessions.v1.Message.parts:type_name -> agentsessions.v1.Part
-	24, // 9: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
-	25, // 10: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
-	9,  // 11: agentsessions.v1.ModelCall.messages:type_name -> agentsessions.v1.Message
-	27, // 12: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
-	0,  // 13: agentsessions.v1.ToolCall.mediation:type_name -> agentsessions.v1.Mediation
-	27, // 14: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
-	18, // 15: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
-	2,  // 16: agentsessions.v1.Lifecycle.kind:type_name -> agentsessions.v1.Lifecycle.Kind
-	26, // 17: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
-	1,  // 18: agentsessions.v1.Event.kind:type_name -> agentsessions.v1.EventKind
-	9,  // 19: agentsessions.v1.Event.message:type_name -> agentsessions.v1.Message
-	12, // 20: agentsessions.v1.Event.model:type_name -> agentsessions.v1.ModelCall
-	14, // 21: agentsessions.v1.Event.tool:type_name -> agentsessions.v1.ToolCall
-	15, // 22: agentsessions.v1.Event.result:type_name -> agentsessions.v1.ToolResult
-	16, // 23: agentsessions.v1.Event.approval:type_name -> agentsessions.v1.ApprovalRequest
-	17, // 24: agentsessions.v1.Event.approval_result:type_name -> agentsessions.v1.ApprovalResult
-	13, // 25: agentsessions.v1.Event.usage:type_name -> agentsessions.v1.Usage
-	20, // 26: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
-	19, // 27: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
-	18, // 28: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
-	21, // 29: agentsessions.v1.Event.execution_start:type_name -> agentsessions.v1.ExecutionStart
-	10, // 30: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
-	22, // 31: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
-	32, // [32:32] is the sub-list for method output_type
-	32, // [32:32] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	29, // 0: agentsessions.v1.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
+	29, // 1: agentsessions.v1.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
+	6,  // 2: agentsessions.v1.Part.text:type_name -> agentsessions.v1.TextPart
+	7,  // 3: agentsessions.v1.Part.file:type_name -> agentsessions.v1.FilePart
+	8,  // 4: agentsessions.v1.Part.data:type_name -> agentsessions.v1.DataPart
+	9,  // 5: agentsessions.v1.Part.reasoning:type_name -> agentsessions.v1.ReasoningPart
+	17, // 6: agentsessions.v1.Part.tool_call:type_name -> agentsessions.v1.ToolCall
+	18, // 7: agentsessions.v1.Part.tool_result:type_name -> agentsessions.v1.ToolResult
+	30, // 8: agentsessions.v1.DataPart.data:type_name -> google.protobuf.Struct
+	5,  // 9: agentsessions.v1.ReasoningPart.summary:type_name -> agentsessions.v1.Part
+	5,  // 10: agentsessions.v1.Message.parts:type_name -> agentsessions.v1.Part
+	27, // 11: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
+	28, // 12: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
+	10, // 13: agentsessions.v1.ModelCall.messages:type_name -> agentsessions.v1.Message
+	14, // 14: agentsessions.v1.ModelCall.tools:type_name -> agentsessions.v1.ToolDefinition
+	15, // 15: agentsessions.v1.ModelCall.tool_choice:type_name -> agentsessions.v1.ToolChoice
+	30, // 16: agentsessions.v1.ToolDefinition.input_schema:type_name -> google.protobuf.Struct
+	2,  // 17: agentsessions.v1.ToolChoice.mode:type_name -> agentsessions.v1.ToolChoice.Mode
+	30, // 18: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
+	0,  // 19: agentsessions.v1.ToolCall.mediation:type_name -> agentsessions.v1.Mediation
+	30, // 20: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
+	5,  // 21: agentsessions.v1.ToolResult.content:type_name -> agentsessions.v1.Part
+	21, // 22: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
+	3,  // 23: agentsessions.v1.Lifecycle.kind:type_name -> agentsessions.v1.Lifecycle.Kind
+	29, // 24: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	1,  // 25: agentsessions.v1.Event.kind:type_name -> agentsessions.v1.EventKind
+	10, // 26: agentsessions.v1.Event.message:type_name -> agentsessions.v1.Message
+	13, // 27: agentsessions.v1.Event.model:type_name -> agentsessions.v1.ModelCall
+	17, // 28: agentsessions.v1.Event.tool:type_name -> agentsessions.v1.ToolCall
+	18, // 29: agentsessions.v1.Event.result:type_name -> agentsessions.v1.ToolResult
+	19, // 30: agentsessions.v1.Event.approval:type_name -> agentsessions.v1.ApprovalRequest
+	20, // 31: agentsessions.v1.Event.approval_result:type_name -> agentsessions.v1.ApprovalResult
+	16, // 32: agentsessions.v1.Event.usage:type_name -> agentsessions.v1.Usage
+	23, // 33: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
+	22, // 34: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
+	21, // 35: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
+	24, // 36: agentsessions.v1.Event.execution_start:type_name -> agentsessions.v1.ExecutionStart
+	11, // 37: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
+	25, // 38: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
+	39, // [39:39] is the sub-list for method output_type
+	39, // [39:39] is the sub-list for method input_type
+	39, // [39:39] is the sub-list for extension type_name
+	39, // [39:39] is the sub-list for extension extendee
+	0,  // [0:39] is the sub-list for field type_name
 }
 
 func init() { file_common_proto_init() }
@@ -2256,6 +2524,8 @@ func file_common_proto_init() {
 		(*Part_File)(nil),
 		(*Part_Data)(nil),
 		(*Part_Reasoning)(nil),
+		(*Part_ToolCall)(nil),
+		(*Part_ToolResult)(nil),
 	}
 	file_common_proto_msgTypes[3].OneofWrappers = []any{
 		(*FilePart_Bytes)(nil),
@@ -2265,8 +2535,8 @@ func file_common_proto_init() {
 		(*ReasoningPart_OpaqueBytes)(nil),
 		(*ReasoningPart_OpaqueUri)(nil),
 	}
-	file_common_proto_msgTypes[18].OneofWrappers = []any{}
-	file_common_proto_msgTypes[19].OneofWrappers = []any{
+	file_common_proto_msgTypes[20].OneofWrappers = []any{}
+	file_common_proto_msgTypes[21].OneofWrappers = []any{
 		(*Event_Message)(nil),
 		(*Event_Model)(nil),
 		(*Event_Tool)(nil),
@@ -2284,8 +2554,8 @@ func file_common_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_proto_rawDesc), len(file_common_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   23,
+			NumEnums:      4,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

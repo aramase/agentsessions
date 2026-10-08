@@ -139,7 +139,7 @@ replay path**, and replay is exact for free.
 
 ## The rules that keep replay exact
 
-Five rules. Follow them and every determinism guarantee holds across process death, resume, and fork.
+Six rules. Follow them and every determinism guarantee holds across process death, resume, and fork.
 
 ### Rule 1: all model calls go through `sink.Model`
 
@@ -255,6 +255,24 @@ If your provider returns opaque reasoning parts, return them inside `ModelRespon
 set `Capabilities.ReasoningReplay`. The host records them verbatim and replays them, so reasoning
 continuity survives resume and fork (I2) without a memory snapshot. `agentsessions` never interprets the
 opaque bytes; provider specifics stay inside them.
+
+### Rule 6: carry the tool loop in the model request
+
+Offer tools on `ModelRequest.Tools`, and constrain them with `ModelRequest.ToolChoice` if you need to.
+A completion that asks for tools returns them as `ToolCall` parts in `ModelResponse.Message`. Feed each
+result back to the model as a `ToolResult` part, in a message with role `tool`, whose `ID` is the call's
+`ID`. Arguments are a structured object of JSON values, not a JSON string.
+
+Running the call is still Rule 4: set `Mediation` and `IdempotencyKey` on the part's `ToolCall` and pass
+it to `sink.ToolCall`, or run it yourself and `sink.Report` the result. A tool your harness runs itself
+runs again when the turn is replayed; use `CONTROLLER_MEDIATED` for a tool that must not.
+
+The input hash (I0) covers the tools, the tool choice, and every tool part, so on replay build the next
+request from the recorded completion exactly as you did live. A changed definition, choice, or argument
+fails the I0 check.
+
+The bundled OpenAI-compatible adapter (`model/openai`) does not map tools yet. It refuses a request that
+carries tools, a tool choice, or a tool part instead of sending less than the log records.
 
 ## Reference harness 1: stateless replay (`harness/echoagent`)
 
@@ -591,3 +609,5 @@ actually honor it, and what makes the system degrade honestly instead of silentl
       `REQUIRES_MEMORY_SNAPSHOT` and never rebuilt from `History`.
 - [ ] Side-effecting tools set an `IdempotencyKey` and use the right mediation tier.
 - [ ] Opaque reasoning parts are returned verbatim, with `ReasoningReplay` set.
+- [ ] Tools ride `ModelRequest.Tools`, and tool calls and results ride as parts rebuilt from the
+      recorded completion.

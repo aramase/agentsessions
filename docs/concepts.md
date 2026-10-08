@@ -125,8 +125,8 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 
 The same `Event` type is shared by the session log and the harness stream, so what a harness emits is
 exactly what gets journaled; the host additionally owns invocation and lifecycle records. Content is
-carried as A2A-style `Message`s (a role plus a list of `Part`s: text, file, structured data, or an
-opaque reasoning block).
+carried as A2A-style `Message`s (a role plus a list of `Part`s: text, file, structured data, an opaque
+reasoning block, a model's tool call, or a tool's result).
 
 ### Durable execution invocation
 

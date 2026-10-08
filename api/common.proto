@@ -35,6 +35,14 @@ message Part {
     FilePart file = 2;
     DataPart data = 3;
     ReasoningPart reasoning = 4;
+    // tool_call is a model's request to call a tool, carried in an assistant message. It reuses
+    // ToolCall so one id runs from the model output through EVENT_TOOL_CALL / EVENT_TOOL_RESULT to the
+    // next model input. On a model output, mediation and idempotency_key are unset; the harness sets
+    // them when it executes the call.
+    ToolCall tool_call = 5;
+    // tool_result is a tool's result fed back to the model, carried in a message with role "tool".
+    // ToolResult.id is the id of the ToolCall it answers.
+    ToolResult tool_result = 6;
   }
 }
 
@@ -115,8 +123,8 @@ enum Mediation {
 
 // ModelCall is a model REQUEST emitted by the harness (EVENT_MODEL_CALL). The host records
 // it with input_hash and answers via ControllerFrame.ModelResult (correlated by id). The
-// completion (text + reasoning parts) is recorded separately as an EVENT_OUTPUT message.
-// Under STATELESS_REPLAY the harness never calls a provider directly.
+// completion (text, reasoning, and tool_call parts) is recorded separately as an EVENT_OUTPUT
+// message. Under STATELESS_REPLAY the harness never calls a provider directly.
 message ModelCall {
   string model = 1;
   map<string, string> params = 2;
@@ -126,6 +134,34 @@ message ModelCall {
   // wire-only: the host records the call with input_hash alone (messages stripped), since the
   // recorded form only needs the hash to re-check I0 on replay.
   repeated Message messages = 5;
+  // tools are the definitions offered to the model on this call. Wire-only like messages: the
+  // recorded form keeps input_hash, which covers them.
+  repeated ToolDefinition tools = 6;
+  // tool_choice constrains whether and which tool the model calls. Wire-only like messages and
+  // covered by input_hash. Unset means the provider default.
+  ToolChoice tool_choice = 7;
+}
+
+// ToolDefinition is a tool offered to a model on one call. It aligns with an MCP Tool (name,
+// description, inputSchema). It differs from the harness's ToolSpec, which declares a tool and its
+// default mediation to the host; ToolDefinition is what the model sees.
+message ToolDefinition {
+  string name = 1;
+  string description = 2;
+  google.protobuf.Struct input_schema = 3; // JSON Schema object describing the tool's arguments
+}
+
+// ToolChoice constrains whether and which tool the model calls.
+message ToolChoice {
+  enum Mode {
+    MODE_UNSPECIFIED = 0; // provider default
+    MODE_AUTO = 1;        // the model decides whether to call a tool
+    MODE_NONE = 2;        // the model must not call a tool
+    MODE_REQUIRED = 3;    // the model must call at least one tool
+  }
+  Mode mode = 1;
+  // name forces one specific tool. It is meaningful only with MODE_REQUIRED.
+  string name = 2;
 }
 
 message Usage {
@@ -151,6 +187,10 @@ message ToolResult {
   string output_digest = 6; // content digest of output_uri target (chain covers externalized bytes)
   bool is_error = 4;
   string error = 5;
+  // content is the model-facing result (MCP CallToolResult.content: text, file, structured data).
+  // A harness records on EVENT_TOOL_RESULT the same ToolResult it feeds back as a tool_result part,
+  // so history rebuilt from the journal can give the model what it saw live.
+  repeated Part content = 7;
 }
 
 // Approval is modeled as durable log entries: an unresolved request, later resolved by a
