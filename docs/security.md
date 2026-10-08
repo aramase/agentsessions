@@ -48,8 +48,10 @@ nothing verifies or enforces it. It is metadata today, not a control.
 **`project` is not a tenancy boundary.** It is an exact-match filter on listing. A caller that names
 another project gets that project's sessions. Do not treat it as isolation.
 
-**There is no transport security.** No TLS anywhere, including between the host and a harness. Traffic
-is readable and modifiable in flight by anything on the path.
+**There is no transport security.** This repo sets up no TLS anywhere, including between the host
+and a harness. Traffic is readable and modifiable in flight by anything on the path. The one
+exception is outside this repo: on substrate, the router-to-worker hop is mTLS (below), but the
+host-to-router hop is not.
 
 **On substrate, anything in the cluster can drive any session's harness.** The substrate backend
 reaches each harness through substrate's `atenet-router`, over plaintext h2c, naming the actor in an
@@ -60,8 +62,13 @@ stock install puts no NetworkPolicy in front of it. So any pod that can reach
 `atenet-router.ate-system.svc:80` can wake any actor and open a `Harness.Connect` stream to it, and
 the harness accepts the stream, because it does not authenticate the host either. Such a caller can
 feed a harness forged model results or tool results, read what the harness emits, and keep an actor
-from suspending. The journal still only records what the real host wrote, so this breaks the
-session's live state, not the integrity of its record. Only the router-to-worker hop is protected
+from suspending: substrate drains open streams before it snapshots, and `Placer.Suspend` only
+refuses to overlap operations of its own Registry, so it neither sees nor ends a stream another
+caller holds open. The hash chain stays intact, because only the real host writes the journal, but
+anything the harness emits afterwards, including what the real host then records, can reflect the
+forged input. For a `REQUIRES_MEMORY_SNAPSHOT` harness the forged input lands in RAM and persists
+through suspend, resume and fork, so a verified chain is not evidence that its content is
+unpoisoned. Only the router-to-worker hop is protected
 (mTLS with the router's SPIFFE identity, and the worker checks the actor is assigned to it).
 
 Until this is closed, run the substrate backend only in a cluster where every workload that can
