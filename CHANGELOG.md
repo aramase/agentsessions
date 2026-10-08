@@ -75,8 +75,9 @@ provide.
   is recorded, so nothing holds the checkpoint up. This holds across every Placer of a
   `placement.Registry`, so a turn that `ExecRequest.harness` routed to another harness is covered:
   `placement.NewRegistry` gives its Placers one shared per-session state, and now fails if a Placer
-  already belongs to another registry. On kind, a suspend under an idle stream took
-  5m30s before this change (substrate `362637f9`) and 109ms after (substrate `fc0e3586`). Three behavior changes follow:
+  already belongs to another registry or has a turn or checkpoint in progress. On kind, a suspend
+  under an idle stream took 5m30s before this change (substrate `362637f9`) and 109ms after
+  (substrate `fc0e3586`). Three behavior changes follow:
   - Before it snapshots, the checkpoint waits until every turn whose stream it closed has minted
     its fence or returned, bounded by the caller's context. If the context ends first, the
     checkpoint fails before snapshotting and records nothing.
@@ -89,8 +90,8 @@ provide.
     `Exec` and `Resume` report it as `ABORTED`, which callers retry.
 - Through `atenet-router`, a harness stream that stays idle for about 5m30s (the router's default
   5m route timeout plus 30s) is reset with `RST_STREAM` (gRPC `Internal`; measured on kind at
-  substrate `fc0e3586` with the stream held idle for 6m30s), so a turn parked on a slower model call fails. Raise the
-  router's `--route-timeout` if turns can run that long.
+  substrate `fc0e3586` with the stream held idle for 6m30s), so a turn parked on a slower model
+  call fails. Raise the router's `--route-timeout` if turns can run that long.
 - `runtime/substrate.ControlClient.ResumeActor` drops its `boot` argument (substrate removed
   `ResumeActorRequest.boot`); a new actor starts from its template's golden snapshot, or cold-boots
   if none is built. `SnapshotCloner` follows substrate's Tag API (`TagActor`,

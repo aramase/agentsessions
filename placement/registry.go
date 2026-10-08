@@ -31,8 +31,15 @@ type Registry struct {
 // The placers are switched to one shared set of per-session connections and checkpoint marks.
 // session.Service routes a turn by ExecRequest.harness but a Suspend or Fork by the session's
 // recorded harness, so the two can land on different Placers; sharing the set is what lets a
-// checkpoint end, and refuse, a turn whichever Placer runs it. Call NewRegistry before any of the
-// placers runs a turn, and give each Placer to one registry only.
+// checkpoint end, and refuse, a turn whichever Placer runs it.
+//
+// NewRegistry rejects a Placer that already belongs to a registry, and one with a turn or
+// checkpoint in progress: replacing its set would orphan that turn's connection and that
+// checkpoint's mark, so a later checkpoint would neither end nor refuse the turn. A Placer that has
+// run turns and is now idle holds nothing in its set and is accepted. The check cannot see a turn
+// that starts while NewRegistry runs, and the set is replaced without synchronization, so
+// NewRegistry must not run concurrently with any method of the placers it is given: build the
+// registry before serving.
 func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, error) {
 	if len(placers) == 0 {
 		return nil, errors.New("placement: registry needs at least one harness")
@@ -56,6 +63,9 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, 
 	for name, p := range placers {
 		if p.sessions.shared {
 			return nil, fmt.Errorf("placement: harness %q: placer already belongs to another registry", name)
+		}
+		if p.sessions.busy() {
+			return nil, fmt.Errorf("placement: harness %q: placer has a turn or checkpoint in progress", name)
 		}
 		byName[name] = p
 	}
