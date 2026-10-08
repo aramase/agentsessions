@@ -12,11 +12,13 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/aramase/agentsessions/api"
@@ -56,8 +58,9 @@ var ErrAdmissionInterrupted = errors.New("placement: admission interrupted")
 
 // Backend is the compute Runtime the Placer drives. It exposes the harness DESCRIPTOR so the Placer
 // can gate CanPlace before Create (placement must not provision compute to learn a harness's needs);
-// the harness itself is reached by dialing Incarnation.Address (Harness.Connect) — the one dial path
-// both runtime/local and substrate use. runtime/local satisfies this.
+// the harness itself is reached by dialing Incarnation.Address with Incarnation.CallMetadata on every
+// call (Harness.Connect) — the one dial path both runtime/local and substrate use. runtime/local
+// satisfies this.
 type Backend interface {
 	api.Runtime
 	Describe(ctx context.Context) (api.Descriptor, error)
@@ -86,14 +89,17 @@ type Placer struct {
 	stream  controller.StreamFunc
 	dial    Dialer
 	logger  *slog.Logger
+
+	mu   sync.Mutex
+	live map[string]map[*liveHarness]struct{} // session UID -> harness connections open in this Placer
 }
 
-// Dialer opens a Harness.Connect client to the harness at a runtime-specific address and returns a
-// closer for the connection. runtime/local passes a unix-socket address (unix://…); substrate passes
-// the actor's pod IP as host:port (PodIP:80), dialed directly over h2c — the atenet mesh is
-// HTTP/1.1-only to actors, so gRPC bypasses the router. The default dialer handles both forms;
-// WithDialer overrides it (tests). This is the one transport seam the harness rides unchanged.
-type Dialer func(address string) (api.Harness, func() error, error)
+// Dialer opens a Harness.Connect client to the harness an incarnation names and returns a closer for
+// the connection. runtime/local passes a unix-socket address (unix://…); substrate passes the
+// atenet-router's host:port, dialed over h2c, plus CallMetadata naming the actor, which the client
+// must attach to every call. The default dialer handles both forms; WithDialer overrides it (tests).
+// This is the one transport seam the harness rides unchanged.
+type Dialer func(inc api.Incarnation) (api.Harness, func() error, error)
 
 // Option configures a Placer.
 type Option func(*Placer)
@@ -159,7 +165,7 @@ func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 	p := &Placer{
 		backend: backend,
 		model:   model,
-		dial:    defaultDial,
+		dial:    DefaultDial,
 		logger:  slog.New(slog.DiscardHandler),
 	}
 	for _, o := range opts {
@@ -212,13 +218,14 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		"runtime", inc.Runtime,
 		"transport", addressTransport(inc.Address),
 	)
-	har, closeHarness, err := p.dial(inc.Address)
+	ctx, live, err := p.openHarness(ctx, sessionUID, inc)
 	if err != nil {
 		dialFinished(err, "error_kind", "harness_dial_failed")
 		return inc, err
 	}
 	dialFinished(nil)
-	defer p.closeHarness(ctx, sessionUID, inc.ID, closeHarness)
+	defer p.releaseHarness(ctx, sessionUID, inc.ID, live)
+	har := live.harness
 	if err := p.recheck(ctx, sessionUID, har); err != nil {
 		return inc, err
 	}
@@ -327,27 +334,53 @@ func (p *Placer) gate(ctx context.Context, sessionUID, op string, describe func(
 	return desc, nil
 }
 
-// defaultDial reaches a harnesswire server by address form: runtime/local passes a unix-socket
-// address (unix://…); substrate passes the actor's pod IP as host:port (PodIP:80). Both ride the same
-// harnesswire gRPC client; only the transport differs. One dial path, two address forms.
-func defaultDial(address string) (api.Harness, func() error, error) {
-	if sock, ok := strings.CutPrefix(address, "unix://"); ok {
-		return unixDial(sock)
-	}
-	return tcpDial(address)
-}
-
-// unixDial connects to a harnesswire server on a unix socket (runtime/local).
-func unixDial(sock string) (api.Harness, func() error, error) {
-	conn, err := grpc.NewClient(
-		"passthrough:///agentlocal",
+// DefaultDial reaches a harnesswire server by address form: runtime/local passes a unix-socket
+// address (unix://…); substrate passes the atenet-router's host:port. Both ride the same harnesswire
+// gRPC client with the incarnation's CallMetadata attached to every call; only the transport
+// differs. One dial path, two address forms.
+func DefaultDial(inc api.Incarnation) (api.Harness, func() error, error) {
+	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
 		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+	}
+	if len(inc.CallMetadata) > 0 {
+		md := metadata.New(inc.CallMetadata)
+		opts = append(opts,
+			grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, callOpts ...grpc.CallOption) error {
+				return invoker(withCallMetadata(ctx, md), method, req, reply, cc, callOpts...)
+			}),
+			grpc.WithChainStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, callOpts ...grpc.CallOption) (grpc.ClientStream, error) {
+				return streamer(withCallMetadata(ctx, md), desc, cc, method, callOpts...)
+			}),
+		)
+	}
+	if sock, ok := strings.CutPrefix(inc.Address, "unix://"); ok {
+		return unixDial(sock, opts)
+	}
+	return tcpDial(inc.Address, opts)
+}
+
+// withCallMetadata attaches the incarnation's routing metadata to an outgoing call, replacing any
+// value the caller set for the same keys: the incarnation, not the call site, decides which sandbox
+// a call reaches.
+func withCallMetadata(ctx context.Context, md metadata.MD) context.Context {
+	out, _ := metadata.FromOutgoingContext(ctx)
+	out = out.Copy()
+	for k, v := range md {
+		out[k] = v
+	}
+	return metadata.NewOutgoingContext(ctx, out)
+}
+
+// unixDial connects to a harnesswire server on a unix socket (runtime/local).
+func unixDial(sock string, opts []grpc.DialOption) (api.Harness, func() error, error) {
+	conn, err := grpc.NewClient(
+		"passthrough:///agentlocal",
+		append(opts, grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", sock)
-		}),
+		}))...,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("placement: dial unix %s: %w", sock, err)
@@ -355,21 +388,109 @@ func unixDial(sock string) (api.Harness, func() error, error) {
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 
-// tcpDial connects to a harnesswire server at a TCP host:port over h2c (cleartext HTTP/2). Substrate
-// exposes the actor's harness on PodIP:80; an in-cluster caller dials it directly, bypassing the
-// HTTP/1.1-only atenet router. No TLS: the harness terminates plaintext gRPC, which is why this
-// path belongs on a trusted network only (see docs/security.md).
-func tcpDial(address string) (api.Harness, func() error, error) {
-	conn, err := grpc.NewClient(
-		address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithChainUnaryInterceptor(observability.UnaryClientInterceptor),
-		grpc.WithChainStreamInterceptor(observability.StreamClientInterceptor),
-	)
+// tcpDial connects to a harnesswire server at a TCP host:port over h2c (cleartext HTTP/2). For
+// substrate that is the atenet-router, which selects the actor from the call metadata and carries
+// the gRPC stream to the actor over mTLS between router and worker. The leg from this process to the
+// router is plaintext and the router does not authenticate callers, so this path belongs on a
+// trusted network only (see docs/security.md).
+func tcpDial(address string, opts []grpc.DialOption) (api.Harness, func() error, error) {
+	conn, err := grpc.NewClient(address, opts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("placement: dial %s: %w", address, err)
 	}
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
+}
+
+// errHarnessEnded is the cancellation cause of a turn whose harness connection was closed because
+// the session is being checkpointed.
+var errHarnessEnded = errors.New("placement: harness connection closed to checkpoint the session")
+
+// liveHarness is one open harness connection and the means to end it from outside the turn that
+// owns it.
+type liveHarness struct {
+	harness api.Harness
+	cancel  context.CancelCauseFunc
+	once    sync.Once
+	close   func() error
+	err     error
+}
+
+// end cancels the turn's context, which ends its Connect stream, and closes the connection. It is
+// idempotent, so the owning turn and a checkpoint can both call it.
+func (l *liveHarness) end(cause error) error {
+	l.once.Do(func() {
+		l.cancel(cause)
+		l.err = l.close()
+	})
+	return l.err
+}
+
+// openHarness dials the incarnation's harness and registers the connection under the session, so a
+// checkpoint of that session can end it. The returned context is the turn's: it is cancelled when
+// the connection is ended from outside.
+func (p *Placer) openHarness(ctx context.Context, sessionUID string, inc api.Incarnation) (context.Context, *liveHarness, error) {
+	har, closeHarness, err := p.dial(inc)
+	if err != nil {
+		return ctx, nil, err
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	l := &liveHarness{harness: har, cancel: cancel, close: closeHarness}
+	p.mu.Lock()
+	if p.live == nil {
+		p.live = map[string]map[*liveHarness]struct{}{}
+	}
+	if p.live[sessionUID] == nil {
+		p.live[sessionUID] = map[*liveHarness]struct{}{}
+	}
+	p.live[sessionUID][l] = struct{}{}
+	p.mu.Unlock()
+	return ctx, l, nil
+}
+
+// releaseHarness deregisters and closes a turn's harness connection when the turn returns.
+func (p *Placer) releaseHarness(ctx context.Context, sessionUID, incarnationID string, l *liveHarness) {
+	p.mu.Lock()
+	delete(p.live[sessionUID], l)
+	if len(p.live[sessionUID]) == 0 {
+		delete(p.live, sessionUID)
+	}
+	p.mu.Unlock()
+	finish := observability.StartDebug(context.WithoutCancel(ctx), p.logger, "placement", "close_harness",
+		"session_uid", sessionUID,
+		"incarnation_id", incarnationID,
+	)
+	err := l.end(context.Canceled)
+	finish(err, "error_kind", closeErrorKind(err))
+}
+
+// endHarnesses ends every harness connection this Placer holds open for the session, and must run
+// before the session's compute is checkpointed. Substrate drains the actor's in-flight requests
+// before it snapshots, and an open Connect stream idling on a model call counts as one: left open, it
+// stalls the suspend until that drain times out. Ending the stream also stops a turn the checkpoint
+// is about to fence from talking to a harness that will be frozen mid-call.
+//
+// It covers connections opened by THIS Placer only. A turn driven by another process is fenced by
+// the log as before, but its stream stays open until that turn next touches the log or returns.
+func (p *Placer) endHarnesses(ctx context.Context, sessionUID string) {
+	p.mu.Lock()
+	open := make([]*liveHarness, 0, len(p.live[sessionUID]))
+	for l := range p.live[sessionUID] {
+		open = append(open, l)
+	}
+	p.mu.Unlock()
+	if len(open) == 0 {
+		return
+	}
+	finish := observability.StartDebug(ctx, p.logger, "placement", "end_harness_streams",
+		"session_uid", sessionUID,
+		"connections", len(open),
+	)
+	var errs []error
+	for _, l := range open {
+		errs = append(errs, l.end(errHarnessEnded))
+	}
+	err := errors.Join(errs...)
+	finish(err, "error_kind", closeErrorKind(err))
 }
 
 // Suspend snapshots the incarnation to external storage, records the SnapshotRef in a SUSPEND
@@ -381,6 +502,7 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	defer func() { finish(err, "error_kind", placementErrorKind(err)) }()
 
 	inc := api.Incarnation{ID: sessionUID}
+	p.endHarnesses(ctx, sessionUID)
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, err
@@ -431,13 +553,14 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		"runtime", inc.Runtime,
 		"transport", addressTransport(inc.Address),
 	)
-	har, closeHarness, err := p.dial(inc.Address)
+	ctx, live, err := p.openHarness(ctx, sessionUID, inc)
 	if err != nil {
 		dialFinished(err, "error_kind", "harness_dial_failed")
 		return err
 	}
 	dialFinished(nil)
-	defer p.closeHarness(ctx, sessionUID, inc.ID, closeHarness)
+	defer p.releaseHarness(ctx, sessionUID, inc.ID, live)
+	har := live.harness
 	if err := p.recheck(ctx, sessionUID, har); err != nil {
 		return err
 	}
@@ -471,15 +594,6 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 type ForkChild struct {
 	UID string
 	Log eventlog.Store
-}
-
-func (p *Placer) closeHarness(ctx context.Context, sessionUID, incarnationID string, closeHarness func() error) {
-	finish := observability.StartDebug(ctx, p.logger, "placement", "close_harness",
-		"session_uid", sessionUID,
-		"incarnation_id", incarnationID,
-	)
-	err := closeHarness()
-	finish(err, "error_kind", closeErrorKind(err))
 }
 
 func addressTransport(address string) string {
@@ -645,6 +759,7 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if atSeq != head {
 		return api.SnapshotRef{}, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
 	}
+	p.endHarnesses(ctx, parentUID)
 	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID}, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, err

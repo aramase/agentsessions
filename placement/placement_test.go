@@ -144,7 +144,7 @@ func TestPlacerPreservesIncarnationAndPairsCloseLogs(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	p := newLocalPlacer(t, echoagent.Harness{},
 		placement.WithLogger(logger),
-		placement.WithDialer(func(string) (api.Harness, func() error, error) {
+		placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 			return nil, nil, errors.New("dial failed")
 		}),
 	)
@@ -165,7 +165,7 @@ func TestPlacerPreservesIncarnationAndPairsCloseLogs(t *testing.T) {
 	output.Reset()
 	p = newLocalPlacer(t, echoagent.Harness{},
 		placement.WithLogger(logger),
-		placement.WithDialer(func(string) (api.Harness, func() error, error) {
+		placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 			return echoagent.Harness{}, func() error { return errors.New("close failed") }, nil
 		}),
 	)
@@ -1166,7 +1166,7 @@ func TestLiveBackendGatesTheHarnessTheTurnRunsOn(t *testing.T) {
 	var dials atomic.Int32
 	// The first turn runs on the stateless harness and is interrupted; every later connection reaches
 	// the memory harness.
-	dial := placement.WithDialer(func(string) (api.Harness, func() error, error) {
+	dial := placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 		if dials.Add(1) == 1 {
 			return stateless, func() error { return nil }, nil
 		}
