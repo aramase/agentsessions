@@ -355,17 +355,33 @@ The micro-VM class needs a Linux host with `/dev/kvm`; the recipe mirrors the CI
 value is refused. `KIND_CLUSTER_NAME` selects the cluster for the `hack/` scripts.
 
 On a host without KVM (an arm64 Mac running kind), skip `run-microvm-demo-kind`, install both gVisor
-WorkerPools, and run both tiers with `gvisor`. The pool manifests name the worker image as a `ko://`
-import path, which the WorkerPool controller passes to its Pods unchanged, so build `ateom-gvisor`
-from the same agent-substrate checkout and substitute its digest, as CI does for `ateom-microvm`.
-`KO_DOCKER_REPO` must be a registry the kind nodes pull from (`install-ate-kind` uses
-`localhost:5001`), and every image must match the node's architecture: ko builds `linux/amd64`
-unless `KO_DEFAULTPLATFORMS` says otherwise, and an amd64 harness image on an arm64 node fails
-`runsc start`.
+WorkerPools, and run both tiers with `gvisor`. The block below starts from a host with only Docker,
+kind, kubectl, ko, Go and git installed, and runs from the root of this checkout. It clones
+agent-substrate at the commit the workflow pins (`SUBSTRATE_REF`), creates the kind cluster and its
+local registry (`localhost:5001`) with substrate's `hack/` scripts, and installs `ate-system` the way
+CI does. `create-kind-cluster.sh` deletes any existing cluster named `KIND_CLUSTER_NAME` before it
+creates one, so pick a name you do not use for anything else.
+
+The pool manifests name the worker image as a `ko://` import path, which the WorkerPool controller
+passes to its Pods unchanged, so the block builds `ateom-gvisor` from the same agent-substrate
+checkout and substitutes its digest, as CI does for `ateom-microvm`. Every image must match the
+node's architecture: ko builds `linux/amd64` unless `KO_DEFAULTPLATFORMS` says otherwise, and an
+amd64 harness image on an arm64 node fails `runsc start`.
 
 ```bash
-# SUBSTRATE: agent-substrate checkout at the pinned commit.
+export KIND_CLUSTER_NAME=agentsessions-e2e
 export KO_DOCKER_REPO=localhost:5001 KO_DEFAULTPLATFORMS="linux/$(go env GOARCH)"
+SUBSTRATE_REF="$(sed -n 's/^  SUBSTRATE_REF: //p' .github/workflows/substrate-e2e.yml)"
+SUBSTRATE="$(mktemp -d)/substrate"
+git clone https://github.com/agent-substrate/substrate "${SUBSTRATE}"
+git -C "${SUBSTRATE}" checkout "${SUBSTRATE_REF}"
+
+# Cluster, local registry and ate-system, as the workflow does.
+(cd "${SUBSTRATE}" && hack/create-kind-cluster.sh)
+(cd "${SUBSTRATE}" && ATE_CREDENTIAL_PROVIDER='{"name":"k8s.io"}' ATE_INSTALL_ROLLOUT_TIMEOUT=10m \
+  hack/install-ate-kind.sh --deploy-ate-system)
+
+# Images: the conformance test binary, the harness and the gVisor worker.
 E2E_IMAGE=localhost:5001/agentsessions-e2e:local
 E2E_DIR="$(mktemp -d)"
 (cd integrations/substrate &&
@@ -374,17 +390,22 @@ cp deploy/substrate/Dockerfile.e2e "${E2E_DIR}/Dockerfile"
 docker build -t "${E2E_IMAGE}" "${E2E_DIR}" && docker push "${E2E_IMAGE}"
 ATEOM_IMG="$(cd "${SUBSTRATE}" && ko build --base-import-paths ./cmd/ateom-gvisor)"
 HARNESS_IMAGE="$(ko build ./cmd/harnessnode)"
-kubectl --context "kind-${KIND_CLUSTER_NAME:-kind}" apply -f deploy/substrate/namespace.yaml
+
+# The gVisor WorkerPools, then both tiers.
+kubectl --context "kind-${KIND_CLUSTER_NAME}" apply -f deploy/substrate/namespace.yaml
 for tier in echo counter; do
   sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
     "deploy/substrate/${tier}-gvisor-workerpool.yaml" |
-    kubectl --context "kind-${KIND_CLUSTER_NAME:-kind}" apply -f -
+    kubectl --context "kind-${KIND_CLUSTER_NAME}" apply -f -
   hack/wait-worker-pool.sh "${tier}-gvisor"
 done
 HARNESS_IMAGE="${HARNESS_IMAGE}" ECHO_SANDBOX_CLASS=gvisor COUNTER_SANDBOX_CLASS=gvisor \
   hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestFork' \
   "${E2E_IMAGE}" 1800
 ```
+
+`kind delete cluster --name "${KIND_CLUSTER_NAME}"` removes the cluster afterwards. The
+`kind-registry` container is shared by every cluster `create-kind-cluster.sh` makes, so it stays.
 
 A gVisor FULL checkpoint also captures memory, so the stateful and fork tests exercise the same code
 paths on gVisor; the micro-VM run in CI remains the reference for both tiers.
