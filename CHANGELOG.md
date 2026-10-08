@@ -14,10 +14,12 @@ provide.
 
 ### Compatibility
 
-- Chat sessions written on `main` since execution-config journaling was added in #76 with a
-  non-empty `system_prompt` or non-JSON config no longer replay or resume: the chat harness now
-  applies the prompt and rejects invalid config instead of ignoring it. No tagged release is
-  affected.
+- Chat executions written on `main` since execution-config journaling was added in #76 with a
+  non-empty `system_prompt` no longer pass deterministic controller replay or interrupted resume
+  when their recorded model-input hashes exclude the prompt. Non-JSON config now fails whenever
+  the harness re-runs that execution. The chat harness previously ignored both. Reading recorded
+  events through `Sessions.Replay` is unchanged, as is Resume of an already-completed turn.
+  No tagged release is affected.
 - Every new execution records `EXECUTION_START`, including default-config turns, so interrupted
   recovery can reject partially committed inputs. Binaries older than this release fail chain
   verification with a `content_hash` mismatch for sessions containing this event. Rollback is not
