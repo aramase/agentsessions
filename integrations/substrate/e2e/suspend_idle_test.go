@@ -12,6 +12,10 @@ import (
 	"github.com/aramase/agentsessions/runtime/substrate"
 )
 
+// suspendBound is the longest a Placer.Suspend in this test may take before the test calls it a
+// regression to the drain stall.
+const suspendBound = 2 * time.Minute
+
 // TestSuspendUnderAnIdleHarnessStream suspends a session while its turn is parked on a model call,
 // so its Connect stream is open and idle through the router. The worker drains an actor's in-flight
 // requests before it snapshots, and that stream is one of them.
@@ -71,7 +75,11 @@ func TestSuspendUnderAnIdleHarnessStream(t *testing.T) {
 	if _, err := p.Suspend(ctx, log, session); !errors.Is(err, placement.ErrSessionBusy) {
 		t.Fatalf("Placer.Suspend with a parked turn returned %v, want ErrSessionBusy (ABORTED)", err)
 	}
-	t.Logf("PLACER: Suspend with a parked turn was refused in %s", time.Since(start).Round(time.Millisecond))
+	took := time.Since(start)
+	t.Logf("PLACER: Suspend with a parked turn was refused in %s", took.Round(time.Millisecond))
+	if took > suspendBound {
+		t.Fatalf("refusing Suspend with a parked turn took %s, over %s: it is waiting on the turn instead of refusing", took, suspendBound)
+	}
 	select {
 	case err := <-done:
 		t.Fatalf("the refused Suspend ended the parked turn: %v", err)
@@ -82,6 +90,9 @@ func TestSuspendUnderAnIdleHarnessStream(t *testing.T) {
 	endTurn()
 	select {
 	case err := <-done:
+		if err == nil || errors.Is(err, placement.ErrCheckpointing) {
+			t.Fatalf("the parked turn ended with %v, want its caller's cancellation", err)
+		}
 		t.Logf("parked turn ended with: %v", err)
 	case <-time.After(time.Minute):
 		t.Fatal("the parked turn never returned after its caller cancelled it")
@@ -90,7 +101,13 @@ func TestSuspendUnderAnIdleHarnessStream(t *testing.T) {
 	if _, err := p.Suspend(ctx, log, session); err != nil {
 		t.Fatalf("Placer.Suspend after the turn returned: %v", err)
 	}
-	t.Logf("PLACER: Suspend after the turn returned took %s", time.Since(start).Round(time.Millisecond))
+	took = time.Since(start)
+	t.Logf("PLACER: Suspend after the turn returned took %s", took.Round(time.Millisecond))
+	// The stall this guards against ran until the router reset the stream (5m30s on kind). A healthy
+	// checkpoint takes seconds at most; the bound is generous so a slow runner does not flake.
+	if took > suspendBound {
+		t.Fatalf("Suspend after the turn returned took %s, over %s: the turn's harness stream is stalling the checkpoint", took, suspendBound)
+	}
 }
 
 // suspendBaseline checkpoints a session through the Runtime while its turn's stream stays open and
