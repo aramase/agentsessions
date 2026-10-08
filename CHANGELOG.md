@@ -129,7 +129,8 @@ provide.
     the new `placement.ErrCheckpointing` (the superseded turn also wraps `eventlog.ErrFenced`).
     `Exec` and `Resume` report it as `ABORTED`, which callers retry.
 - Through `atenet-router`, a harness stream that stays idle for about 5m30s (the router's default
-  5m route timeout plus 30s) is reset, so a turn parked on a slower model call fails. Raise the
+  5m route timeout plus 30s) is reset with `RST_STREAM` (gRPC `Internal`; measured on kind at
+  substrate `fc0e3586` with the stream held idle for 6m30s), so a turn parked on a slower model call fails. Raise the
   router's `--route-timeout` if turns can run that long.
 - `runtime/substrate.ControlClient.ResumeActor` drops its `boot` argument (substrate removed
   `ResumeActorRequest.boot`); a new actor starts from its template's golden snapshot, or cold-boots
