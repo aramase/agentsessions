@@ -21,6 +21,6 @@ jobs:
   links:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: relative links and heading anchors resolve
         run: python3 hack/check-doc-links.py
