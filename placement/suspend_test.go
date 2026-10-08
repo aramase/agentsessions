@@ -226,10 +226,10 @@ func newSuspendPlacer(t *testing.T, ctl *suspendControl, memory bool) (*placemen
 		desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
 	}
 	backend := substrate.New(ctl, "space", substrate.ObjectRef{Name: "echo"}, desc)
-	p := placement.New(backend, echoagent.Model, placement.WithDialer(func(address string) (api.Harness, func() error, error) {
-		name, port, err := net.SplitHostPort(address)
+	p := placement.New(backend, echoagent.Model, placement.WithDialer(func(inc api.Incarnation) (api.Harness, func() error, error) {
+		name, port, err := net.SplitHostPort(inc.Address)
 		if err != nil || port != substrate.HarnessPort {
-			return nil, nil, fmt.Errorf("unexpected harness address %q", address)
+			return nil, nil, fmt.Errorf("unexpected harness address %q", inc.Address)
 		}
 		ref := substrate.ActorRef{Atespace: "space", Name: name}
 		a, exists := ctl.actors[ref]
