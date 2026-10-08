@@ -58,6 +58,30 @@ harness has comes from the `Runtime` backend underneath it, and the backends dif
 shares the host's memory, filesystem, and credentials. A sandboxed backend is what puts a boundary
 there; the local one has none.
 
+**A harness registered by address is whatever answers there.** `runtime/remote` (`agentsessionsd
+--harness name=address`) dials the operator-configured address over cleartext h2c with no
+authentication of either side. Clients cannot supply an address; only the operator can, at startup.
+Anything that can listen on that address, or sit on the network path to it, is the harness: it
+writes every event the session journals, chooses which model calls the host makes and pays for with
+its credential, and sees the full history the host sends each turn. The chain makes later tampering
+with the journal detectable; it cannot tell a forged harness from the real one. Bind the harness to
+loopback or a unix socket on the host, or keep the hop on a network you trust entirely. For a unix
+socket, "can listen on that address" means "can write to the socket's directory", so put it in a
+directory only the harness's user can write, not a shared one such as `/tmp`. `cmd/harnessnode`
+refuses a lock file next to its socket that is a symlink, a hard link, or owned by another user, so
+a hostile directory cannot redirect its writes, but it cannot stop another user who can write there
+from binding the socket first. The host
+does refuse a harness that declares `REQUIRES_MEMORY_SNAPSHOT`, but that is a correctness check on
+what the harness declares, not authentication.
+
+That check also has a known limit. The host checks a harness's capabilities with a `Describe` call
+before it opens the turn's `Connect` stream, and the answer is not bound to that stream. If a
+different harness takes over the same address between the two calls, for instance because the
+harness restarted, gRPC reconnected to another replica, or a proxy routed the two calls to different
+backends, the turn runs on that harness and the host does not detect it. Registering a harness by
+address assumes the operator controls what serves that address, and that every harness that can
+answer there declares the same resumability.
+
 ## Deploying it
 
 Given the above, there is one safe shape for this release:

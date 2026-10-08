@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"reflect"
 	"slices"
 	"strings"
@@ -15,15 +16,20 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/aramase/agentsessions/api"
+	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
+	"github.com/aramase/agentsessions/harness/counteragent"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/harnesswire"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
+	"github.com/aramase/agentsessions/runtime/remote"
 	"github.com/aramase/agentsessions/runtime/substrate"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
@@ -1127,6 +1133,126 @@ func TestAdmissionKeepsTheCallersDeadline(t *testing.T) {
 			}
 			if got := errors.Is(err, placement.ErrAdmissionInterrupted); got != tt.interrupted {
 				t.Fatalf("exec: got %v, ErrAdmissionInterrupted = %v, want %v", err, got, tt.interrupted)
+			}
+			if head, _ := log.Head(); head != 0 {
+				t.Fatalf("a refused admission wrote to the log: head %d", head)
+			}
+		})
+	}
+}
+
+// liveLocal is the local backend presented as one whose Describe asks a live harness, so the Placer
+// re-checks the harness it dials for the turn (placement.LiveDescriber), as it does for
+// runtime/remote.
+type liveLocal struct{ *local.Backend }
+
+func (liveLocal) DescribesLiveHarness() bool { return true }
+
+// For a live-describing backend, the harness the turn actually runs on is gated too, not only the
+// one the backend described. Here the backend's Describe reaches a STATELESS_REPLAY harness while the
+// turn's connection reaches a REQUIRES_MEMORY_SNAPSHOT one, as with two replicas behind one address:
+// Exec and Resume are refused before anything is written to the log.
+func TestLiveBackendGatesTheHarnessTheTurnRunsOn(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("s")
+
+	stateless := failOnceHarness{failed: &atomic.Bool{}}
+	inner := local.New(stateless)
+	t.Cleanup(func() { _ = inner.Close() })
+	var dials atomic.Int32
+	// The first turn runs on the stateless harness and is interrupted; every later connection reaches
+	// the memory harness.
+	dial := placement.WithDialer(func(string) (api.Harness, func() error, error) {
+		if dials.Add(1) == 1 {
+			return stateless, func() error { return nil }, nil
+		}
+		return &counteragent.Harness{}, func() error { return nil }, nil
+	})
+	p := placement.New(liveLocal{inner}, echoagent.Model, dial)
+
+	if _, err := p.Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "hi")}, 0); err == nil || errors.Is(err, placement.ErrUnplaceable) {
+		t.Fatalf("the first turn should have run and been interrupted, got %v", err)
+	}
+	head, err := log.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head == 0 {
+		t.Fatal("the first turn wrote nothing")
+	}
+
+	if err := p.Resume(context.Background(), log, "s"); !errors.Is(err, placement.ErrUnplaceable) {
+		t.Fatalf("resume onto a REQUIRES_MEMORY_SNAPSHOT harness behind a stateless descriptor: got %v, want ErrUnplaceable", err)
+	}
+	if got, _ := log.Head(); got != head {
+		t.Fatalf("a refused resume wrote to the log: head %d -> %d", head, got)
+	}
+	if _, err := p.Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "again")}, head); !errors.Is(err, placement.ErrUnplaceable) {
+		t.Fatalf("exec onto a REQUIRES_MEMORY_SNAPSHOT harness behind a stateless descriptor: got %v, want ErrUnplaceable", err)
+	}
+	if got, _ := log.Head(); got != head {
+		t.Fatalf("a refused exec wrote to the log: head %d -> %d", head, got)
+	}
+}
+
+// stallingHarness answers its first `answered` Describe calls and then never again, like a harness
+// that accepts the call and wedges. Its Describe returns only when the caller gives up.
+type stallingHarness struct {
+	echoagent.Harness
+	answered int32
+	calls    *atomic.Int32
+}
+
+func (h stallingHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+	if h.calls.Add(1) > h.answered {
+		<-ctx.Done()
+		return api.Descriptor{}, ctx.Err()
+	}
+	return h.Harness.Describe(ctx)
+}
+
+// A harness that completes the gRPC connection but never answers Describe must not hold a call that
+// has no deadline. Admission bounds Describe on its own and reports the harness as unavailable,
+// whether it stalls on the backend's connection (admission) or on the turn's connection (the
+// re-check), and nothing is journaled.
+func TestAdmissionBoundsAHarnessThatNeverAnswers(t *testing.T) {
+	placement.SetDescribeTimeout(t, 300*time.Millisecond)
+	for _, tt := range []struct {
+		name     string
+		answered int32
+	}{
+		{name: "stalls on admission", answered: 0},
+		{name: "stalls on the turn's connection", answered: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			lis, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := grpc.NewServer()
+			v1.RegisterHarnessServer(srv, harnesswire.NewServer(stallingHarness{answered: tt.answered, calls: &atomic.Int32{}}))
+			go func() { _ = srv.Serve(lis) }()
+			t.Cleanup(srv.Stop)
+			backend := remote.New(lis.Addr().String())
+			t.Cleanup(func() { _ = backend.Close() })
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			log := store.Session("s")
+
+			start := time.Now()
+			_, err = placement.New(backend, echoagent.Model).Exec(context.Background(), log, "s", []api.Message{*api.TextMessage("user", "hi")}, 0)
+			if !errors.Is(err, placement.ErrHarnessUnavailable) || errors.Is(err, placement.ErrAdmissionInterrupted) {
+				t.Fatalf("exec against a harness that never answers Describe: got %v, want ErrHarnessUnavailable", err)
+			}
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Fatalf("exec took %v; the describe bound should have ended it", elapsed)
 			}
 			if head, _ := log.Head(); head != 0 {
 				t.Fatalf("a refused admission wrote to the log: head %d", head)

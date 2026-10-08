@@ -29,13 +29,15 @@ import (
 
 // ErrUnplaceable is returned when a harness requires a capability the chosen backend cannot provide
 // (e.g. REQUIRES_MEMORY_SNAPSHOT on a filesystem-only pod). The gate runs BEFORE Create, so an
-// unplaceable harness never provisions compute or writes to the log; session.Service surfaces it as
-// codes.FailedPrecondition.
+// unplaceable harness never provisions compute or writes to the log; for a LiveDescriber backend it
+// runs again on the turn's own connection, still before anything is written to the log.
+// session.Service surfaces it as codes.FailedPrecondition.
 var ErrUnplaceable = errors.New("placement: harness cannot be placed on this runtime")
 
 // ErrHarnessUnavailable is returned when the harness could not be reached to describe itself. It is
 // only ever raised by the admission check, which runs before any compute is provisioned or anything
-// is written to the log, so retrying is safe; session.Service surfaces it as codes.Unavailable. It is
+// is written to the log (for a LiveDescriber, whose Create provisions nothing, it also runs after
+// Create), so retrying is safe; session.Service surfaces it as codes.Unavailable. It is
 // not raised when the caller's own deadline or cancellation ended the check: that is
 // ErrAdmissionInterrupted, because resending the same expired call cannot succeed.
 var ErrHarnessUnavailable = errors.New("placement: harness unavailable")
@@ -59,6 +61,22 @@ var ErrAdmissionInterrupted = errors.New("placement: admission interrupted")
 type Backend interface {
 	api.Runtime
 	Describe(ctx context.Context) (api.Descriptor, error)
+}
+
+// LiveDescriber is implemented by a Backend whose Describe asks whichever harness is answering at an
+// address, rather than returning a declaration fixed when the backend was built (runtime/remote).
+//
+// The Placer runs a turn over its own connection to Incarnation.Address, and that connection can
+// reach a different process than the one Describe asked: another replica behind a load balancer or
+// a Kubernetes Service, or a harness restarted in between. When DescribesLiveHarness reports true,
+// the Placer therefore asks again on the connection that will run the turn and applies the same
+// CanPlace gate, before it mints a fence or writes anything to the log. That narrows the window but
+// does not close it; see recheck for the limit.
+//
+// A backend that reports true must provision nothing in Create and Restore: a refusal by the second
+// check only closes the dial and never calls Stop, so anything provisioned would leak.
+type LiveDescriber interface {
+	DescribesLiveHarness() bool
 }
 
 // Placer owns the incarnation lifecycle: Create the compute, mint+bind the fence, drive the controller.
@@ -201,6 +219,9 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	dialFinished(nil)
 	defer p.closeHarness(ctx, sessionUID, inc.ID, closeHarness)
+	if err := p.recheck(ctx, sessionUID, har); err != nil {
+		return inc, err
+	}
 
 	fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
 	fence, err := log.NewFence()
@@ -231,14 +252,40 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 // a backend that asks a live harness reports whatever harness is answering, and that can change
 // between an interrupted turn and its Resume. Replaying into a harness the backend cannot host is the "resumed
 // wrongly" case this gate exists to prevent.
-func (p *Placer) admit(ctx context.Context, sessionUID string) (desc api.Descriptor, err error) {
-	resolveFinished := observability.StartDebug(ctx, p.logger, "placement", "resolve_execution_path", "session_uid", sessionUID)
+func (p *Placer) admit(ctx context.Context, sessionUID string) (api.Descriptor, error) {
+	return p.gate(ctx, sessionUID, "resolve_execution_path", p.backend.Describe)
+}
+
+// recheck repeats the gate on the connection that will run the turn, for a backend whose descriptor
+// comes from a live harness (see LiveDescriber). It runs after Create and the dial and before the
+// fence is minted, so a refusal still leaves nothing on the log. The backend's Create and Restore
+// provision nothing for such a backend, so there is no compute to release either.
+//
+// The check has a known limit. Capabilities are checked with a Describe call before the turn's
+// Connect stream is opened, and the answer is not bound to that stream: the harness protocol has no
+// way to tie the two together. gRPC can close the connection and dial again between the two calls,
+// and a proxy can route each call to a different backend, so if a different harness takes over the
+// same address between Describe and Connect, the turn runs on it and this check does not detect
+// it. Registering a harness by address therefore assumes the operator controls what serves that
+// address; docs/security.md states the same limit.
+func (p *Placer) recheck(ctx context.Context, sessionUID string, har api.Harness) error {
+	if l, ok := p.backend.(LiveDescriber); !ok || !l.DescribesLiveHarness() {
+		return nil
+	}
+	_, err := p.gate(ctx, sessionUID, "verify_execution_harness", har.Describe)
+	return err
+}
+
+// gate describes the harness with describe and applies CanPlace, mapping a harness that cannot be
+// described to ErrHarnessUnavailable or ErrAdmissionInterrupted.
+func (p *Placer) gate(ctx context.Context, sessionUID, op string, describe func(context.Context) (api.Descriptor, error)) (desc api.Descriptor, err error) {
+	resolveFinished := observability.StartDebug(ctx, p.logger, "placement", op, "session_uid", sessionUID)
 	// Bound the check on its own. A harness that accepts the connection and then never answers
 	// Describe would otherwise hold a call with no deadline forever. WithTimeout keeps an earlier
 	// caller deadline.
 	dctx, cancel := context.WithTimeout(ctx, describeTimeout)
 	defer cancel()
-	desc, err = p.backend.Describe(dctx)
+	desc, err = describe(dctx)
 	if err != nil {
 		switch c := status.Code(err); {
 		case ctx.Err() != nil:
@@ -391,6 +438,9 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	dialFinished(nil)
 	defer p.closeHarness(ctx, sessionUID, inc.ID, closeHarness)
+	if err := p.recheck(ctx, sessionUID, har); err != nil {
+		return err
+	}
 	fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
 	fence, err := log.NewFence()
 	if err != nil {

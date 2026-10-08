@@ -11,6 +11,22 @@ provide.
 
 - The chat harness accepts a per-execution `system_prompt` in its JSON config, prepended before
   conversation history and current inputs.
+- `agentsessionsd --harness name=address` registers a harness that is already running, over TCP
+  (`host:port`, `dns:///host:port` or `dns://resolver/host:port`) or a unix socket (`unix:` or
+  `unix://` followed by an absolute or relative path), instead of compiling it into the server. Any
+  other address form is refused at startup. It is served by the new `runtime/remote` backend, which
+  owns no sandbox: such a harness must be `STATELESS_REPLAY`, and one that declares
+  `REQUIRES_MEMORY_SNAPSHOT` is refused, including when it is only the replica that answers on a
+  turn's own connection behind a load balancer. The check is not bound to the turn's `Connect`
+  stream, so a harness that takes over the address between the two calls is not detected; the
+  operator must control what serves the address. `--harness` requires `--model`, so a remote
+  harness's model calls never fall back to the built-in echo stub.
+  The connection is cleartext and unauthenticated; see `docs/security.md`. On unix platforms,
+  `harnessnode` serves on a unix socket when `HARNESS_ADDR` is `unix:///path`. It holds a lock on
+  `path.lock` while it serves, so a second instance on the same address fails, and on restart it
+  reclaims a socket file left behind by a crashed instance. It never removes a socket another
+  process created, and it refuses a lock file that is a symlink, a hard link, or owned by another
+  user.
 
 ### Compatibility
 
