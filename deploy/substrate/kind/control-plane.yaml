@@ -1,0 +1,185 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agentsessions
+  namespace: ate-agentsessions
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: agentsessions-journal
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: agentsessions-local
+  hostPath:
+    path: /var/lib/agentsessions
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agentsessions-journal
+  namespace: ate-agentsessions
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: agentsessions-local
+  volumeName: agentsessions-journal
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentsessions
+  namespace: ate-agentsessions
+  labels:
+    app: agentsessions
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agentsessions
+  template:
+    metadata:
+      labels:
+        app: agentsessions
+    spec:
+      serviceAccountName: agentsessions
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      initContainers:
+        - name: journal-permissions
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - chown -R 65532:65532 /data
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+          volumeMounts:
+            - name: journal
+              mountPath: /data
+      containers:
+        - name: controlplane
+          image: ghcr.io/aramase/agentsessions/controlplane:latest
+          args:
+            - --addr=:8080
+            - --journal=/data/agentsessions.db
+            - --project=$(PROJECT)
+            - --model=$(MODEL_NAME)
+            - --model-base-url=$(MODEL_BASE_URL)
+            - --model-path=$(MODEL_PATH)
+            - --model-auth-header=$(MODEL_AUTH_HEADER)
+            - --log-level=debug
+            - --ateapi-addr=api.ate-system.svc:443
+            - --ateapi-server-name=api.ate-system.svc
+            - --ateapi-token-file=/var/run/secrets/tokens/ateapi-token
+            # The pinned kind installation uses an internal certificate not rooted in this image.
+            # Token authentication still authenticates the caller. This is not a production TLS setup.
+            - --ateapi-insecure-skip-verify
+            - --atespace=agentsessions
+            - --actor-template-namespace=ate-agentsessions
+            - --actor-template=chat-harness
+          env:
+            - name: PROJECT
+              valueFrom:
+                configMapKeyRef:
+                  name: agentsessions-model
+                  key: project
+            - name: MODEL_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: agentsessions-model
+                  key: model
+            - name: MODEL_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agentsessions-model
+                  key: base-url
+            - name: MODEL_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: agentsessions-model
+                  key: path
+            - name: MODEL_AUTH_HEADER
+              valueFrom:
+                configMapKeyRef:
+                  name: agentsessions-model
+                  key: auth-header
+            - name: MODEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentsessions-model
+                  key: api-key
+                  optional: true
+          ports:
+            - name: grpc
+              containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          volumeMounts:
+            - name: journal
+              mountPath: /data
+            - name: ateapi-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+      volumes:
+        - name: journal
+          persistentVolumeClaim:
+            claimName: agentsessions-journal
+        - name: ateapi-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 3600
+                  path: ateapi-token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentsessions
+  namespace: ate-agentsessions
+spec:
+  selector:
+    app: agentsessions
+  ports:
+    - name: grpc
+      port: 8080
+      targetPort: grpc
+---
+# Direct worker-pod ingress is temporary. The pinned substrate router cannot carry the bidirectional
+# Harness.Connect gRPC stream, so the control plane dials the actor's reported PodIP:80.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agentsessions-to-workers
+  namespace: ate-agentsessions
+spec:
+  podSelector:
+    matchExpressions:
+      - key: ate.dev/worker-pool
+        operator: Exists
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: agentsessions

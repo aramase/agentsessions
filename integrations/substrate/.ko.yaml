@@ -1,0 +1,2 @@
+# Keep integration-module images compatible with ateom's node-local image unpacker.
+defaultBaseImage: gcr.io/distroless/static-debian13

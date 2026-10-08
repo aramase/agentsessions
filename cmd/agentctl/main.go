@@ -8,6 +8,7 @@
 //	agentctl exec    --input "hi"            # create + run a turn (prints the session UID)
 //	agentctl exec    --session <uid> --input "..."
 //	agentctl replay  --session <uid>          # re-deliver the committed log
+//	agentctl verify  --session <uid>          # verify the remote journal hash chain
 //	agentctl fork    --session <uid> --at N    # branch into a child session
 //	agentctl suspend --session <uid>
 //	agentctl resume  --session <uid>
@@ -15,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -25,6 +27,7 @@ import (
 	"google.golang.org/grpc"
 
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/canon"
 	"github.com/aramase/agentsessions/client"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/internal/version"
@@ -33,6 +36,7 @@ import (
 	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/session"
 	"github.com/aramase/agentsessions/sqlitelog"
+	"github.com/aramase/agentsessions/wire"
 )
 
 func main() {
@@ -46,6 +50,7 @@ func main() {
 		"get":     cmdGet,
 		"exec":    cmdExec,
 		"replay":  cmdReplay,
+		"verify":  cmdVerify,
 		"fork":    cmdFork,
 		"suspend": cmdSuspend,
 		"resume":  cmdResume,
@@ -63,7 +68,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|exec|replay|fork|suspend|resume|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: agentctl <create|list|get|exec|replay|verify|fork|suspend|resume|version> [flags]")
 }
 
 type config struct {
@@ -295,6 +300,61 @@ func cmdReplay(args []string) error {
 	}
 	for _, r := range records {
 		printRecord(r)
+	}
+	return nil
+}
+
+func cmdVerify(args []string) error {
+	fs := flag.NewFlagSet("verify", flag.ExitOnError)
+	cfg := commonFlags(fs)
+	var sess string
+	fs.StringVar(&sess, "session", "", "session UID")
+	_ = fs.Parse(args)
+	if sess == "" {
+		return errors.New("verify requires -session")
+	}
+	c, cleanup, err := dial(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	session, err := c.GetSession(context.Background(), sess)
+	if err != nil {
+		return err
+	}
+	records, err := c.Replay(context.Background(), sess, 1, session.GetLastSeq())
+	if err != nil {
+		return err
+	}
+	if err := verifyRecords(records, session.GetLastSeq()); err != nil {
+		return err
+	}
+	fmt.Printf("session %s chain verified (%d records)\n", sess, len(records))
+	return nil
+}
+
+func verifyRecords(records []*v1.LogRecord, expectedLastSeq int64) error {
+	prev := ""
+	var wantSeq int64 = 1
+	for _, record := range records {
+		if record.GetSeq() != wantSeq {
+			return fmt.Errorf("journal sequence gap: got %d, want %d", record.GetSeq(), wantSeq)
+		}
+		if record.GetPrevHash() != prev {
+			return fmt.Errorf("journal prev_hash mismatch at seq %d", record.GetSeq())
+		}
+		want, err := canon.HashRecord(prev, record.GetSeq(), wire.EventFromProto(record.GetEvent()))
+		if err != nil {
+			return fmt.Errorf("canonicalize seq %d: %w", record.GetSeq(), err)
+		}
+		if record.GetContentHash() != want {
+			return fmt.Errorf("journal content_hash mismatch at seq %d", record.GetSeq())
+		}
+		prev = record.GetContentHash()
+		wantSeq++
+	}
+	if got := wantSeq - 1; got != expectedLastSeq {
+		return fmt.Errorf("journal ended at seq %d, session metadata reports %d", got, expectedLastSeq)
 	}
 	return nil
 }

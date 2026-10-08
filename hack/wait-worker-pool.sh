@@ -13,7 +13,8 @@ POOL="${1:?usage: wait-worker-pool.sh <worker-pool-name> [namespace] [timeout-se
 NAMESPACE="${2:-ate-agentsessions}"
 TIMEOUT="${3:-600}"
 
-KUBECTL=(kubectl --context kind-kind)
+CLUSTER="${CLUSTER:-kind}"
+KUBECTL=(kubectl --context "${KUBE_CONTEXT:-kind-${CLUSTER}}")
 
 echo "=== waiting for worker pool ${POOL} to settle ==="
 
