@@ -111,11 +111,12 @@ func newBackend(m *mockControl, opts ...substrate.Option) *substrate.Backend {
 type mockCloner struct {
 	*mockControl
 	cloneErr error
+	tagErr   error
 }
 
 func (m *mockCloner) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
 	m.calls = append(m.calls, "tag:"+source.Name+"->"+tag.Name)
-	return nil
+	return m.tagErr
 }
 
 func (m *mockCloner) CreateActorFromTag(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) error {
@@ -482,6 +483,38 @@ func TestFailedCloneReleasesItsTag(t *testing.T) {
 	want := []string{"get:parent", "tag:parent->fork-child", "get:parent", "untag:fork-child"}
 	if !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("calls=%v want the tag to be released %v", m.calls, want)
+	}
+}
+
+// Substrate reserves a tag before copying the snapshot into it, so a tag whose copy failed is left
+// pending, holding partial data, and blocks deleting the atespace. The fork must release it.
+func TestFailedTagReleasesTheReservedTag(t *testing.T) {
+	m := newClonerWithSuspendedParent()
+	m.tagErr = errors.New("while copying the external snapshot: object store unavailable")
+	_, err := newMemoryBackend(m).Fork(context.Background(),
+		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+		api.ForkOpts{ChildSessionUID: "child"})
+	if err == nil {
+		t.Fatal("expected the tag to fail")
+	}
+	want := []string{"get:parent", "tag:parent->fork-child", "untag:fork-child"}
+	if !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want the reserved tag released %v", m.calls, want)
+	}
+}
+
+// A tag that already existed was not reserved by this attempt, so the fork must leave it alone.
+func TestTagThatAlreadyExistsIsNotDeleted(t *testing.T) {
+	m := newClonerWithSuspendedParent()
+	m.tagErr = fmt.Errorf("%w: space/fork-child", substrate.ErrTagExists)
+	_, err := newMemoryBackend(m).Fork(context.Background(),
+		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+		api.ForkOpts{ChildSessionUID: "child"})
+	if !errors.Is(err, substrate.ErrTagExists) {
+		t.Fatalf("err=%v want ErrTagExists", err)
+	}
+	if slices.Contains(m.calls, "untag:fork-child") {
+		t.Fatalf("calls=%v deleted a tag this fork did not create", m.calls)
 	}
 }
 

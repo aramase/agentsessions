@@ -164,7 +164,7 @@ func (c *suspendControl) TagActor(_ context.Context, ref substrate.ActorRef, tag
 		return status.Error(codes.NotFound, "snapshot does not exist")
 	}
 	if _, exists := c.tags[tag]; exists {
-		return status.Error(codes.AlreadyExists, "tag exists")
+		return fmt.Errorf("%w: %s", substrate.ErrTagExists, tag.Name)
 	}
 	c.tags[tag] = a.snapshot
 	return nil
