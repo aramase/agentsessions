@@ -49,6 +49,8 @@ client without substrate's Tag APIs still satisfies the base interface.
 | `Restore` | `ResumeActor` (restores the actor's own snapshot on a possibly-different worker) |
 | `Fork` (stateless) | `CreateActor` + `ResumeActor` — a replay-fork; the journal reconstructs the child |
 | `Fork` (memory) | `CreateTag{source_actor}` + `CreateActor{source_tag}` + `ResumeActor` — clones the parent's RAM |
+| `Stop` | `SuspendActor` + `DeleteActor` |
+| `Status` | `GetActor` |
 
 There is no per-resume boot flag (substrate removed `ResumeActorRequest.boot`). Substrate picks the
 source itself: the actor's own snapshot, else the template's golden snapshot, else a cold boot of the
@@ -56,8 +58,6 @@ template spec. That is enough for `STATELESS_REPLAY`: a new actor has no snapsho
 golden snapshot is the harness captured right after it became ready, before any session touched it,
 so it carries no session state. A template that must cold-boot on every resume would set
 `snapshotConfig.onCommit: DATA` instead; nothing here needs that.
-| `Stop` | `SuspendActor` + `DeleteActor` |
-| `Status` | `GetActor` |
 
 `Capabilities.MemorySnapshot = true` is the tier that lets substrate host a `REQUIRES_MEMORY_SNAPSHOT`
 harness a filesystem-only backend (`runtime/local`, a plain pod) refuses via `CanPlace`.

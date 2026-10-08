@@ -70,16 +70,26 @@ provide.
 - `api.Incarnation` gains `CallMetadata`, which the host attaches to every harness call.
   `placement.Dialer` now takes the `api.Incarnation` instead of its address, so custom dialers
   passed to `placement.WithDialer` must change signature; `placement.DefaultDial` is the stock one.
-- `Placer.Suspend` and a stateful `Placer.Fork` now close the session's open harness streams before
-  checkpointing, so a turn in flight on that session fails instead of holding the checkpoint up. On
-  kind, a suspend under an idle stream took 5m30s before this change and 131ms after.
+- `Placer.Suspend` and a stateful `Placer.Fork` now fence the log and close the session's open
+  harness streams before checkpointing, and refuse new turns on that session until the checkpoint
+  is recorded, so nothing holds the checkpoint up. On kind, a suspend under an idle stream took
+  5m30s before this change and 131ms after. Two behavior changes follow:
+  - An attempted `Suspend` supersedes the in-flight turn even if the checkpoint then fails.
+    Previously a failed checkpoint left the turn running to completion. Now the turn stops as an
+    incomplete execution (the same record a successful suspend leaves; no `ERROR` event), the
+    session stays live, and the caller runs the next turn or retries `Suspend`.
+  - A turn superseded by a checkpoint, or started while one runs, returns an error wrapping the new
+    `placement.ErrCheckpointing` (the superseded turn also wraps `eventlog.ErrFenced`).
+    `Exec` and `Resume` report it as `ABORTED`, which callers retry.
 - Through `atenet-router`, a harness stream that stays idle for about 5m30s (the router's default
   5m route timeout plus 30s) is reset, so a turn parked on a slower model call fails. Raise the
   router's `--route-timeout` if turns can run that long.
 - `runtime/substrate.ControlClient.ResumeActor` drops its `boot` argument (substrate removed
   `ResumeActorRequest.boot`); a new actor starts from its template's golden snapshot, or cold-boots
   if none is built. `SnapshotCloner` follows substrate's Tag API (`TagActor`,
-  `CreateActorFromTag`, `DeleteTag`), `ObjectRef.Namespace` is now `ObjectRef.Atespace`, and
+  `CreateActorFromTag`, `DeleteTag`); `TagActor` must report a name already taken as the new
+  `ErrTagExists`, so a fork whose tag create fails deletes only a tag it reserved.
+  `ObjectRef.Namespace` is now `ObjectRef.Atespace`, and
   `ActorInfo` reports `Worker` and `Snapshot` instead of `PodIP` and `MeshDNS`. A stateful fork now
   checks the parent still holds the checkpoint it took around the tag, and fails with
   `ErrSnapshotSuperseded` if the parent was resumed and suspended in between.
