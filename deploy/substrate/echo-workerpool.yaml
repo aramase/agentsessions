@@ -28,8 +28,10 @@ spec:
   sandboxClass: gvisor
   workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
   template:
-    # Capacity comes from the limits and must cover the template's actor limits (1 CPU, 512Mi).
-    # Requests stay low so the pool fits on a single kind node next to ate-system.
+    # The ate-api scheduler books an ActorTemplate's spec.resources against the capacity a worker
+    # advertises. The suite's templates set only container limits, so nothing is booked and only the
+    # actor slot is checked; these limits just bound the worker pod. Requests stay low so the pool
+    # fits on a single kind node next to ate-system.
     resources:
       limits:
         cpu: "1"

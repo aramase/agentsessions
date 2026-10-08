@@ -139,7 +139,10 @@ jobs:
       - name: Idle harness stream across the router's route timeout (in-cluster Job)
         # A turn parked on a slow model call holds its Connect stream idle. The router bounds streams
         # by --route-timeout (5m default) plus a 30s idle timeout; on kind the idle stream was reset
-        # at 5m30s. The gap stays well past that so the outcome is not a race.
+        # at 5m30s. The gap stays well past that so the outcome is not a race. The step records the
+        # router's behavior rather than gating a change, and costs about 6 minutes, so it runs on
+        # push, nightly and manual runs only, not on every pull request.
+        if: github.event_name != 'pull_request'
         env:
           E2E_IDLE_GAP: 6m30s
         run: hack/run-e2e-job.sh 'TestHarnessStreamIdlePastRouteTimeout' "${E2E_IMAGE}" 1200
