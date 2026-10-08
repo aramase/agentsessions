@@ -327,7 +327,8 @@ var ErrNoSnapshotToClone = errors.New("substrate: fork of a memory-snapshot harn
 // snapshot the fork took. Substrate tags whatever snapshot an actor holds at tag time, and the router
 // resumes an actor on any request addressed to it, so a parent woken and suspended again between the
 // checkpoint and the tag would hand the children RAM that does not match their copied journal prefix.
-var ErrSnapshotSuperseded = errors.New("substrate: parent snapshot was superseded before the fork could tag it")
+// It wraps api.ErrSnapshotSuperseded, which the session service reports as ABORTED.
+var ErrSnapshotSuperseded = fmt.Errorf("substrate: parent snapshot was superseded before the fork could tag it: %w", api.ErrSnapshotSuperseded)
 
 // Fork branches a session's compute into a child incarnation.
 //

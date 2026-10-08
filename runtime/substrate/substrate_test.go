@@ -376,7 +376,7 @@ func TestForkRefusesAParentThatMovedPastItsCheckpoint(t *testing.T) {
 	_, err := newMemoryBackend(m).Fork(context.Background(),
 		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
 		api.ForkOpts{ChildSessionUID: "child"})
-	if !errors.Is(err, substrate.ErrSnapshotSuperseded) {
+	if !errors.Is(err, substrate.ErrSnapshotSuperseded) || !errors.Is(err, api.ErrSnapshotSuperseded) {
 		t.Fatalf("err=%v want ErrSnapshotSuperseded", err)
 	}
 	if want := []string{"get:parent"}; !reflect.DeepEqual(m.calls, want) {
@@ -400,7 +400,7 @@ func TestForkDeletesATagTakenAfterTheParentMoved(t *testing.T) {
 	_, err := newMemoryBackend(m).Fork(context.Background(),
 		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
 		api.ForkOpts{ChildSessionUID: "child"})
-	if !errors.Is(err, substrate.ErrSnapshotSuperseded) {
+	if !errors.Is(err, substrate.ErrSnapshotSuperseded) || !errors.Is(err, api.ErrSnapshotSuperseded) {
 		t.Fatalf("err=%v want ErrSnapshotSuperseded", err)
 	}
 	want := []string{"get:parent", "tag:parent->fork-child", "get:parent", "untag:fork-child"}

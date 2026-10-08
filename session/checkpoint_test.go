@@ -2,7 +2,9 @@ package session_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,10 +20,19 @@ import (
 	"github.com/aramase/agentsessions/wire"
 )
 
-// hookedBackend runs onSnapshot inside Snapshot, standing in for a runtime checkpoint in progress.
+// hookedBackend runs onSnapshot inside Snapshot, standing in for a runtime checkpoint in progress,
+// and fails Fork with forkErr when it is set.
 type hookedBackend struct {
 	*local.Backend
 	onSnapshot func()
+	forkErr    error
+}
+
+func (b *hookedBackend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOpts) (api.Incarnation, error) {
+	if b.forkErr != nil {
+		return api.Incarnation{}, b.forkErr
+	}
+	return b.Backend.Fork(ctx, ref, opts)
 }
 
 func (b *hookedBackend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (api.SnapshotRef, error) {
@@ -117,6 +128,63 @@ func TestExecDuringACheckpointIsAborted(t *testing.T) {
 	}
 	if status.Code(execErr) != codes.Aborted {
 		t.Fatalf("Exec during the checkpoint: want Aborted, got %v", execErr)
+	}
+}
+
+// A runtime that finds the fork's source snapshot superseded (the parent moved on between the
+// checkpoint and the clone) has lost a race the caller can retry at the new head. It must surface as
+// Aborted, not Internal.
+func TestForkWithASupersededSnapshotIsAborted(t *testing.T) {
+	inner := local.New(echoagent.Harness{})
+	t.Cleanup(func() { _ = inner.Close() })
+	backend := &hookedBackend{Backend: inner, forkErr: fmt.Errorf("runtime: tag parent: %w", api.ErrSnapshotSuperseded)}
+	c := checkpointClient(t, backend, &parkingModel{called: make(chan struct{})})
+	sess := mustCreate(t, c)
+
+	_, err := c.Fork(context.Background(), &v1.ForkRequest{Session: sess})
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("fork with a superseded snapshot: want Aborted, got %v", err)
+	}
+}
+
+// statefulBackend reports a REQUIRES_MEMORY_SNAPSHOT harness on a memory-capable runtime, so a Fork
+// takes the stateful path that checkpoints the parent.
+type statefulBackend struct{ *hookedBackend }
+
+func (statefulBackend) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}, nil
+}
+
+func (statefulBackend) Capabilities() api.RuntimeCapabilities {
+	return api.RuntimeCapabilities{MemorySnapshot: true}
+}
+
+// A Suspend or a stateful Fork that arrives while another checkpoint owns the session is refused
+// with no side effects. The caller retries once the checkpoint is done, so both surface as Aborted.
+func TestSuspendAndForkDuringACheckpointAreAborted(t *testing.T) {
+	inner := local.New(echoagent.Harness{})
+	t.Cleanup(func() { _ = inner.Close() })
+	hooked := &hookedBackend{Backend: inner}
+	c := checkpointClient(t, statefulBackend{hooked}, &parkingModel{called: make(chan struct{})})
+	sess := mustCreate(t, c)
+
+	var suspendErr, forkErr error
+	var ran atomic.Bool // not sync.Once: a nested checkpoint that is not refused re-enters this hook
+	hooked.onSnapshot = func() {
+		if !ran.CompareAndSwap(false, true) {
+			return
+		}
+		_, suspendErr = c.Suspend(context.Background(), &v1.SuspendRequest{Session: sess})
+		_, forkErr = c.Fork(context.Background(), &v1.ForkRequest{Session: sess})
+	}
+	if _, err := c.Suspend(context.Background(), &v1.SuspendRequest{Session: sess}); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	if status.Code(suspendErr) != codes.Aborted {
+		t.Fatalf("Suspend during the checkpoint: want Aborted, got %v", suspendErr)
+	}
+	if status.Code(forkErr) != codes.Aborted {
+		t.Fatalf("Fork during the checkpoint: want Aborted, got %v", forkErr)
 	}
 }
 

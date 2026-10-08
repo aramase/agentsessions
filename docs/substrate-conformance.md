@@ -92,9 +92,11 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - `CreateActor` seeds an actor **only from a tag**, and a tag names the suspended parent **actor**,
   capturing whichever snapshot it holds when the tag is created. The router resumes an actor on any
   request addressed to it, so the parent can be woken and suspended again between the fork's
-  checkpoint and its tag. The backend checks on both sides of the tag that the parent is still
-  SUSPENDED holding the snapshot the fork took (a suspend always writes a new one), and otherwise
-  deletes the tag and fails with `ErrSnapshotSuperseded`.
+  checkpoint and its tag. The Placer refuses new turns on the parent until every child is cloned,
+  so the host itself does not wake it. The backend still checks on both sides of the tag that the
+  parent is SUSPENDED holding the snapshot the fork took (a suspend always writes a new one), and
+  otherwise deletes the tag and fails with `ErrSnapshotSuperseded`, which `Fork` reports as
+  `ABORTED`.
 - The backend takes one tag per child (`fork-<child-uid>`, atespace-scoped). Each tag owns a full
   copy of the snapshot, and a child borrows its tag's copy until its own first suspend, so the tag
   lives as long as the child and `Stop` deletes it after deleting the child.

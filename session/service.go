@@ -578,8 +578,9 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 // forkError surfaces a refused fork as FailedPrecondition rather than Internal. A fork is refused
 // when the harness's capabilities cannot realize it — e.g. a REQUIRES_MEMORY_SNAPSHOT session forked
 // at a historical seq, which no memory snapshot can reproduce — which is a caller-visible
-// precondition, not a host fault. A concurrent writer that invalidated the fork point is Aborted, so
-// the caller knows a retry is meaningful.
+// precondition, not a host fault. A concurrent writer that invalidated the fork point, a parent that
+// moved past the snapshot the fork took, or a parent another operation holds (a checkpoint, or a
+// turn placing its compute) is Aborted, so the caller knows a retry is meaningful.
 func forkError(err error) error {
 	switch {
 	case errors.Is(err, placement.ErrUnplaceable):
@@ -588,7 +589,8 @@ func forkError(err error) error {
 		return status.Error(codes.Unavailable, err.Error())
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
 		return status.Error(admissionInterruptedCode(err), err.Error())
-	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
+	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, api.ErrSnapshotSuperseded),
+		errors.Is(err, placement.ErrCheckpointing), errors.Is(err, placement.ErrTurnStarting):
 		return status.Error(codes.Aborted, err.Error())
 	default:
 		return status.Errorf(codes.Internal, "fork: %v", err)
@@ -608,6 +610,10 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	}
 	log := s.store.Session(req.GetSession())
 	if _, err := placer.Suspend(ctx, log, req.GetSession()); err != nil {
+		if errors.Is(err, placement.ErrCheckpointing) || errors.Is(err, placement.ErrTurnStarting) {
+			// Another checkpoint, or a turn placing its compute, holds the session; retry once it is done.
+			return nil, status.Errorf(codes.Aborted, "suspend: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "suspend: %v", err)
 	}
 	// The SUSPEND append already moved the stored compute_state projection, so re-reading is
