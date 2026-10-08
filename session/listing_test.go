@@ -38,10 +38,16 @@ func serveWithPlacement(t *testing.T, store *sqlitelog.Store, backend placement.
 	if c, ok := backend.(io.Closer); ok {
 		t.Cleanup(func() { _ = c.Close() })
 	}
+	return serveRegistry(t, store, echoRegistry(t, backend, placementOpts...), opts...)
+}
 
+// serveRegistry wires a Sessions service over the store and an already-built registry, for tests
+// that need a Placer the echo registry does not build (a custom model, for one).
+func serveRegistry(t *testing.T, store *sqlitelog.Store, registry *placement.Registry, opts ...session.Option) v1.SessionsClient {
+	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	v1.RegisterSessionsServer(srv, session.NewService(store, echoRegistry(t, backend, placementOpts...), opts...))
+	v1.RegisterSessionsServer(srv, session.NewService(store, registry, opts...))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 

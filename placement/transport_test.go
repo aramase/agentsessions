@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/harnesswire"
 	"github.com/aramase/agentsessions/placement"
@@ -30,6 +32,8 @@ type routedBackend struct {
 	snapshots int
 	// onSnapshot runs inside Snapshot, standing in for the runtime's checkpoint.
 	onSnapshot func()
+	// snapshotErr, when set, fails the next Snapshot (after onSnapshot) and is then cleared.
+	snapshotErr error
 }
 
 func (b *routedBackend) Describe(context.Context) (api.Descriptor, error) { return b.desc, nil }
@@ -46,9 +50,14 @@ func (b *routedBackend) Create(_ context.Context, s *api.SessionSpec) (api.Incar
 func (b *routedBackend) Snapshot(_ context.Context, in api.Incarnation, _ api.SnapshotKind) (api.SnapshotRef, error) {
 	b.mu.Lock()
 	b.snapshots++
+	failWith := b.snapshotErr
+	b.snapshotErr = nil
 	b.mu.Unlock()
 	if b.onSnapshot != nil {
 		b.onSnapshot()
+	}
+	if failWith != nil {
+		return api.SnapshotRef{}, failWith
 	}
 	return api.SnapshotRef{Local: in.ID, ExternalURI: "snap-" + in.ID, Memory: true}, nil
 }
@@ -173,26 +182,12 @@ func (echoSink) Usage(context.Context, api.Usage) error       { return nil }
 // drain times out. Suspend must end the stream first: by the time the runtime checkpoints, the
 // harness side of the stream must already have returned.
 func TestSuspendEndsAnOpenHarnessStreamBeforeTheCheckpoint(t *testing.T) {
-	testCheckpointEndsOpenStream(t, func(p *placement.Placer, log *sqlitelog.Log, uid string) error {
-		_, err := p.Suspend(context.Background(), log, uid)
-		return err
-	})
+	testCheckpointEndsOpenStream(t, suspendCheckpoint)
 }
 
 // A stateful fork checkpoints its parent the same way, so it must end the parent's stream too.
 func TestForkEndsTheParentsOpenHarnessStreamBeforeTheCheckpoint(t *testing.T) {
-	testCheckpointEndsOpenStream(t, func(p *placement.Placer, log *sqlitelog.Log, uid string) error {
-		head, err := log.Head()
-		if err != nil {
-			return err
-		}
-		store, err := sqlitelog.Open(":memory:")
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		return p.Fork(context.Background(), log, uid, []placement.ForkChild{{UID: uid + "-child", Log: store.Session(uid + "-child")}}, head)
-	})
+	testCheckpointEndsOpenStream(t, forkCheckpoint)
 }
 
 func testCheckpointEndsOpenStream(t *testing.T, checkpoint func(*placement.Placer, *sqlitelog.Log, string) error) {
@@ -210,12 +205,12 @@ func testCheckpointEndsOpenStream(t *testing.T, checkpoint func(*placement.Place
 	model := func(ctx context.Context, _ api.ModelRequest) (api.ModelResponse, error) {
 		close(modelCalled)
 		<-ctx.Done()
-		return api.ModelResponse{}, context.Cause(ctx)
+		return api.ModelResponse{}, ctx.Err() // what a real model client returns: not the cause
 	}
 	streamEnded := make(chan bool, 1)
 	backend := &routedBackend{
 		address: hs.addr,
-		desc:    api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}},
+		desc:    memDescriptor,
 		onSnapshot: func() {
 			// Give the server a bounded moment to observe the reset, as substrate's drain would.
 			select {
@@ -250,11 +245,221 @@ func testCheckpointEndsOpenStream(t *testing.T, checkpoint func(*placement.Place
 	}
 	select {
 	case err := <-execErr:
-		if err == nil {
-			t.Fatal("a turn whose harness was ended for a checkpoint must not report success")
+		// The checkpoint fenced the turn before ending its stream, so the turn reports that, not
+		// the incidental cancellation, and the service maps it to a retryable Aborted.
+		if !errors.Is(err, placement.ErrCheckpointing) || !errors.Is(err, eventlog.ErrFenced) {
+			t.Fatalf("interrupted turn returned %v, want ErrCheckpointing and eventlog.ErrFenced", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the interrupted turn never returned")
+	}
+	// The host interrupted the turn; the fence keeps that out of the journal as a harness ERROR.
+	kinds := journalKinds(t, log)
+	if slices.Contains(kinds, api.EventError) {
+		t.Fatalf("journal %v records the checkpoint's interruption as a harness ERROR", kinds)
+	}
+	if kinds[len(kinds)-1] != api.EventLifecycle {
+		t.Fatalf("journal %v does not end in the checkpoint's SUSPEND", kinds)
+	}
+}
+
+func journalKinds(t *testing.T, log eventlog.Store) []api.EventKind {
+	t.Helper()
+	recs, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := make([]api.EventKind, 0, len(recs))
+	for _, r := range recs {
+		kinds = append(kinds, r.Event.Kind)
+	}
+	return kinds
+}
+
+// memDescriptor is a REQUIRES_MEMORY_SNAPSHOT harness, the tier whose fork checkpoints the parent.
+var memDescriptor = api.Descriptor{ID: "mem", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}
+
+func suspendCheckpoint(p *placement.Placer, log *sqlitelog.Log, uid string) error {
+	_, err := p.Suspend(context.Background(), log, uid)
+	return err
+}
+
+func forkCheckpoint(p *placement.Placer, log *sqlitelog.Log, uid string) error {
+	head, err := log.Head()
+	if err != nil {
+		return err
+	}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return p.Fork(context.Background(), log, uid, []placement.ForkChild{{UID: uid + "-child", Log: store.Session(uid + "-child")}}, head)
+}
+
+// A turn that starts while the session is being checkpointed must not open a harness stream: on
+// substrate that stream would stall the very checkpoint that is running.
+func TestSuspendRefusesATurnStartedDuringTheCheckpoint(t *testing.T) {
+	testCheckpointRefusesANewTurn(t, suspendCheckpoint)
+}
+
+func TestForkRefusesATurnOnTheParentDuringTheCheckpoint(t *testing.T) {
+	testCheckpointRefusesANewTurn(t, forkCheckpoint)
+}
+
+func testCheckpointRefusesANewTurn(t *testing.T, checkpoint func(*placement.Placer, *sqlitelog.Log, string) error) {
+	t.Helper()
+	hs := startHarnessServer(t, echoagent.Harness{})
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("s1")
+
+	var p *placement.Placer
+	var execErr error
+	backend := &routedBackend{address: hs.addr, desc: memDescriptor}
+	backend.onSnapshot = func() {
+		_, execErr = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+	}
+	p = placement.New(backend, echoagent.Model)
+	if err := checkpoint(p, log, "s1"); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if !errors.Is(execErr, placement.ErrCheckpointing) {
+		t.Fatalf("turn started during the checkpoint returned %v, want ErrCheckpointing", execErr)
+	}
+	if n := len(hs.started); n != 0 {
+		t.Fatalf("%d harness stream(s) opened while the session was being checkpointed", n)
+	}
+}
+
+// The other interleaving: the turn passed every early check and is about to register its connection
+// when the checkpoint begins. Registration must still be refused.
+func TestSuspendRefusesATurnRegisteringAsTheCheckpointBegins(t *testing.T) {
+	testCheckpointRefusesARegisteringTurn(t, suspendCheckpoint)
+}
+
+func TestForkRefusesAParentTurnRegisteringAsTheCheckpointBegins(t *testing.T) {
+	testCheckpointRefusesARegisteringTurn(t, forkCheckpoint)
+}
+
+func testCheckpointRefusesARegisteringTurn(t *testing.T, checkpoint func(*placement.Placer, *sqlitelog.Log, string) error) {
+	t.Helper()
+	hs := startHarnessServer(t, echoagent.Harness{})
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("s1")
+
+	dialing, release := make(chan struct{}), make(chan struct{})
+	dial := func(inc api.Incarnation) (api.Harness, func() error, error) {
+		close(dialing)
+		<-release
+		return placement.DefaultDial(inc)
+	}
+	execErr := make(chan error, 1)
+	backend := &routedBackend{address: hs.addr, desc: memDescriptor}
+	p := placement.New(backend, echoagent.Model, placement.WithDialer(dial))
+	var gotErr error
+	backend.onSnapshot = func() {
+		// The checkpoint has begun; now let the held turn try to register, and wait for it.
+		close(release)
+		select {
+		case gotErr = <-execErr:
+		case <-time.After(10 * time.Second):
+			gotErr = errors.New("held turn did not return while the checkpoint ran")
+		}
+	}
+	go func() {
+		_, err := p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		execErr <- err
+	}()
+	<-dialing
+	if err := checkpoint(p, log, "s1"); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if !errors.Is(gotErr, placement.ErrCheckpointing) {
+		t.Fatalf("turn registering as the checkpoint began returned %v, want ErrCheckpointing", gotErr)
+	}
+	if n := len(hs.started); n != 0 {
+		t.Fatalf("%d harness stream(s) opened while the session was being checkpointed", n)
+	}
+}
+
+// Ending the streams cannot wait for the checkpoint to succeed: the checkpoint is what an open
+// stream stalls. So an attempted Suspend supersedes the in-flight turn even when the checkpoint then
+// fails. The contract that makes that safe: nothing is recorded for the failed attempt, the session
+// stays live, and the caller can run the next turn or retry the Suspend.
+func TestFailedSuspendSupersedesTheTurnAndARetryRecovers(t *testing.T) {
+	hs := startHarnessServer(t, echoagent.Harness{})
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("s1")
+
+	// The first model call parks until its turn is ended; later calls (the re-drive) answer.
+	modelCalled := make(chan struct{})
+	var calls int
+	var callsMu sync.Mutex
+	model := func(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+		callsMu.Lock()
+		calls++
+		first := calls == 1
+		callsMu.Unlock()
+		if !first {
+			return echoagent.Model(ctx, req)
+		}
+		close(modelCalled)
+		<-ctx.Done()
+		return api.ModelResponse{}, ctx.Err() // what a real model client returns: not the cause
+	}
+	backend := &routedBackend{address: hs.addr, desc: memDescriptor, snapshotErr: errors.New("checkpoint failed")}
+	p := placement.New(backend, model)
+
+	execErr := make(chan error, 1)
+	go func() {
+		_, err := p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		execErr <- err
+	}()
+	<-modelCalled
+
+	if _, err := p.Suspend(context.Background(), log, "s1"); err == nil {
+		t.Fatal("Suspend reported success for a failed checkpoint")
+	}
+	select {
+	case err := <-execErr:
+		if !errors.Is(err, placement.ErrCheckpointing) || !errors.Is(err, eventlog.ErrFenced) {
+			t.Fatalf("turn returned %v, want it superseded (ErrCheckpointing, ErrFenced)", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the in-flight turn survived a failed Suspend")
+	}
+	kinds := journalKinds(t, log)
+	if slices.Contains(kinds, api.EventError) || slices.Contains(kinds, api.EventLifecycle) || slices.Contains(kinds, api.EventEnd) {
+		t.Fatalf("failed Suspend left journal %v, want only the incomplete execution", kinds)
+	}
+
+	head, err := log.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "again")}, head); err != nil {
+		t.Fatalf("next turn after a failed Suspend: %v", err)
+	}
+	if kinds := journalKinds(t, log); kinds[len(kinds)-1] != api.EventEnd {
+		t.Fatalf("next turn after a failed Suspend did not complete: %v", kinds)
+	}
+	if _, err := p.Suspend(context.Background(), log, "s1"); err != nil {
+		t.Fatalf("retried Suspend: %v", err)
+	}
+	if kinds := journalKinds(t, log); kinds[len(kinds)-1] != api.EventLifecycle {
+		t.Fatalf("retried Suspend did not record SUSPEND: %v", kinds)
 	}
 }
 
