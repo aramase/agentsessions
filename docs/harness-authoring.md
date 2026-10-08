@@ -230,8 +230,9 @@ Notes:
 
 `chatagent.Harness{Model: "your-model-id"}` is a small, text-only `api.Harness` with descriptor ID
 `chat`. It declares `STATELESS_REPLAY` and `ForkSafe`, retaining no durable in-memory state.
-Each turn it retains the messages from prior `EVENT_INPUT` and `EVENT_OUTPUT` events in
-`Start.History`, in journal order, then appends every current `Start.Inputs` message exactly once.
+Each turn it optionally prepends a system message from `Start.Config`, retains the messages from
+prior `EVENT_INPUT` and `EVENT_OUTPUT` events in `Start.History`, in journal order, then appends
+every current `Start.Inputs` message exactly once.
 Audit and lifecycle events (`MODEL_CALL`, `END`, `ERROR`, `LIFECYCLE`, and other non-conversation
 events) do not enter model context.
 
@@ -248,6 +249,62 @@ adapter, model routing, or streaming logic.
 **The full recorded conversation is sent on every turn.** This is a simple reference context
 policy, not a scalable context-window strategy: there is no truncation or summarization, and long
 conversations can exceed a model's context window.
+
+### Per-execution system prompt
+
+Chat reads an optional JSON object from `Start.Config` (the bytes in `ExecRequest.config`):
+
+```json
+{"system_prompt":"Answer concisely and explain unfamiliar terms."}
+```
+
+A non-empty `system_prompt` adds exactly one `system` text message **before** the prior conversation
+and current inputs. Its string is used as decoded from JSON, including whitespace and newlines. No config,
+zero-length config, `{}`, an omitted field, or `"system_prompt":""` leaves the model request
+unchanged. Unknown fields are ignored for forward compatibility; the field name is case-sensitive.
+Malformed JSON, trailing JSON or other tokens, non-object values (including top-level `null`), and
+non-string `system_prompt` values (including `null`) fail the execution before a model call. Errors
+use fixed diagnostics, never the supplied config or prompt.
+
+A rejected config leaves the turn incomplete. Every Resume retries that turn with the same
+journaled config and fails again; recovery requires a new Exec with valid config. The rejected
+turn's input remains in conversation history for that new Exec and later turns, without an
+assistant reply. A new Exec supersedes the incomplete turn for subsequent Resume calls; it does
+not remove the rejected input from history.
+
+This is **per execution**, not a session default. Supply it on each new turn that needs the
+instruction; omitting it does not reuse a previous turn's config. A fork's new turn likewise uses
+only that new execution's config. Replay/re-drive of an existing execution uses that execution's
+journaled config to reproduce its original request. The config-derived message is not a separate
+conversation INPUT/OUTPUT event and is not accumulated from earlier turns. Caller-supplied `system`
+messages in prior inputs or current inputs remain in place: this option does not replace or remove
+them, or establish a trusted instruction boundary.
+
+The convenience `client.ExecOptions` and `agentctl` have no config option. Use the existing generated
+Sessions stub (`v1` is `github.com/aramase/agentsessions/api/genpb`) to set the bytes directly:
+
+```go
+req := &v1.ExecRequest{
+    Session: "<session-uid>", // omit to create a session for this turn
+    Harness: "chat",
+    Config:  []byte(`{"system_prompt":"Answer concisely."}`),
+    Inputs: []*v1.Message{{
+        Role: "user",
+        Parts: []*v1.Part{{
+            Part: &v1.Part_Text{Text: &v1.TextPart{Text: "What is a prime number?"}},
+        }},
+    }},
+}
+```
+
+Pass `req` to `SessionsClient.Exec` (or `client.Client.Sessions().Exec`) and drain the stream to
+completion, as for any execution. Supply config through the generated `ExecRequest.Config` field,
+not `client.ExecOptions`; no additional environment variable or session setting is needed.
+
+**Config is journaled in plaintext for deterministic replay.** Treat prompts as recorded
+instructions, not credentials; keep provider keys on the host. A system prompt grants no
+authentication or authorization. The reference transport is also plaintext and unauthenticated
+(see [security.md](security.md)).
 
 ### Run chat through the reference server
 
