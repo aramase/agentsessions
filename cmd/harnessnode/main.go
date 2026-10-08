@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -50,8 +51,19 @@ func main() {
 	defer stop()
 
 	// harnesswire gRPC server (h2c: plain TCP, no TLS — the mesh terminates/originates HTTP/2).
-	lis, err := net.Listen("tcp", grpcAddr)
-	if err != nil {
+	// HARNESS_ADDR=unix:///path serves on a unix socket instead, for a host that registers this
+	// harness by address on the same machine (agentsessionsd -harness name=unix:///path).
+	var lis net.Listener
+	if sock, ok := strings.CutPrefix(grpcAddr, "unix://"); ok {
+		ulis, lock, err := listenUnix(sock)
+		if err != nil {
+			log.Fatalf("harnessnode: listen %s: %v", grpcAddr, err)
+		}
+		// Held until the process exits, however it exits: the kernel drops the lock, and the next
+		// harnessnode on this address can then reclaim the socket file.
+		defer func() { _ = lock.Close() }()
+		lis = ulis
+	} else if lis, err = net.Listen("tcp", grpcAddr); err != nil {
 		log.Fatalf("harnessnode: listen %s: %v", grpcAddr, err)
 	}
 	srv := grpc.NewServer(
