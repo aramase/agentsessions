@@ -151,7 +151,11 @@ message SuspendRequest { string session = 1; }
 
 message ResumeRequest {
   string session = 1;
-  bool boot = 2; // true = cold-boot + replay instead of snapshot restore
+  // Ignored. The service never reads it; the Runtime backend decides how a resumed session comes
+  // back. On substrate that is the actor's own snapshot, else the template's golden snapshot, else a
+  // cold boot, and substrate has no per-resume boot flag to forward it to. The field stays so
+  // existing clients keep encoding; do not reuse its number.
+  bool boot = 2 [deprecated = true];
 }
 
 // Children inherit the parent's annotations and origin.

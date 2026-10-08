@@ -293,8 +293,9 @@ func (c *Client) Suspend(ctx context.Context, uid string) (*v1.Session, error) {
 	return c.stub.Suspend(ctx, &v1.SuspendRequest{Session: uid})
 }
 
-// Resume brings a suspended session back. boot cold-boots and replays instead of restoring a
-// snapshot.
-func (c *Client) Resume(ctx context.Context, uid string, boot bool) (*v1.Session, error) {
-	return c.stub.Resume(ctx, &v1.ResumeRequest{Session: uid, Boot: boot})
+// Resume brings a suspended session back. boot is ignored and not sent: the service never read
+// ResumeRequest.boot, which is deprecated, and the Runtime backend chooses how the session comes
+// back. The parameter stays so existing callers keep compiling.
+func (c *Client) Resume(ctx context.Context, uid string, _ bool) (*v1.Session, error) {
+	return c.stub.Resume(ctx, &v1.ResumeRequest{Session: uid})
 }
