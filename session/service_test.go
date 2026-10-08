@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -40,6 +41,11 @@ func newClientWith(t *testing.T, backend placement.Backend) v1.SessionsClient {
 	if c, ok := backend.(io.Closer); ok {
 		t.Cleanup(func() { _ = c.Close() })
 	}
+	return newClientWithRegistry(t, echoRegistry(t, backend))
+}
+
+func newClientWithRegistry(t *testing.T, registry *placement.Registry) v1.SessionsClient {
+	t.Helper()
 	store, err := sqlitelog.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +54,7 @@ func newClientWith(t *testing.T, backend placement.Backend) v1.SessionsClient {
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	v1.RegisterSessionsServer(srv, session.NewService(store, echoRegistry(t, backend)))
+	v1.RegisterSessionsServer(srv, session.NewService(store, registry))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 
@@ -809,6 +815,169 @@ func TestExecHonoursDeadline(t *testing.T) {
 	}
 	if err := drainExec(stream); err == nil {
 		t.Fatal("an expired deadline was ignored")
+	}
+}
+
+// describeFails serves the real local backend but fails Describe the way a gRPC client does: with the
+// context's own status once the caller's deadline has run out, and with peerErr before that.
+type describeFails struct {
+	*local.Backend
+	peerErr error
+}
+
+func (b *describeFails) Describe(ctx context.Context) (api.Descriptor, error) {
+	if ctx.Err() != nil {
+		return api.Descriptor{}, status.FromContextError(ctx.Err()).Err()
+	}
+	return api.Descriptor{}, b.peerErr
+}
+
+// A harness that cannot be described is UNAVAILABLE, a retryable outage, only while the caller's
+// deadline is live. When the request's own deadline_unix has already passed, resending the same
+// request cannot succeed, so the public code must be DEADLINE_EXCEEDED. Either way nothing is
+// journaled.
+func TestExecAdmissionSeparatesCallerDeadlineFromOutage(t *testing.T) {
+	tests := []struct {
+		name     string
+		deadline int64
+		want     codes.Code
+	}{
+		{name: "request deadline already expired", deadline: time.Now().Add(-time.Minute).Unix(), want: codes.DeadlineExceeded},
+		{name: "peer deadline while the request is live", deadline: time.Now().Add(time.Hour).Unix(), want: codes.Unavailable},
+		{name: "peer deadline with no request deadline", want: codes.Unavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := local.New(echoagent.Harness{})
+			c := newClientWith(t, &describeFails{Backend: inner, peerErr: status.Error(codes.DeadlineExceeded, "peer deadline")})
+			t.Cleanup(func() { _ = inner.Close() })
+			uid := mustCreate(t, c)
+			stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+				Session:      uid,
+				Inputs:       []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
+				DeadlineUnix: tt.deadline,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := drainExec(stream); status.Code(err) != tt.want {
+				t.Fatalf("exec = %v, want %v", err, tt.want)
+			}
+			rs, err := c.Replay(context.Background(), &v1.ReplayRequest{Session: uid})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := rs.Recv(); !errors.Is(err, io.EOF) {
+				t.Fatalf("a refused admission journaled events (recv: %v)", err)
+			}
+		})
+	}
+}
+
+// Resume and Fork run the same admission check as Exec, so they map its failures the same way: the
+// caller's own deadline or cancellation is DEADLINE_EXCEEDED or CANCELLED, and a harness that cannot
+// be described while the caller is live is UNAVAILABLE. Nothing is journaled in any case. The
+// service is called directly because a gRPC client fails a cancelled call locally, before the server
+// ever sees it.
+func TestResumeAndForkAdmissionSeparatesCallerContextFromOutage(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Minute))
+	defer cancelExpired()
+	calls := map[string]func(ctx context.Context, svc *session.Service, uid string) error{
+		"resume": func(ctx context.Context, svc *session.Service, uid string) error {
+			_, err := svc.Resume(ctx, &v1.ResumeRequest{Session: uid})
+			return err
+		},
+		"fork": func(ctx context.Context, svc *session.Service, uid string) error {
+			_, err := svc.Fork(ctx, &v1.ForkRequest{Session: uid})
+			return err
+		},
+	}
+	ctxs := []struct {
+		name string
+		ctx  context.Context
+		want codes.Code
+	}{
+		{name: "caller cancelled", ctx: cancelled, want: codes.Canceled},
+		{name: "caller deadline expired", ctx: expired, want: codes.DeadlineExceeded},
+		{name: "harness unreachable while the caller is live", ctx: context.Background(), want: codes.Unavailable},
+	}
+	for _, method := range []string{"resume", "fork"} {
+		for _, tt := range ctxs {
+			t.Run(method+"/"+tt.name, func(t *testing.T) {
+				store, err := sqlitelog.Open(":memory:")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				inner := local.New(echoagent.Harness{})
+				t.Cleanup(func() { _ = inner.Close() })
+				svc := session.NewService(store, echoRegistry(t, &describeFails{Backend: inner, peerErr: status.Error(codes.Unavailable, "connection refused")}))
+				sess, err := svc.CreateSession(context.Background(), &v1.CreateSessionRequest{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				uid := sess.GetMetadata().GetUid()
+
+				if err := calls[method](tt.ctx, svc, uid); status.Code(err) != tt.want {
+					t.Fatalf("%s = %v, want %v", method, err, tt.want)
+				}
+				if head, err := store.Session(uid).Head(); err != nil || head != 0 {
+					t.Fatalf("a refused admission journaled events: head %d, err %v", head, err)
+				}
+			})
+		}
+	}
+}
+
+// Only admission maps the caller's deadline to DEADLINE_EXCEEDED. A turn that the request's
+// deadline_unix interrupts after admission journals an ERROR and keeps the code it had before
+// admission was split out (INTERNAL), even though the model call's error wraps
+// context.DeadlineExceeded. Changing the mid-turn code is a separate compatibility change.
+func TestExecMidTurnDeadlineKeepsItsCode(t *testing.T) {
+	blockingModel := func(ctx context.Context, _ api.ModelRequest) (api.ModelResponse, error) {
+		<-ctx.Done()
+		return api.ModelResponse{}, fmt.Errorf("model http: %w", ctx.Err())
+	}
+	backend := local.New(echoagent.Harness{})
+	t.Cleanup(func() { _ = backend.Close() })
+	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{
+		"echo": placement.New(backend, blockingModel),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newClientWithRegistry(t, registry)
+	uid := mustCreate(t, c)
+	stream, err := c.Exec(context.Background(), &v1.ExecRequest{
+		Session:      uid,
+		Inputs:       []*v1.Message{wire.MessageToProto(api.TextMessage("user", "hi"))},
+		DeadlineUnix: time.Now().Add(2 * time.Second).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := drainExec(stream); status.Code(err) != codes.Internal {
+		t.Fatalf("exec = %v, want %v", err, codes.Internal)
+	}
+	rs, err := c.Replay(context.Background(), &v1.ReplayRequest{Session: uid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var last *v1.LogRecord
+	for {
+		r, err := rs.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = r
+	}
+	if last.GetEvent().GetKind() != v1.EventKind_EVENT_ERROR {
+		t.Fatalf("the interrupted turn ended with %v, want an ERROR event", last.GetEvent().GetKind())
 	}
 }
 

@@ -33,7 +33,7 @@ const (
 
 // Message is a role-tagged sequence of content parts (A2A Message = role + Part[]).
 type Message struct {
-	Role  string // user | assistant (A2A calls this "agent") | tool
+	Role  string // system | user | assistant (A2A calls this "agent") | tool
 	Parts []Part
 }
 
