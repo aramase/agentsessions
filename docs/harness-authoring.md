@@ -188,8 +188,9 @@ fractional values must tolerate float64 rounding. These are author obligations f
 protobuf representation, not a guarantee of strict argument validation. Non-nil arguments that
 cannot be represented by the journal conversion are rejected as replay divergence.
 
-A harness may handle an executor error and continue. Journals without failure receipts cannot
-recover the original error: replay returns a bounded generic error for a matched intent with no
+A harness using a direct controller sink in process may handle an executor error and continue.
+Journals without failure receipts cannot recover the original error: replay returns a bounded generic
+error for a matched intent with no
 result, and resume does the same when another recorded effect follows that intent, without
 re-executing it. Only a terminal unresolved intent is re-driven under its recorded key; the harness
 may handle a re-drive error and finish. Keyless controller-mediated calls are rejected before
@@ -197,6 +198,11 @@ intent and consume no recorded effects during replay or resume. Unsupported appr
 mediation rejections are also handleable without consuming evidence when no `TOOL_CALL` is next
 (or the recorded stream is exhausted). If a `TOOL_CALL` is next, its mediation must still match.
 Identity and result-correlation mismatches remain fatal even if the harness handles their errors.
+`Harness.Connect` currently ends the turn on a sink tool-call error instead of sending a recoverable
+error reply to the remote harness, so these handle-and-continue paths apply only to direct controller
+sinks. Without a failure receipt, an immediately following in-harness `Report` is ambiguous: its
+`TOOL_RESULT` is treated as the preceding call's receipt, and a different result ID remains a fatal
+correlation mismatch rather than a recoverable executor failure.
 
 ### Rule 5: pass reasoning parts back verbatim
 
