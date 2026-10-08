@@ -7,8 +7,17 @@ provide.
 
 ## Unreleased
 
+### Added
+
+- The chat harness accepts a per-execution `system_prompt` in its JSON config, prepended before
+  conversation history and current inputs.
+
 ### Compatibility
 
+- Chat sessions written on `main` since execution-config journaling was added in #76 with a
+  non-empty `system_prompt` or non-JSON config no longer replay or resume: the chat harness now
+  applies the prompt and rejects invalid config instead of ignoring it. No tagged release is
+  affected.
 - Every new execution records `EXECUTION_START`, including default-config turns, so interrupted
   recovery can reject partially committed inputs. Binaries older than this release fail chain
   verification with a `content_hash` mismatch for sessions containing this event. Rollback is not

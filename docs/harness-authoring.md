@@ -266,6 +266,12 @@ Malformed JSON, trailing JSON or other tokens, non-object values (including top-
 non-string `system_prompt` values (including `null`) fail the execution before a model call. Errors
 use fixed diagnostics, never the supplied config or prompt.
 
+A rejected config leaves the turn incomplete. Every Resume retries that turn with the same
+journaled config and fails again; recovery requires a new Exec with valid config. The rejected
+turn's input remains in conversation history for that new Exec and later turns, without an
+assistant reply. A new Exec supersedes the incomplete turn for subsequent Resume calls; it does
+not remove the rejected input from history.
+
 This is **per execution**, not a session default. Supply it on each new turn that needs the
 instruction; omitting it does not reuse a previous turn's config. A fork's new turn likewise uses
 only that new execution's config. Replay/re-drive of an existing execution uses that execution's
