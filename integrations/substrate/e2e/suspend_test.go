@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +11,10 @@ import (
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/substrate"
 )
+
+// suspendBound is the longest a Placer.Suspend under a parked turn may take before the test calls it
+// a regression to the drain stall.
+const suspendBound = 2 * time.Minute
 
 // TestSuspendUnderAnIdleHarnessStream checkpoints a session while its turn is parked on a model call,
 // so its Connect stream is open and idle through the router. The worker drains an actor's in-flight
@@ -68,10 +73,15 @@ func TestSuspendUnderAnIdleHarnessStream(t *testing.T) {
 	}
 	took := time.Since(start)
 	t.Logf("PLACER: Suspend with a parked turn took %s (stream closed first)", took.Round(time.Millisecond))
+	// The stall this guards against ran until the router reset the stream (5m30s on kind). A healthy
+	// checkpoint takes well under a second; the bound is generous so a slow runner does not flake.
+	if took > suspendBound {
+		t.Fatalf("Suspend with a parked turn took %s, over %s: an open harness stream is stalling the checkpoint again", took, suspendBound)
+	}
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("the parked turn reported success after its session was suspended")
+		if !errors.Is(err, placement.ErrCheckpointing) {
+			t.Fatalf("the parked turn ended with %v, want it superseded by the checkpoint (ErrCheckpointing)", err)
 		}
 		t.Logf("parked turn ended with: %v", err)
 	case <-time.After(time.Minute):
