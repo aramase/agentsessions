@@ -93,6 +93,14 @@ provide.
   - A turn superseded by a checkpoint, or started while one runs, returns an error wrapping the new
     `placement.ErrCheckpointing` (the superseded turn also wraps `eventlog.ErrFenced`).
     `Exec` and `Resume` report it as `ABORTED`, which callers retry.
+- `Exec`, `Resume`, `Suspend` and a stateful `Fork` of one session are serialized by a per-session
+  state machine in the Placer (see `docs/substrate-conformance.md`). A turn is now admitted before
+  `Runtime.Create` or `Runtime.Restore`, and `Suspend` or a stateful `Fork` that arrives while that
+  call is in flight is refused with the new `placement.ErrTurnStarting`. `Suspend` and stateful
+  `Fork` no longer nest: one that arrives while another checkpoint or a fork's fan-out holds the
+  session is refused with `placement.ErrCheckpointing`. Both refusals have no side effects, and
+  `Suspend` and `Fork` now report them as `ABORTED`; `Suspend` reported every failure as `INTERNAL`
+  before.
 - The substrate conformance suite (`integrations/substrate/e2e`) runs both tiers on the micro-VM
   sandbox class by default; the stateless tier used gVisor before. A host without KVM opts each
   tier back into gVisor with `ECHO_SANDBOX_CLASS=gvisor` and `COUNTER_SANDBOX_CLASS=gvisor`, after

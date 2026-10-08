@@ -92,11 +92,14 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - `CreateActor` seeds an actor **only from a tag**, and a tag names the suspended parent **actor**,
   capturing whichever snapshot it holds when the tag is created. The router resumes an actor on any
   request addressed to it, so the parent can be woken and suspended again between the fork's
-  checkpoint and its tag. The Placer refuses new turns on the parent until every child is cloned,
-  so the host itself does not wake it. The backend still checks on both sides of the tag that the
-  parent is SUSPENDED holding the snapshot the fork took (a suspend always writes a new one), and
-  otherwise deletes the tag and fails with `ErrSnapshotSuperseded`, which `Fork` reports as
-  `ABORTED`.
+  checkpoint and its tag. The Placer's per-session state machine (see
+  [One operation at a time per session](#one-operation-at-a-time-per-session)) keeps every turn,
+  `Suspend` and `Fork` of this host off the parent from the moment the fork's checkpoint begins until
+  every child is cloned, and a fork cannot begin while a turn's `Create` or `Restore` is still in
+  flight, so nothing this host runs wakes the parent in between. A request from outside the host
+  can, so the backend still checks on both sides of the tag that the parent is SUSPENDED holding the
+  snapshot the fork took (a suspend always writes a new one), and otherwise deletes the tag and fails
+  with `ErrSnapshotSuperseded`, which `Fork` reports as `ABORTED`.
 - The backend takes one tag per child (`fork-<child-uid>`, atespace-scoped). Each tag owns a full
   copy of the snapshot, and a child borrows its tag's copy until its own first suspend, so the tag
   lives as long as the child and `Stop` deletes it after deleting the child.
@@ -130,7 +133,7 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   turn, so the checkpoint then waits, bounded by the caller's context, until every ended turn has
   made its fence call or returned. Only then is the second fence minted, the one the SUSPEND record
   is written under, so no turn on this host can fail the record after the parent is already cold.
-  The connections and the checkpoint mark are per session and shared by every Placer of a
+  The turns and the checkpoint are tracked per session and shared by every Placer of a
   `placement.Registry`, so a turn routed to a different harness by `ExecRequest.harness` is covered.
   If the context ends first, the fork aborts before it snapshots. `Suspend` waits the same way
   before it snapshots. A turn driven by another process is outside this: only the log fences it.
@@ -161,6 +164,63 @@ small memory image. The suite logs the fan-out time on every run.
 Read that as an existence proof, not a bound: it is one snapshot size on one sandbox class. How
 the cost scales with snapshot size, and whether a paused (node-local) parent changes it, has not
 been measured.
+
+## One operation at a time per session
+
+`Exec`, `Resume`, `Suspend` and a stateful `Fork` all act on one session's compute, and on substrate
+each of them can wake or capture the same actor. The Placer serializes them with a per-session state
+machine. Each entry point checks the session's state and takes its transition in one critical
+section, so no check can go stale before the operation it admits is visible to the others. The state
+is per session and shared by every Placer of a `placement.Registry`.
+
+```mermaid
+stateDiagram-v2
+  [*] --> idle
+  idle --> starting: Exec or Resume admitted
+  running --> starting: another Exec or Resume admitted
+  starting --> running: Create or Restore returned
+  starting --> idle: Create or Restore failed
+  running --> idle: last turn returned
+  idle --> checkpointing: Suspend or stateful Fork
+  running --> checkpointing: Suspend or stateful Fork, superseding the turns
+  checkpointing --> forking: Fork recorded its SUSPEND
+  checkpointing --> idle: Suspend done, or either one failed
+  forking --> idle: every child cloned, or the fan-out failed
+```
+
+| State | `Exec`, `Resume` | `Suspend`, stateful `Fork` |
+|---|---|---|
+| idle | admitted | begins |
+| starting (a turn's `Create` or `Restore` is in flight) | admitted | refused: `ErrTurnStarting` |
+| running (every turn is placed) | admitted | begins and supersedes the running turns |
+| checkpointing (`Suspend`, or a fork's source checkpoint) | refused: `ErrCheckpointing` | refused: `ErrCheckpointing` |
+| forking (cloning children from the checkpoint) | refused: `ErrCheckpointing` | refused: `ErrCheckpointing` |
+
+The contract:
+
+- **A refusal has no side effects and is retryable.** Nothing is provisioned, fenced or recorded.
+  `session.Service` reports both errors as `ABORTED` from every entry point.
+- **A turn is admitted before it places compute.** `Exec` takes its place before `Runtime.Create`
+  and `Resume` before it reads the SUSPEND ref and calls `Runtime.Restore`. A checkpoint therefore
+  sees every turn that could wake the actor, including one that has not reached the runtime yet.
+- **A checkpoint refuses a starting turn instead of superseding it.** A `Create` or `Restore` whose
+  context is cancelled can return while the runtime still completes it, waking compute the
+  checkpoint has just captured. So no call that wakes the session's compute overlaps a checkpoint of
+  it. Once the call returns, the turn is running and a checkpoint can supersede it.
+- **A checkpoint supersedes running turns.** It fences the log, ends their harness streams, and
+  waits until each has minted its fence or returned (see the fork constraints above). The superseded
+  turns return `ErrCheckpointing` wrapping `eventlog.ErrFenced`. Until they have returned the
+  session counts as running, even after the checkpoint ends.
+- **Checkpoints do not nest.** A second `Suspend`, or a `Fork` during a `Suspend`, is refused. So is
+  a `Suspend` during a fork's fan-out, which would replace (or with `Stop`, delete) the snapshot the
+  remaining children clone from. A failed fan-out releases the parent before it stops the children
+  it already created.
+- **Turns do not exclude each other.** Two `Exec` calls on one session are both admitted; the log's
+  fence and `expected_last_seq` CAS order them, as before.
+- **A stateless fork takes no state.** It leaves the parent's compute alone, so it neither waits for
+  nor blocks anything.
+- **The scope is one process.** A turn driven by another host is fenced by the log, not by this state
+  machine.
 
 ## Placing an actor is idempotent
 

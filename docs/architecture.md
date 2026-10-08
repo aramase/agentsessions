@@ -93,6 +93,10 @@ The `Placer` wires Sessions to the `Runtime` SPI and owns the incarnation lifecy
   `atenet-router` `host:port` for `runtime/substrate`, whose `ate-target-actor` metadata names the actor.
   Before a session is checkpointed the Placer closes its open harness streams, because substrate waits
   for an actor's in-flight requests to drain before it snapshots.
+- **Per-session serialization** — `Exec`, `Resume`, `Suspend` and a stateful `Fork` of one session
+  pass through a per-session state machine that admits each one or refuses it, retryably, so no turn
+  wakes compute a checkpoint is capturing. See
+  [One operation at a time per session](substrate-conformance.md#one-operation-at-a-time-per-session).
 - **Lifecycle map** — session `Suspend → Runtime.Snapshot`, `Resume → Runtime.Restore`, session-end
   `→ Runtime.Stop`.
 - **Fork** — capability-driven. A `STATELESS_REPLAY` session replay-forks (the child cold-boots and
