@@ -112,7 +112,15 @@ func eventComputeState(ev api.Event) (api.ComputeState, bool) {
 //
 // `created_at` follows the caller: an explicit CreatedAt is honored, and a zero one means "now on
 // insert, leave alone on update", so a later re-registration does not restamp a session as new.
-func (s *Store) PutSession(m SessionMeta) error {
+func (s *Store) PutSession(m SessionMeta) error { return s.putSession(s.db, m) }
+
+// execer is the part of *sql.DB and *sql.Tx that putSession needs, so the same upsert runs alone
+// or inside a transaction that first checks the session's harness.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func (s *Store) putSession(db execer, m SessionMeta) error {
 	if m.UID == "" {
 		return errors.New("sqlitelog: session metadata requires a uid")
 	}
@@ -128,7 +136,7 @@ func (s *Store) PutSession(m SessionMeta) error {
 	if !explicitCreated {
 		created = now
 	}
-	_, err := s.db.Exec(
+	_, err := db.Exec(
 		`INSERT INTO sessions(session, fence, project, name, harness, model,
 		                      parent_uid, fork_seq, compute_state, created_at, updated_at,
 		                      labels, annotations, origin, identity)

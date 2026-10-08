@@ -786,8 +786,11 @@ type ExecRequest struct {
 	// harness knows what resuming from a sequence means for its own state. To re-read committed
 	// records after a disconnect, use Replay, which is the read path for exactly that. Non-zero cursors
 	// are journaled in EXECUTION_START and restored during controller replay/interrupted resume.
-	ResumeFromSeq int64  `protobuf:"varint,3,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"`
-	Harness       string `protobuf:"bytes,4,opt,name=harness,proto3" json:"harness,omitempty"` // empty = session default
+	ResumeFromSeq int64 `protobuf:"varint,3,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"`
+	// Empty = the session's harness. A different harness runs this turn only, unless either one is
+	// a registered harness (see HarnessRegistry): then the session is pinned and the call is
+	// FAILED_PRECONDITION.
+	Harness string `protobuf:"bytes,4,opt,name=harness,proto3" json:"harness,omitempty"`
 	// Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled
 	// verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume.
 	// Do not put credentials here: config is durable journal content exposed by Replay.

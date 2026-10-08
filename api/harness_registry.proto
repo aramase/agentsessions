@@ -1,0 +1,163 @@
+// The HarnessRegistry admin API: register, inspect and retire harnesses on a running host.
+//
+// A registration is immutable. Its spec is content-addressed by spec_digest, so registering the
+// same spec under the same name again changes nothing, and a different spec under a taken name is
+// refused. Retiring a harness refuses new sessions on it while every existing session keeps
+// running, resuming and forking. Registering the identical spec again reactivates it.
+//
+// This service decides what the host dials and pays model calls for, so it is an operator
+// surface, not a client one. agentsessionsd does not serve it; see docs/security.md.
+syntax = "proto3";
+
+package agentsessions.v1;
+
+option go_package = "github.com/aramase/agentsessions/api/genpb;agentsessionsv1";
+
+import "common.proto";
+import "harness.proto";
+import "google/protobuf/timestamp.proto";
+
+enum HarnessState {
+  HARNESS_STATE_UNSPECIFIED = 0;
+  // New sessions may select it.
+  HARNESS_STATE_ACTIVE = 1;
+  // New sessions are refused with FAILED_PRECONDITION. Existing sessions keep Exec, Resume, Suspend
+  // and Fork; fork children inherit the harness and are not new selections.
+  HARNESS_STATE_RETIRED = 2;
+}
+
+enum HarnessSource {
+  HARNESS_SOURCE_UNSPECIFIED = 0;
+  // Built into the host or configured when it started. Never stored, always ACTIVE, and read-only
+  // through this API: its name cannot be registered or retired.
+  HARNESS_SOURCE_STATIC = 1;
+  // Created through RegisterHarness and stored in the host's journal database.
+  HARNESS_SOURCE_REGISTERED = 2;
+}
+
+// RemotePlacement is a harness already running at address, dialed over the Harness service.
+message RemotePlacement {
+  // unix:///path/to.sock or host:port.
+  string address = 1;
+}
+
+// SubstratePlacement runs each session in its own actor created from an ActorTemplate. A host
+// serves it only if it was built with a substrate placement backend; otherwise RegisterHarness
+// returns FAILED_PRECONDITION.
+message SubstratePlacement {
+  string atespace = 1;
+  // ActorTemplate name.
+  string template = 2;
+}
+
+// HarnessSpec is everything that decides what a session on this harness runs. It is the only
+// input to spec_digest, so nothing descriptive (labels, operation ids, timestamps) belongs here.
+message HarnessSpec {
+  // Exactly one is required.
+  oneof placement {
+    RemotePlacement remote = 1;
+    SubstratePlacement substrate = 2;
+  }
+  // The contract the harness declares. resumability is required. Placement still gates every turn
+  // on the capabilities the harness reports through Describe.
+  Capabilities capabilities = 3;
+  // Expected HarnessDescriptor.id. When set, Exec, Resume and Fork are refused with
+  // FAILED_PRECONDITION, before anything is journaled, if the harness's Describe reports a different
+  // id. It is checked on every call, not at registration. Empty means not checked. The id is what
+  // the harness reports about itself, so this catches an address that reaches the wrong harness; it
+  // is not authentication.
+  string descriptor_id = 4;
+}
+
+// HarnessRegistration is one entry in the host's harness registry.
+message HarnessRegistration {
+  // metadata.name is the key that Session.harness and ExecRequest.harness refer to. metadata.uid is
+  // server-assigned and stays the same across UNCHANGED and REACTIVATED. metadata.project is
+  // unused: a registration is host-scoped.
+  ResourceMetadata metadata = 1;
+  // Unset for a STATIC harness.
+  HarnessSpec spec = 2;
+  // "sha256:" followed by the lowercase hex SHA-256 of the RFC 8785 (JCS) form of spec's
+  // proto3-JSON mapping, with proto field names, enum names, and unpopulated fields omitted. This
+  // is the same canonical form the journal hashes. Empty for a STATIC harness.
+  string spec_digest = 3;
+  HarnessState state = 4;
+  HarnessSource source = 5;
+  // Set while RETIRED: when the harness was first retired.
+  google.protobuf.Timestamp retire_time = 6;
+  // Set while RETIRED: the reason given when the harness was first retired.
+  string retire_reason = 7;
+  // Set only when GetHarnessRequest.observe is true and Describe succeeded: what the harness
+  // reported just now. Never stored.
+  HarnessDescriptor observed = 8;
+  // Set only when GetHarnessRequest.observe is true and Describe failed: why.
+  string observe_error = 9;
+}
+
+enum RegisterOutcome {
+  REGISTER_OUTCOME_UNSPECIFIED = 0;
+  // The name was free; the registration is new and ACTIVE.
+  REGISTER_OUTCOME_CREATED = 1;
+  // The name already held this spec and was ACTIVE. Nothing changed.
+  REGISTER_OUTCOME_UNCHANGED = 2;
+  // The name already held this spec and was RETIRED. It is ACTIVE again.
+  REGISTER_OUTCOME_REACTIVATED = 3;
+}
+
+message RegisterHarnessRequest {
+  // An RFC 1123 DNS label: lowercase alphanumerics and '-', starting and ending alphanumeric, at
+  // most 63 characters.
+  string name = 1;
+  HarnessSpec spec = 2;
+}
+
+message RegisterHarnessResponse {
+  HarnessRegistration harness = 1;
+  RegisterOutcome outcome = 2;
+}
+
+message GetHarnessRequest {
+  string name = 1;
+  // Also ask the harness to Describe itself, bounded by a host timeout. The result is in observed
+  // or observe_error; a failed Describe does not fail the call.
+  bool observe = 2;
+}
+
+message ListHarnessesRequest {
+  // Maximum entries per page. 0 means 50; values above 500 are clamped to 500. Negative is
+  // INVALID_ARGUMENT.
+  int32 page_size = 1;
+  // Opaque cursor from a prior ListHarnessesResponse.next_page_token. Empty means the first page.
+  string page_token = 2;
+  // Include RETIRED entries. STATIC entries are always included.
+  bool include_retired = 3;
+}
+
+message ListHarnessesResponse {
+  // In name order, STATIC and REGISTERED entries together.
+  repeated HarnessRegistration harnesses = 1;
+  // Empty on the last page.
+  string next_page_token = 2;
+}
+
+message RetireHarnessRequest {
+  string name = 1;
+  // Recorded on the first retire only.
+  string reason = 2;
+}
+
+// HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
+// that can register a harness decides where the host sends session history and whose model calls it
+// pays for.
+service HarnessRegistry {
+  // Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec,
+  // or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve
+  // the placement.
+  rpc RegisterHarness(RegisterHarnessRequest) returns (RegisterHarnessResponse);
+  // NOT_FOUND for a name that is neither STATIC nor registered.
+  rpc GetHarness(GetHarnessRequest) returns (HarnessRegistration);
+  rpc ListHarnesses(ListHarnessesRequest) returns (ListHarnessesResponse);
+  // Idempotent: retiring a RETIRED harness returns it unchanged. FAILED_PRECONDITION for a STATIC
+  // harness; NOT_FOUND for an unknown name.
+  rpc RetireHarness(RetireHarnessRequest) returns (HarnessRegistration);
+}

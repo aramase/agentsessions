@@ -263,7 +263,8 @@ func TestOpenWaitsOutAConcurrentInitializer(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "contended.db")
 
 	// Stand in for an opener that has created the schema and still holds the write lock, on a
-	// database that is not in WAL mode yet.
+	// database that is not in WAL mode yet. The table carries every column a migration rung
+	// indexes, as a real opener's would; the rest of the schema does not matter here.
 	holder, err := sql.Open("sqlite", "file:"+path+"?_txlock=immediate")
 	if err != nil {
 		t.Fatalf("open holder: %v", err)
@@ -274,6 +275,7 @@ func TestOpenWaitsOutAConcurrentInitializer(t *testing.T) {
 	  session    TEXT PRIMARY KEY,
 	  fence      INTEGER NOT NULL DEFAULT 0,
 	  project    TEXT    NOT NULL DEFAULT '',
+	  harness    TEXT    NOT NULL DEFAULT '',
 	  created_at INTEGER NOT NULL DEFAULT 0
 	)`); err != nil {
 		t.Fatalf("holder schema: %v", err)

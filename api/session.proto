@@ -124,7 +124,10 @@ message ExecRequest {
   // records after a disconnect, use Replay, which is the read path for exactly that. Non-zero cursors
   // are journaled in EXECUTION_START and restored during controller replay/interrupted resume.
   int64 resume_from_seq = 3;
-  string harness = 4;        // empty = session default
+  // Empty = the session's harness. A different harness runs this turn only, unless either one is
+  // a registered harness (see HarnessRegistry): then the session is pinned and the call is
+  // FAILED_PRECONDITION.
+  string harness = 4;
   // Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled
   // verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume.
   // Do not put credentials here: config is durable journal content exposed by Replay.
