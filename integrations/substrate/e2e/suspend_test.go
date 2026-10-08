@@ -8,15 +8,18 @@ import (
 	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/placement"
+	"github.com/aramase/agentsessions/runtime/substrate"
 )
 
 // TestSuspendUnderAnIdleHarnessStream checkpoints a session while its turn is parked on a model call,
 // so its Connect stream is open and idle through the router. The worker drains an actor's in-flight
 // requests before it snapshots, and that stream is one of them.
 //
-// It runs the checkpoint twice on separate sessions: once straight through the Runtime with the
-// stream left open (what the Placer did before it closed streams first), recorded for comparison
-// only, and once through Placer.Suspend, which must close the stream and then succeed promptly.
+// It checkpoints through Placer.Suspend, which must close the stream first and then succeed promptly.
+// With E2E_SUSPEND_BASELINE=1 it first checkpoints another session straight through the Runtime with
+// the stream left open, which is what the Placer did before, and records how long that takes. It is
+// opt-in because it is slow: on a kind cluster at substrate 362637f9 it took 5m30s, i.e. the suspend
+// waited until the router gave up on the stream.
 func TestSuspendUnderAnIdleHarnessStream(t *testing.T) {
 	f := newFixture(t, env("SUBSTRATE_ATESPACE", "e2e-suspend-idle"))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -49,7 +52,37 @@ func TestSuspendUnderAnIdleHarnessStream(t *testing.T) {
 		}
 	}
 
-	// Baseline: checkpoint through the Runtime while the stream stays open.
+	if env("E2E_SUSPEND_BASELINE", "") == "1" {
+		suspendBaseline(ctx, t, backend, parkingModel)
+	}
+
+	// Placer.Suspend closes the session's streams first.
+	session := uniqueUID("suspend-placer")
+	called := make(chan struct{})
+	p := placement.New(backend, parkingModel(called))
+	log := journal(t).Session(session)
+	done := park(p, log, session, called)
+	start := time.Now()
+	if _, err := p.Suspend(ctx, log, session); err != nil {
+		t.Fatalf("Placer.Suspend with a parked turn: %v", err)
+	}
+	took := time.Since(start)
+	t.Logf("PLACER: Suspend with a parked turn took %s (stream closed first)", took.Round(time.Millisecond))
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("the parked turn reported success after its session was suspended")
+		}
+		t.Logf("parked turn ended with: %v", err)
+	case <-time.After(time.Minute):
+		t.Fatal("the parked turn never returned after its stream was closed")
+	}
+}
+
+// suspendBaseline checkpoints a session through the Runtime while its turn's stream stays open and
+// idle, and logs how long the suspend takes.
+func suspendBaseline(ctx context.Context, t *testing.T, backend *substrate.Backend, parkingModel func(chan struct{}) func(context.Context, api.ModelRequest) (api.ModelResponse, error)) {
+	t.Helper()
 	rawSession := uniqueUID("suspend-raw")
 	rawCalled := make(chan struct{})
 	rawCtx, rawCancel := context.WithCancel(ctx)
@@ -72,26 +105,4 @@ func TestSuspendUnderAnIdleHarnessStream(t *testing.T) {
 	rawCancel()
 	<-rawDone
 	stopQuietly(t, backend, rawSession)
-
-	// Placer.Suspend closes the session's streams first.
-	session := uniqueUID("suspend-placer")
-	called := make(chan struct{})
-	p := placement.New(backend, parkingModel(called))
-	log := journal(t).Session(session)
-	done := park(p, log, session, called)
-	start = time.Now()
-	if _, err := p.Suspend(ctx, log, session); err != nil {
-		t.Fatalf("Placer.Suspend with a parked turn: %v", err)
-	}
-	took := time.Since(start)
-	t.Logf("PLACER: Suspend with a parked turn took %s (stream closed first)", took.Round(time.Millisecond))
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("the parked turn reported success after its session was suspended")
-		}
-		t.Logf("parked turn ended with: %v", err)
-	case <-time.After(time.Minute):
-		t.Fatal("the parked turn never returned after its stream was closed")
-	}
 }

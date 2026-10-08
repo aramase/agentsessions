@@ -2,15 +2,17 @@ package e2e
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/aramase/agentsessions/api"
-	"github.com/aramase/agentsessions/harness/echoagent"
-	"github.com/aramase/agentsessions/placement"
+	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/wire"
 )
 
 // TestHarnessStreamIdlePastRouteTimeout holds one harnesswire Connect stream open and idle through
@@ -18,8 +20,12 @@ import (
 // way a turn parked on a slow model call does: the harness has sent its model call and waits for the
 // host's reply, and nothing crosses the stream until the host answers.
 //
-// It records what the router does to such a stream. It is opt-in because it runs for the whole gap:
-// set E2E_IDLE_GAP (for example 5m30s) to run it.
+// It drives the stream with a raw harnesswire client rather than the Placer so it can keep a Recv
+// pending the whole time and timestamp the moment the stream ends. (The Placer does not read while
+// the model call is in flight, so through it the turn only fails when the host next sends.)
+//
+// It records what the router does to such a stream and fails only on a hang. It is opt-in because it
+// runs for the whole gap: set E2E_IDLE_GAP (for example 5m30s) to run it.
 func TestHarnessStreamIdlePastRouteTimeout(t *testing.T) {
 	gapSetting := env("E2E_IDLE_GAP", "")
 	if gapSetting == "" {
@@ -36,50 +42,79 @@ func TestHarnessStreamIdlePastRouteTimeout(t *testing.T) {
 	desc := api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}
 	backend := f.backend(t, echoTemplateSpec, desc)
 	session := uniqueUID("idle")
-	log := journal(t).Session(session)
-
-	// The model call is where the stream sits idle: the host holds the harness's model call for the
-	// whole gap before it replies.
-	var answeredAfter time.Duration
-	var modelStart time.Time
-	slowModel := func(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
-		modelStart = time.Now()
-		select {
-		case <-time.After(gap):
-		case <-ctx.Done():
-			return api.ModelResponse{}, context.Cause(ctx)
-		}
-		answeredAfter = time.Since(modelStart)
-		return echoagent.Model(ctx, req)
-	}
-	p := placement.New(backend, slowModel)
-
-	start := time.Now()
-	inc, err := p.Exec(ctx, log, session, []api.Message{*api.TextMessage("user", "idle")}, 0)
-	elapsed := time.Since(start)
+	inc, err := backend.Create(ctx, &api.SessionSpec{SessionUID: session})
 	if inc.ID != "" {
 		defer stopQuietly(t, backend, inc.ID)
 	}
-	if ctx.Err() != nil {
-		t.Fatalf("the turn was still running when the test deadline expired after %s: a stream the router "+
-			"tore down must surface as an error, not a hang", elapsed.Round(time.Second))
+	if err != nil {
+		t.Fatalf("place actor: %v", err)
 	}
 
-	if err == nil {
-		t.Logf("OUTCOME: stream survived. Idle gap %s, model answered after %s, turn completed in %s, output %q",
-			gap, answeredAfter.Round(time.Second), elapsed.Round(time.Second), lastOutput(t, log))
+	conn, err := grpc.NewClient(inc.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	streamCtx := metadata.NewOutgoingContext(ctx, metadata.New(inc.CallMetadata))
+	stream, err := v1.NewHarnessClient(conn).Connect(streamCtx)
+	if err != nil {
+		t.Fatalf("open Connect through the router: %v", err)
+	}
+	const execID = "idle-exec"
+	if err := stream.Send(&v1.ControllerFrame{
+		ExecutionId: execID,
+		Frame: &v1.ControllerFrame_Start{Start: &v1.Start{
+			Inputs: []*v1.Message{wire.MessageToProto(api.TextMessage("user", "idle"))},
+		}},
+	}); err != nil {
+		t.Fatalf("send Start: %v", err)
+	}
+	call, err := stream.Recv()
+	if err != nil || call.GetKind() != v1.EventKind_EVENT_MODEL_CALL {
+		t.Fatalf("want the harness's model call, got %v, err=%v", call, err)
+	}
+	idleSince := time.Now()
+	t.Logf("harness sent its model call; holding the stream idle for %s", gap)
+
+	type recvResult struct {
+		ev  *v1.Event
+		err error
+		at  time.Duration
+	}
+	ended := make(chan recvResult, 1)
+	go func() {
+		ev, err := stream.Recv()
+		ended <- recvResult{ev: ev, err: err, at: time.Since(idleSince)}
+	}()
+
+	select {
+	case r := <-ended:
+		st, _ := status.FromError(r.err)
+		t.Logf("OUTCOME: stream torn down while idle, after %s. grpc code=%s message=%q (event=%v)",
+			r.at.Round(time.Second), st.Code(), st.Message(), r.ev)
+		if r.err == nil {
+			t.Fatalf("the harness sent %v unprompted while waiting for its model result", r.ev)
+		}
 		return
+	case <-time.After(gap):
+	case <-ctx.Done():
+		t.Fatal("test deadline expired while the stream was idle")
 	}
-	idleFor := time.Duration(0)
-	if !modelStart.IsZero() {
-		idleFor = time.Since(modelStart)
+
+	// Still open after the gap: answer the model call and require the turn to finish normally.
+	if err := stream.Send(&v1.ControllerFrame{
+		ExecutionId: execID,
+		Frame: &v1.ControllerFrame_Model{Model: &v1.ModelResult{
+			ModelCallId: call.GetModel().GetId(),
+			Message:     wire.MessageToProto(api.TextMessage("assistant", "late")),
+		}},
+	}); err != nil {
+		t.Fatalf("stream looked open after %s but the reply failed: %v", gap, err)
 	}
-	var code string
-	if s, ok := status.FromError(errors.Unwrap(err)); ok {
-		code = s.Code().String()
-	} else if s, ok := status.FromError(err); ok {
-		code = s.Code().String()
+	select {
+	case r := <-ended:
+		t.Logf("OUTCOME: stream survived %s idle; after the reply the harness sent %v (err=%v)", gap, r.ev.GetKind(), r.err)
+	case <-time.After(time.Minute):
+		t.Fatal("the harness did not finish within a minute of a late model reply")
 	}
-	t.Logf("OUTCOME: stream torn down. Idle gap %s, turn failed after %s (stream idle %s), grpc code %q, error: %v",
-		gap, elapsed.Round(time.Second), idleFor.Round(time.Second), code, err)
 }
