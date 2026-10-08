@@ -5,7 +5,7 @@
 // /readyz on :8081 lets ResumeActor block until the harness is live (ActorTemplate readyz probe).
 //
 // This is the substrate realization of the harness half of the step-6 dial path: the transport moves
-// from a unix socket to the actor's mesh DNS; the harnesswire server is unchanged.
+// from a unix socket to atenet-router, which forwards to this port; the harnesswire server is unchanged.
 package main
 
 import (
