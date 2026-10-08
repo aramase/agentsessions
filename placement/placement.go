@@ -241,6 +241,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 
 	fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
 	fence, err := log.NewFence()
+	live.fenceMinted()
 	if err != nil {
 		fenceFinished(err, "error_kind", "new_fence_failed")
 		return inc, err
@@ -455,6 +456,16 @@ type liveHarness struct {
 	// that checkpoint mints its fence. A turn whose fence is newer than the checkpoint's is not
 	// fenced by it, but is guaranteed to observe this flag, so it checks the flag after minting.
 	superseded atomic.Bool
+	// minted is closed once the turn can no longer mint a fence: right after its one NewFence call
+	// returns, or when the turn releases the connection without having made it. A checkpoint waits
+	// on it so that no turn's fence can land after the fence the checkpoint records under.
+	minted     chan struct{}
+	mintedOnce sync.Once
+}
+
+// fenceMinted records that the turn has made its one NewFence call, successful or not.
+func (l *liveHarness) fenceMinted() {
+	l.mintedOnce.Do(func() { close(l.minted) })
 }
 
 // checkSuperseded fails with errSuperseded if a checkpoint has claimed this connection or already
@@ -492,7 +503,7 @@ func (p *Placer) openHarness(ctx context.Context, sessionUID string, inc api.Inc
 		return ctx, nil, err
 	}
 	ctx, cancel := context.WithCancelCause(ctx)
-	l := &liveHarness{harness: har, cancel: cancel, close: closeHarness}
+	l := &liveHarness{harness: har, cancel: cancel, close: closeHarness, minted: make(chan struct{})}
 	p.mu.Lock()
 	if p.checkpoints[sessionUID] > 0 {
 		p.mu.Unlock()
@@ -519,6 +530,7 @@ func (p *Placer) releaseHarness(ctx context.Context, sessionUID, incarnationID s
 		delete(p.live, sessionUID)
 	}
 	p.mu.Unlock()
+	l.fenceMinted() // a turn that returns before minting never will
 	finish := observability.StartDebug(context.WithoutCancel(ctx), p.logger, "placement", "close_harness",
 		"session_uid", sessionUID,
 		"incarnation_id", incarnationID,
@@ -578,22 +590,42 @@ func (p *Placer) endCheckpoint(sessionUID string) {
 // ERROR for an interruption the host caused, and it returns errSuperseded. A turn that minted a newer
 // fence in between is stopped by the superseded mark beginCheckpoint set (checkSuperseded).
 //
+// Ending a stream only cancels the turn's context, and a turn that registered but has not yet
+// minted its fence still mints one. So endHarnesses then waits, bounded by ctx, until every ended
+// turn has made its fence call or returned. After it returns nil, no turn of this Placer can mint a
+// fence on the session, and the fence the caller mints next is the newest one the checkpoint will
+// see. If ctx ends first, it returns an error and the caller must abort before checkpointing.
+//
 // It covers connections opened by THIS Placer only. A turn driven by another process is fenced by
 // the log as before, but its stream stays open until that turn next touches the log or returns.
-func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*liveHarness) {
+func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*liveHarness) (err error) {
 	if len(open) == 0 {
-		return
+		return nil
 	}
 	finish := observability.StartDebug(ctx, p.logger, "placement", "end_harness_streams",
 		"session_uid", sessionUID,
 		"connections", len(open),
 	)
-	var errs []error
+	var closeErrs []error
 	for _, l := range open {
-		errs = append(errs, l.end(errSuperseded))
+		closeErrs = append(closeErrs, l.end(errSuperseded))
 	}
-	err := errors.Join(errs...)
-	finish(err, "error_kind", closeErrorKind(err))
+	defer func() {
+		if err != nil {
+			finish(err, "error_kind", "superseded_turn_not_settled")
+			return
+		}
+		closeErr := errors.Join(closeErrs...)
+		finish(closeErr, "error_kind", closeErrorKind(closeErr))
+	}()
+	for _, l := range open {
+		select {
+		case <-l.minted:
+		case <-ctx.Done():
+			return fmt.Errorf("placement: waiting for the superseded turn on session %q to finish minting its fence: %w", sessionUID, context.Cause(ctx))
+		}
+	}
+	return nil
 }
 
 // Suspend snapshots the incarnation to external storage, records the SnapshotRef in a SUSPEND
@@ -616,13 +648,15 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	open := p.beginCheckpoint(sessionUID)
 	defer p.endCheckpoint(sessionUID)
 	// Fence before ending the streams, as a stateful fork does, so the turn being ended cannot write
-	// an ERROR record for an interruption the host caused. The SUSPEND append below mints a fresh
-	// fence again: a turn that registered before the checkpoint began may still mint its own after
-	// this one, and the suspend must not lose its append to it.
+	// an ERROR record for an interruption the host caused. A turn that registered before the
+	// checkpoint began may still mint its own fence after this one; endHarnesses waits until it has,
+	// so the fence the SUSPEND append mints below is newer than every local turn's.
 	if _, err := log.NewFence(); err != nil {
 		return api.SnapshotRef{}, err
 	}
-	p.endHarnesses(ctx, sessionUID, open)
+	if err := p.endHarnesses(ctx, sessionUID, open); err != nil {
+		return api.SnapshotRef{}, err
+	}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, err
@@ -689,6 +723,7 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	fenceFinished := observability.StartDebug(ctx, p.logger, "placement", "mint_fence", "session_uid", sessionUID)
 	fence, err := log.NewFence()
+	live.fenceMinted()
 	if err != nil {
 		fenceFinished(err, "error_kind", "new_fence_failed")
 		return err
@@ -889,12 +924,14 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if atSeq != head {
 		return api.SnapshotRef{}, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
 	}
-	p.endHarnesses(ctx, parentUID, open)
-	// A turn this Placer had open may have minted a newer fence between ours and endHarnesses. It
-	// wrote nothing (checkSuperseded), but its fence would leave ours stale and fail the SUSPEND
-	// append after the parent is already cold. Every local stream is ended and no new one can open,
-	// so mint the fence the record is written under now, and re-check the head while aborting is
-	// still free.
+	if err := p.endHarnesses(ctx, parentUID, open); err != nil {
+		return api.SnapshotRef{}, err
+	}
+	// A turn this Placer had open may have minted a newer fence after ours. It wrote nothing
+	// (checkSuperseded), but its fence would leave ours stale and fail the SUSPEND append after the
+	// parent is already cold. endHarnesses returned only once every such turn had minted, and no new
+	// turn can open, so mint the fence the record is written under now, and re-check the head while
+	// aborting is still free.
 	fence, err := parent.NewFence()
 	if err != nil {
 		return api.SnapshotRef{}, err

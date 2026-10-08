@@ -74,6 +74,9 @@ provide.
   harness streams before checkpointing, and refuse new turns on that session until the checkpoint
   is recorded, so nothing holds the checkpoint up. On kind, a suspend under an idle stream took
   5m30s before this change and 131ms after. Two behavior changes follow:
+  - Before it snapshots, the checkpoint waits until every turn whose stream it closed has minted
+    its fence or returned, bounded by the caller's context. If the context ends first, the
+    checkpoint fails before snapshotting and records nothing.
   - An attempted `Suspend` supersedes the in-flight turn even if the checkpoint then fails.
     Previously a failed checkpoint left the turn running to completion. Now the turn stops as an
     incomplete execution (the same record a successful suspend leaves; no `ERROR` event), the

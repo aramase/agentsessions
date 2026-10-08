@@ -598,3 +598,168 @@ func testCheckpointSupersedesNewerFence(t *testing.T, checkpoint func(*placement
 		t.Fatalf("journal %v does not end in the checkpoint's SUSPEND", kinds)
 	}
 }
+
+// lateFenceStore holds the turn's fence mint (call 1) past the checkpoint's first fence (call 2).
+// The turn is let go either when the checkpoint asks for its next fence, the one its record is
+// written under, or after lateFenceDelay, whichever is first. When the next fence comes first, it is
+// minted BEFORE the turn's, which is the ordering that stales the checkpoint's record. A checkpoint
+// that waits for its ended turns to mint never asks for that fence while the turn is held, so only
+// the delay can let the turn go and the record fence is minted last.
+type lateFenceStore struct {
+	eventlog.Store
+
+	mu          sync.Mutex
+	fences      int
+	turnAtFence chan struct{} // closed when the turn asks for its fence
+	release     chan struct{} // closed to let the turn mint
+	releaseOnce sync.Once
+	turnMinted  chan struct{} // closed once the turn's fence is minted
+}
+
+const lateFenceDelay = 300 * time.Millisecond
+
+func (g *lateFenceStore) letTurnMint() { g.releaseOnce.Do(func() { close(g.release) }) }
+
+func (g *lateFenceStore) NewFence() (int64, error) {
+	g.mu.Lock()
+	g.fences++
+	n := g.fences
+	g.mu.Unlock()
+	switch n {
+	case 1: // the turn's
+		close(g.turnAtFence)
+		<-g.release
+		defer close(g.turnMinted)
+		return g.Store.NewFence()
+	case 2: // the checkpoint's first, minted before it ends the turn's stream
+		time.AfterFunc(lateFenceDelay, g.letTurnMint)
+		return g.Store.NewFence()
+	default: // the fence the checkpoint's record is written under
+		f, err := g.Store.NewFence()
+		g.letTurnMint()
+		select {
+		case <-g.turnMinted:
+		case <-time.After(10 * time.Second):
+		}
+		return f, err
+	}
+}
+
+// Ending a turn's stream only cancels its context. A turn that registered but had not yet minted its
+// fence still mints one, and if that lands after the fence the checkpoint records under, the record
+// fails after the compute is already checkpointed. The checkpoint must wait for the turn to mint.
+func TestSuspendWaitsForAnEndedTurnToMintBeforeRecording(t *testing.T) {
+	testCheckpointWaitsForLateFence(t, func(p *placement.Placer, log eventlog.Store, uid string) error {
+		_, err := p.Suspend(context.Background(), log, uid)
+		return err
+	})
+}
+
+func TestForkWaitsForAnEndedParentTurnToMintBeforeRecording(t *testing.T) {
+	testCheckpointWaitsForLateFence(t, func(p *placement.Placer, log eventlog.Store, uid string) error {
+		head, err := log.Head()
+		if err != nil {
+			return err
+		}
+		store, err := sqlitelog.Open(":memory:")
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		return p.Fork(context.Background(), log, uid, []placement.ForkChild{{UID: uid + "-child", Log: store.Session(uid + "-child")}}, head)
+	})
+}
+
+func testCheckpointWaitsForLateFence(t *testing.T, checkpoint func(*placement.Placer, eventlog.Store, string) error) {
+	t.Helper()
+	hs := startHarnessServer(t, echoagent.Harness{})
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	log := &lateFenceStore{
+		Store:       store.Session("s1"),
+		turnAtFence: make(chan struct{}),
+		release:     make(chan struct{}),
+		turnMinted:  make(chan struct{}),
+	}
+	backend := &routedBackend{address: hs.addr, desc: memDescriptor}
+	p := placement.New(backend, echoagent.Model)
+
+	turnDone := make(chan struct{})
+	var execErr error
+	go func() {
+		defer close(turnDone)
+		_, execErr = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+	}()
+	select {
+	case <-log.turnAtFence:
+	case <-turnDone:
+		t.Fatalf("turn returned before minting its fence: %v", execErr)
+	}
+	var turnMintedBeforeSnapshot bool
+	backend.onSnapshot = func() {
+		select {
+		case <-log.turnMinted:
+			turnMintedBeforeSnapshot = true
+		default:
+		}
+	}
+	if err := checkpoint(p, log, "s1"); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	<-turnDone
+	if !turnMintedBeforeSnapshot {
+		t.Fatal("the checkpoint snapshotted while the superseded turn could still mint a fence")
+	}
+	if !errors.Is(execErr, placement.ErrCheckpointing) || !errors.Is(execErr, eventlog.ErrFenced) {
+		t.Fatalf("superseded turn returned %v, want ErrCheckpointing and eventlog.ErrFenced", execErr)
+	}
+	kinds := journalKinds(t, log)
+	if len(kinds) != 1 || kinds[0] != api.EventLifecycle {
+		t.Fatalf("journal %v, want only the checkpoint's SUSPEND", kinds)
+	}
+}
+
+// The wait is bounded by the caller's context. When it ends first the checkpoint aborts before it
+// snapshots, and nothing is recorded, so the session stays live.
+func TestSuspendAbortsBeforeSnapshotWhenAnEndedTurnDoesNotMintInTime(t *testing.T) {
+	hs := startHarnessServer(t, echoagent.Harness{})
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := &lateFenceStore{
+		Store:       store.Session("s1"),
+		turnAtFence: make(chan struct{}),
+		release:     make(chan struct{}),
+		turnMinted:  make(chan struct{}),
+	}
+	backend := &routedBackend{address: hs.addr, desc: memDescriptor}
+	p := placement.New(backend, echoagent.Model)
+
+	turnDone := make(chan struct{})
+	go func() {
+		defer close(turnDone)
+		_, _ = p.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+	}()
+	<-log.turnAtFence
+	ctx, cancel := context.WithTimeout(context.Background(), lateFenceDelay/6)
+	defer cancel()
+	if _, err := p.Suspend(ctx, log, "s1"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Suspend returned %v, want context.DeadlineExceeded", err)
+	}
+	<-turnDone
+	backend.mu.Lock()
+	snapshots := backend.snapshots
+	backend.mu.Unlock()
+	if snapshots != 0 {
+		t.Fatalf("Suspend took %d snapshot(s) after giving up on the turn", snapshots)
+	}
+	if kinds := journalKinds(t, log); len(kinds) != 0 {
+		t.Fatalf("journal %v, want nothing recorded for the aborted Suspend", kinds)
+	}
+}
