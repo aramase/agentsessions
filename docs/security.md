@@ -73,10 +73,10 @@ Until this is closed, run the substrate backend only in a cluster where every wo
 reach the router is trusted, or restrict the router with a NetworkPolicy that admits only the
 `agentsessions` host.
 
-TODO: authenticate the host to the harness, for example a per-session credential delivered at
-actor creation and checked by `harnessnode` on every Connect, so a harness talks only to its own
-session's host whatever the ingress allows. Router-side caller authorization (T-04) belongs upstream
-in substrate and would complement it, not replace it.
+Not yet implemented: the harness does not authenticate the host. A planned fix delivers a per-session
+credential at actor creation and has `harnessnode` check it on every Connect, so a harness talks only
+to its own session's host whatever the ingress allows. Router-side caller authorization (T-04)
+belongs upstream in substrate and would complement it, not replace it.
 
 **The harness is trusted code.** The host mediates model calls and host-executed tools, which is what
 makes replay exact, but that is a determinism mechanism, not a containment one. Whatever isolation a
