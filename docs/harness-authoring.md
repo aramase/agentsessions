@@ -248,8 +248,9 @@ Notes:
 
 `chatagent.Harness{Model: "your-model-id"}` is a small, text-only `api.Harness` with descriptor ID
 `chat`. It declares `STATELESS_REPLAY` and `ForkSafe`, retaining no durable in-memory state.
-Each turn it retains the messages from prior `EVENT_INPUT` and `EVENT_OUTPUT` events in
-`Start.History`, in journal order, then appends every current `Start.Inputs` message exactly once.
+Each turn it optionally prepends a system message from `Start.Config`, retains the messages from
+prior `EVENT_INPUT` and `EVENT_OUTPUT` events in `Start.History`, in journal order, then appends
+every current `Start.Inputs` message exactly once.
 Audit and lifecycle events (`MODEL_CALL`, `END`, `ERROR`, `LIFECYCLE`, and other non-conversation
 events) do not enter model context.
 
@@ -266,6 +267,62 @@ adapter, model routing, or streaming logic.
 **The full recorded conversation is sent on every turn.** This is a simple reference context
 policy, not a scalable context-window strategy: there is no truncation or summarization, and long
 conversations can exceed a model's context window.
+
+### Per-execution system prompt
+
+Chat reads an optional JSON object from `Start.Config` (the bytes in `ExecRequest.config`):
+
+```json
+{"system_prompt":"Answer concisely and explain unfamiliar terms."}
+```
+
+A non-empty `system_prompt` adds exactly one `system` text message **before** the prior conversation
+and current inputs. Its string is used as decoded from JSON, including whitespace and newlines. No config,
+zero-length config, `{}`, an omitted field, or `"system_prompt":""` leaves the model request
+unchanged. Unknown fields are ignored for forward compatibility; the field name is case-sensitive.
+Malformed JSON, trailing JSON or other tokens, non-object values (including top-level `null`), and
+non-string `system_prompt` values (including `null`) fail the execution before a model call. Errors
+use fixed diagnostics, never the supplied config or prompt.
+
+A rejected config leaves the turn incomplete. Every Resume retries that turn with the same
+journaled config and fails again; recovery requires a new Exec with valid config. The rejected
+turn's input remains in conversation history for that new Exec and later turns, without an
+assistant reply. A new Exec supersedes the incomplete turn for subsequent Resume calls; it does
+not remove the rejected input from history.
+
+This is **per execution**, not a session default. Supply it on each new turn that needs the
+instruction; omitting it does not reuse a previous turn's config. A fork's new turn likewise uses
+only that new execution's config. Replay/re-drive of an existing execution uses that execution's
+journaled config to reproduce its original request. The config-derived message is not a separate
+conversation INPUT/OUTPUT event and is not accumulated from earlier turns. Caller-supplied `system`
+messages in prior inputs or current inputs remain in place: this option does not replace or remove
+them, or establish a trusted instruction boundary.
+
+The convenience `client.ExecOptions` and `agentctl` have no config option. Use the existing generated
+Sessions stub (`v1` is `github.com/aramase/agentsessions/api/genpb`) to set the bytes directly:
+
+```go
+req := &v1.ExecRequest{
+    Session: "<session-uid>", // omit to create a session for this turn
+    Harness: "chat",
+    Config:  []byte(`{"system_prompt":"Answer concisely."}`),
+    Inputs: []*v1.Message{{
+        Role: "user",
+        Parts: []*v1.Part{{
+            Part: &v1.Part_Text{Text: &v1.TextPart{Text: "What is a prime number?"}},
+        }},
+    }},
+}
+```
+
+Pass `req` to `SessionsClient.Exec` (or `client.Client.Sessions().Exec`) and drain the stream to
+completion, as for any execution. Supply config through the generated `ExecRequest.Config` field,
+not `client.ExecOptions`; no additional environment variable or session setting is needed.
+
+**Config is journaled in plaintext for deterministic replay.** Treat prompts as recorded
+instructions, not credentials; keep provider keys on the host. A system prompt grants no
+authentication or authorization. The reference transport is also plaintext and unauthenticated
+(see [security.md](security.md)).
 
 ### Run chat through the reference server
 
@@ -386,6 +443,85 @@ same `api.Harness` contract over the `Harness.Connect` bidi gRPC stream, and `ha
 two. The `EventSink` you code against is identical whether you are in-process or across the wire, so
 model mediation and record-before-effect hold across the process boundary unchanged. You never see the
 gRPC stream or sequence numbers; the SDK handles them.
+
+Serve it the way `cmd/harnessnode` does, registering your harness on a listener of your own. Bind
+loopback unless the host is on another machine: whatever answers at this address is trusted by the
+host, over cleartext (see [security](security.md)).
+
+```go
+lis, err := net.Listen("tcp", "127.0.0.1:8090")
+if err != nil {
+    return err
+}
+srv := grpc.NewServer()
+v1.RegisterHarnessServer(srv, harnesswire.NewServer(myHarness{}))
+return srv.Serve(lis)
+```
+
+Then point a host at it. `agentsessionsd` takes a repeatable `--harness name=address`, so registering
+your harness does not mean rebuilding the server. The address is one of:
+
+- `host:port`, or `dns:///host:port` (`dns://resolver/host:port` names the DNS server to ask, as
+  an IP address or host name with an optional port);
+- a unix socket path after `unix:` or `unix://`, absolute (`unix:///run/h.sock`) or relative to
+  the server's working directory (`unix:h.sock`, `unix://h.sock`).
+
+Any other form, such as `http://host:port`, a host with no port, a unix address with no socket path
+(`unix://`, `unix:///`), a `dns:` address gRPC cannot parse (`dns://%/127.0.0.1:9000`), or a host
+named like a gRPC resolver scheme (`passthrough:8080`; write `dns:///passthrough:8080`), stops the server at startup rather than failing every call on that
+harness later.
+
+The host mediates your harness's model calls, so `--harness` requires `--model`. Without it the
+host would answer those calls with its built-in echo stub and journal the result as if a model had
+produced it, so it refuses to start instead:
+
+```bash
+agentsessionsd --addr 127.0.0.1:8080 --model "$MODEL" --harness mine=127.0.0.1:8090
+```
+
+```
+agentsessionsd listening harnesses="[chat echo mine]" default_harness=echo
+```
+
+Sessions choose it by name, and everything else behaves as it does for a built-in harness:
+
+```bash
+SID=$(agentctl create --server 127.0.0.1:8080 --harness mine)
+agentctl exec --server 127.0.0.1:8080 --session "$SID" --input "hello"
+agentctl replay --server 127.0.0.1:8080 --session "$SID"
+```
+
+Consequences of the host not owning your process:
+
+- It cannot capture your memory, so a harness registered this way must be `STATELESS_REPLAY`. The
+  host asks the harness to describe itself on every exec, resume, and fork, and refuses a
+  `REQUIRES_MEMORY_SNAPSHOT` harness with `FAILED_PRECONDITION` before anything is journaled. That
+  includes a resume after a different harness started answering at the address. A
+  `REQUIRES_MEMORY_SNAPSHOT` harness belongs on a backend that owns the sandbox, such as
+  `runtime/substrate`. The host asks again on the connection that runs the turn, so behind a load
+  balancer that picks a replica per connection (a Kubernetes Service, for instance), a turn is
+  refused if the replica that answers on that connection declares `REQUIRES_MEMORY_SNAPSHOT`, even
+  if the one that answered first did not. That check is not bound to the turn's `Connect` stream: if a
+  different harness takes over the address between `Describe` and `Connect` (a restart, a
+  reconnect to another replica, or a proxy that balances each gRPC request separately), the turn
+  runs on it and the host does not detect it. Every harness that can answer at the address must
+  therefore declare the same resumability; see [security](security.md).
+- Stopping a session does not stop your harness, because other sessions are using it: its lifetime
+  is yours to manage. If nothing answers at the address when an exec, resume, or fork is admitted
+  (the connection is refused, or the harness has not answered `Describe` within 10 seconds),
+  the call fails with `UNAVAILABLE` and nothing is journaled, so it is safe to retry; the host
+  notices your harness is back within about a second. An exec with no session still creates one and
+  returns its UID in the first `ExecUpdate.Session` before it fails, so retry with that UID (the Go
+  `client.Exec` returns it in `TurnResult.Session` alongside the error), or create the session
+  first; resending the session-less request creates another empty session. If the call's own
+  deadline runs out, or the caller cancels, before the harness answers, the call fails with
+  `DEADLINE_EXCEEDED` or `CANCELLED` instead: nothing is journaled, but resending the same call
+  cannot succeed. If your harness goes away after admission, in the middle of a turn, the call fails
+  with `INTERNAL` and the session is left with an interrupted turn: call `Resume` once the harness
+  is back to re-drive it from the journal.
+- Registration is read at startup. A session records the harness name, not the address, so
+  restarting the host with `mine` pointed somewhere else moves existing sessions there, and
+  restarting it without `mine` makes them fail with `INVALID_ARGUMENT`.
 
 ## Capability matching
 

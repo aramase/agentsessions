@@ -584,6 +584,10 @@ func forkError(err error) error {
 	switch {
 	case errors.Is(err, placement.ErrUnplaceable):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, placement.ErrHarnessUnavailable):
+		return status.Error(codes.Unavailable, err.Error())
+	case errors.Is(err, placement.ErrAdmissionInterrupted):
+		return status.Error(admissionInterruptedCode(err), err.Error())
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
 	default:
@@ -628,8 +632,15 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	}
 	log := s.store.Session(req.GetSession())
 	if err := placer.Resume(ctx, log, req.GetSession()); err != nil {
-		if errors.Is(err, controller.ErrIncompleteInvocation) {
+		switch {
+		case errors.Is(err, controller.ErrIncompleteInvocation):
 			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
+		case errors.Is(err, placement.ErrUnplaceable):
+			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v", err)
+		case errors.Is(err, placement.ErrHarnessUnavailable):
+			return nil, status.Errorf(codes.Unavailable, "resume: %v", err)
+		case errors.Is(err, placement.ErrAdmissionInterrupted):
+			return nil, status.Errorf(admissionInterruptedCode(err), "resume: %v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "resume: %v", err)
 	}
@@ -640,10 +651,25 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	return sessionProto(info)
 }
 
+// admissionInterruptedCode is the public code for a call whose own deadline or cancellation ended
+// the placement check: nothing was provisioned or journaled, and resending the same expired call
+// cannot succeed, so it is not an outage. Only admission is mapped here; a turn that the caller's
+// deadline interrupts after admission keeps its existing code.
+func admissionInterruptedCode(err error) codes.Code {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return codes.DeadlineExceeded
+	}
+	return codes.Canceled
+}
+
 func execError(err error) error {
 	switch {
 	case errors.Is(err, placement.ErrUnplaceable):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, placement.ErrHarnessUnavailable):
+		return status.Error(codes.Unavailable, err.Error())
+	case errors.Is(err, placement.ErrAdmissionInterrupted):
+		return status.Error(admissionInterruptedCode(err), err.Error())
 	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
 		return status.Error(codes.Aborted, err.Error())
 	default:

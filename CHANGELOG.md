@@ -7,6 +7,27 @@ provide.
 
 ## Unreleased
 
+### Added
+
+- The chat harness accepts a per-execution `system_prompt` in its JSON config, prepended before
+  conversation history and current inputs.
+- `agentsessionsd --harness name=address` registers a harness that is already running, over TCP
+  (`host:port`, `dns:///host:port` or `dns://resolver/host:port`) or a unix socket (`unix:` or
+  `unix://` followed by an absolute or relative path), instead of compiling it into the server. Any
+  other address form is refused at startup. It is served by the new `runtime/remote` backend, which
+  owns no sandbox: such a harness must be `STATELESS_REPLAY`, and one that declares
+  `REQUIRES_MEMORY_SNAPSHOT` is refused, including when it is only the replica that answers on a
+  turn's own connection behind a load balancer. The check is not bound to the turn's `Connect`
+  stream, so a harness that takes over the address between the two calls is not detected; the
+  operator must control what serves the address. `--harness` requires `--model`, so a remote
+  harness's model calls never fall back to the built-in echo stub.
+  The connection is cleartext and unauthenticated; see `docs/security.md`. On unix platforms,
+  `harnessnode` serves on a unix socket when `HARNESS_ADDR` is `unix:///path`. It holds a lock on
+  `path.lock` while it serves, so a second instance on the same address fails, and on restart it
+  reclaims a socket file left behind by a crashed instance. It never removes a socket another
+  process created, and it refuses a lock file that is a symlink, a hard link, or owned by another
+  user.
+
 ### Compatibility
 
 - Replay and interrupted-turn resume now reject tool-call identity and result-correlation mismatches
@@ -15,6 +36,12 @@ provide.
   failures remain recoverable without re-executing nonterminal intents that have no result.
   Handled pre-intent mediation rejections remain recoverable when no recorded tool call is next,
   without relaxing mediation identity checks on actual recorded calls.
+- Chat executions written on `main` since execution-config journaling was added in #76 with a
+  non-empty `system_prompt` no longer pass deterministic controller replay or interrupted resume
+  when their recorded model-input hashes exclude the prompt. Non-JSON config now fails whenever
+  the harness re-runs that execution. The chat harness previously ignored both. Reading recorded
+  events through `Sessions.Replay` is unchanged, as is Resume of an already-completed turn.
+  No tagged release is affected.
 - Every new execution records `EXECUTION_START`, including default-config turns, so interrupted
   recovery can reject partially committed inputs. Binaries older than this release fail chain
   verification with a `content_hash` mismatch for sessions containing this event. Rollback is not
@@ -27,6 +54,16 @@ provide.
   stored it on the child, and returned it from `GetSession` and `ListSessions`; callers must now
   omit it to fork. `Session.identity` on `CreateSession` remains recorded provenance, not
   authorization, and is unchanged.
+- `Resume` and `Fork` now run the same `CanPlace` check as `Exec` before touching compute or the
+  journal, and a refusal is `FAILED_PRECONDITION` (`Resume` previously returned `INTERNAL` for any
+  placement error). A harness that cannot be reached to describe itself when the call is admitted
+  is `UNAVAILABLE` rather than `INTERNAL` on `Exec`, `Resume`, and `Fork`, and nothing is
+  journaled; one that has not answered within 10 seconds counts as unreachable, so a call with no
+  deadline cannot be held by a harness that never answers. If the call's own deadline runs out, or the caller cancels, while the harness is being
+  described, the call is `DEADLINE_EXCEEDED` or `CANCELLED` instead, also with nothing journaled. A
+  harness lost mid-turn is still `INTERNAL` and leaves an interrupted turn to `Resume`. Forking a
+  `REQUIRES_MEMORY_SNAPSHOT` harness on a backend without memory snapshots is refused before the
+  parent is checkpointed, so it no longer leaves a `SUSPEND` event on the parent.
 
 ## v0.1.2
 

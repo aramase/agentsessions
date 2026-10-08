@@ -104,6 +104,10 @@ The `Placer` wires Sessions to the `Runtime` SPI and owns the incarnation lifecy
 - **`runtime/local`** — filesystem-only, serves the harness over a unix socket. `MemorySnapshot=false`, so
   `CanPlace` refuses `REQUIRES_MEMORY_SNAPSHOT` harnesses — the honest-degradation counterpart that makes
   the capability tier meaningful.
+- **`runtime/remote`** — attaches to a harness already running at a given address instead of
+  provisioning one, so a harness is registered by configuration rather than compiled into the
+  server. It asks the harness to `Describe` itself, so `CanPlace` gates on the tier the harness
+  declares. `MemorySnapshot=false`, and structurally so: it does not own that process.
 - **`runtime/substrate`** — agent-substrate (actors on pre-warmed workers, RAM+disk memory snapshots).
   `MemorySnapshot=true`. It depends only on a `ControlClient` interface **defined in the core**; the real
   ate-api adapter lives in a separate module (`integrations/substrate/`) so the core imports zero
