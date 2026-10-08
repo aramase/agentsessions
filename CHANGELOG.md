@@ -24,7 +24,9 @@ provide.
   `controller.ErrInheritedToolIntent`, rather than re-driving a parent's effect under the child's
   UID. This applies to existing journals, including legacy markerless turns; Fork still copies the
   prefix, and completed inherited intent/result pairs remain recoverable without invoking the
-  executor. No wire or journal schema change is required.
+  executor, including legacy results recorded after the fork marker. `Sessions.Resume` reports
+  `FAILED_PRECONDITION` for unresolved inherited intents with guidance to fork at or after the
+  `TOOL_RESULT`, or Exec a new turn. No wire or journal schema change is required.
 - Chat executions written on `main` since execution-config journaling was added in #76 with a
   non-empty `system_prompt` no longer pass deterministic controller replay or interrupted resume
   when their recorded model-input hashes exclude the prompt. Non-JSON config now fails whenever

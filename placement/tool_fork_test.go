@@ -17,16 +17,13 @@ import (
 // A fork at TOOL_CALL must not re-drive the parent's effect in the child's dedup namespace.
 func TestForkedToolIntentResumeFailsClosed(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
-		for _, withResult := range []bool{false, true} {
+		for _, resultLocation := range []string{"none", "before fork", "after fork"} {
+			withResult := resultLocation != "none"
 			name := "start-marker"
 			if legacy {
 				name = "legacy"
 			}
-			if withResult {
-				name += "/result"
-			} else {
-				name += "/intent"
-			}
+			name += "/" + resultLocation
 			t.Run(name, func(t *testing.T) {
 				store, err := sqlitelog.Open(":memory:")
 				if err != nil {
@@ -59,7 +56,7 @@ func TestForkedToolIntentResumeFailsClosed(t *testing.T) {
 					parent = old
 				}
 				kind := api.EventToolCall
-				if withResult {
+				if resultLocation == "before fork" {
 					kind = api.EventToolResult
 				}
 				var cut int64
@@ -74,6 +71,20 @@ func TestForkedToolIntentResumeFailsClosed(t *testing.T) {
 				child := store.Session("child")
 				if err := controller.Fork(parent, child, cut); err != nil {
 					t.Fatal(err)
+				}
+				if resultLocation == "after fork" {
+					// v0.1.x recovery could write the inherited intent's receipt after FORK.
+					fence, err := child.NewFence()
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, rec := range toolRecords(t, parent) {
+						if rec.Event.Kind == api.EventToolResult {
+							if _, err := child.Append(cut+1, fence, rec.Event); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
 				}
 				c, err := controller.New(child, echoagent.Model, controller.WithSessionUID("child"), controller.WithToolExecutor(tool.exec))
 				if err != nil {

@@ -628,6 +628,9 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	}
 	log := s.store.Session(req.GetSession())
 	if err := placer.Resume(ctx, log, req.GetSession()); err != nil {
+		if errors.Is(err, controller.ErrInheritedToolIntent) {
+			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; fork at or after the TOOL_RESULT, or Exec a new turn", err)
+		}
 		if errors.Is(err, controller.ErrIncompleteInvocation) {
 			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
 		}

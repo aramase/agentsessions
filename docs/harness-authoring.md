@@ -181,8 +181,8 @@ For any side-effecting tool, the harness chooses `ToolCall.IdempotencyKey`, uniq
 session. If a crash forces an at-most-once re-drive (I3), the tool side dedups on **session UID plus
 idempotency key** to avoid repeating the effect during recovery of that same session. Different
 sessions may reuse the same key; a forked child has a different dedup namespace. Resume refuses an
-unfinished inherited execution if its copied prefix contains a tool intent without a matching
-result, rather than re-driving the parent's effect under the child UID.
+unfinished inherited execution if an inherited tool intent still lacks a matching result at the
+journal head, rather than re-driving the parent's effect under the child UID.
 
 #### Host composition for controller-mediated tools
 
@@ -221,11 +221,12 @@ The controller records intent before invoking the executor and stamps the result
 ID. Completed intent/result pairs are served during recovery without invoking an executor; intent
 without a result is re-driven using the **original recorded key** only within the same session.
 Fork still copies the requested prefix, but Resume returns `controller.ErrInheritedToolIntent`
-before running the harness or appending any event if the unfinished execution crosses a fork marker
-with unresolved tool intents. This includes legacy turns without `EXECUTION_START`. Fork at or after
-the matching `TOOL_RESULT` to preserve recovery of that effect; completed inherited pairs are served
-from the journal without invoking the executor. An intent first written by the child after the fork
-is not inherited and can be re-driven under the child's UID.
+before running the harness or appending any event if the unfinished execution has inherited tool
+intents still unresolved at the journal head. This includes legacy turns without `EXECUTION_START`.
+`Sessions.Resume` reports `FAILED_PRECONDITION`: fork at or after the matching `TOOL_RESULT`, or
+Exec a new turn. Completed inherited pairs are served from the journal without invoking the executor,
+including legacy results recorded after the fork marker. An intent first written by the child after
+the fork is not inherited and can be re-driven under the child's UID.
 
 The executor owns tool/resource authorization scoped to the supplied `scope.SessionUID` and durable
 deduplication keyed by `(scope.SessionUID, call.IdempotencyKey)`, never by the harness-chosen key alone.

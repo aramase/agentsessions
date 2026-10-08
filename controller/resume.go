@@ -56,12 +56,15 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		return false, err
 	}
 	// An inherited intent belongs to the parent's dedup namespace, not this controller's UID.
+	// Scan to the end: legacy child recovery may have recorded the result after the fork marker.
 	// Check before running the harness so even a harness that handles errors cannot bypass it.
-	unresolvedTools := 0
+	unresolvedTools, inheritedTools := 0, 0
 	var precedingCall *api.ToolCall
+	precedingInherited := false
 	for _, event := range events[execution.start:] {
-		if event.Kind == api.EventLifecycle && event.Lifecycle != nil && event.Lifecycle.Kind == api.LifecycleFork && unresolvedTools > 0 {
-			return false, fmt.Errorf("%w: execution %q", ErrInheritedToolIntent, execution.id)
+		if event.Kind == api.EventLifecycle && event.Lifecycle != nil && event.Lifecycle.Kind == api.LifecycleFork {
+			inheritedTools = unresolvedTools
+			precedingInherited = precedingCall != nil
 		}
 		if event.ExecutionID != execution.id {
 			continue
@@ -70,14 +73,21 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		case api.EventToolCall:
 			unresolvedTools++
 			precedingCall = event.ToolCall
+			precedingInherited = false
 		case api.EventToolResult:
 			if precedingCall != nil && event.Result != nil && event.Result.ID == precedingCall.ID {
 				unresolvedTools--
+				if precedingInherited {
+					inheritedTools--
+				}
 			}
 			precedingCall = nil
 		case api.EventModelCall, api.EventOutput, api.EventUsage:
 			precedingCall = nil
 		}
+	}
+	if inheritedTools > 0 {
+		return false, fmt.Errorf("%w: execution %q", ErrInheritedToolIntent, execution.id)
 	}
 	sink := &resumeSink{
 		live:   liveSink{c: c, executionID: execution.id},
