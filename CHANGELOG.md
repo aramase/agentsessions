@@ -100,6 +100,10 @@ provide.
   harness lost mid-turn is still `INTERNAL` and leaves an interrupted turn to `Resume`. Forking a
   `REQUIRES_MEMORY_SNAPSHOT` harness on a backend without memory snapshots is refused before the
   parent is checkpointed, so it no longer leaves a `SUSPEND` event on the parent.
+- `ResumeRequest.boot` is deprecated. The service never read it, and substrate no longer has a
+  per-resume boot flag; the backend decides how a resumed session comes back. The field keeps its
+  number, so existing clients still encode. `client.Client.Resume` keeps its `boot` parameter but
+  ignores it and no longer sends the field.
 - The substrate backend now targets current agent-substrate (`fc0e3586`) instead of the `b1bd558a`
   pin, and the two are not wire-compatible: the old client decodes a current `Actor` without an
   error but with the wrong state and garbage for the worker address. Upgrade the backend and the

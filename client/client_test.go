@@ -315,3 +315,31 @@ func TestSessionsExposesTheUnderlyingStub(t *testing.T) {
 		t.Fatalf("stub call: want NotFound, got %v", err)
 	}
 }
+
+// ResumeRequest.boot is deprecated and the service never read it, so the SDK leaves it unset even
+// when a caller still passes true.
+func TestResumeDoesNotSendTheDeprecatedBootField(t *testing.T) {
+	var sent *v1.ResumeRequest
+	c, err := client.Dial("passthrough:///unused", client.WithDialOptions(
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(func(_ context.Context, _ string, req, _ any, _ *grpc.ClientConn, _ grpc.UnaryInvoker, _ ...grpc.CallOption) error {
+			sent, _ = req.(*v1.ResumeRequest)
+			return nil
+		}),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	if _, err := c.Resume(t.Context(), "sess-1", true); err != nil {
+		t.Fatal(err)
+	}
+	if sent == nil || sent.GetSession() != "sess-1" {
+		t.Fatalf("Resume sent %v, want a ResumeRequest for sess-1", sent)
+	}
+	m := sent.ProtoReflect()
+	if boot := m.Descriptor().Fields().ByName("boot"); m.Has(boot) {
+		t.Fatalf("Resume sent the deprecated boot field: %v", sent)
+	}
+}
