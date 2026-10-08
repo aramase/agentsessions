@@ -121,6 +121,11 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   supersedes the writer that beat it even though it gives up. Closing that needs a read-only fence
   accessor on `eventlog.Store` (`NewFence` is currently the only way to obtain one, and it mutates),
   which is a wider API change than this path warrants.
+- Ending the parent's harness streams sits between two fences. The first stops an in-flight turn
+  from writing an `ERROR` for the interruption; a turn that mints a newer fence in that window sees
+  that the checkpoint claimed its connection and writes nothing. The second fence, minted after the
+  streams are ended, is the one the SUSPEND record is written under, so that turn's fence cannot
+  fail the record after the parent is already cold.
 
 Two properties make the failure paths above safe, both read off substrate's suspend/delete workflows
 (`cmd/ateapi/internal/controlapi/`) rather than assumed:
