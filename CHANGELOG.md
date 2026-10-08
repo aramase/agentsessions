@@ -131,7 +131,9 @@ provide.
   `CreateActorFromTag`, `DeleteTag`); `TagActor` must report a name already taken as the new
   `ErrTagExists`, so a fork whose tag create fails deletes only a tag it reserved.
   `ObjectRef.Namespace` is now `ObjectRef.Atespace`, and
-  `ActorInfo` reports `Worker` and `Snapshot` instead of `PodIP` and `MeshDNS`. A stateful fork now
+  `ActorInfo` reports `Worker` and `Snapshot` instead of `PodIP` and `MeshDNS`.
+  `integrations/substrate`'s `New` and `FromClient` drop their `dnsSuffix` argument, since nothing
+  dials an actor's mesh DNS name any more. A stateful fork now
   checks the parent still holds the checkpoint it took around the tag, and fails with
   `ErrSnapshotSuperseded` if the parent was resumed and suspended in between.
 
