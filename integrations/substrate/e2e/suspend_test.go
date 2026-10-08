@@ -19,7 +19,7 @@ func TestSessionSuspendResumeOnGVisor(t *testing.T) {
 	defer cancel()
 
 	desc := api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}
-	backend := f.backend(echoTemplate, desc)
+	backend := f.backend(t, echoTemplateSpec, desc)
 	session := uniqueUID("suspend")
 	defer stopQuietly(t, backend, session)
 	log := journal(t).Session(session)

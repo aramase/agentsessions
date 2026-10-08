@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"reflect"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -22,6 +22,8 @@ import (
 // This control fake models the external actor registry, not the Runtime: suspending releases
 // compute but retains the actor and its captured state; deleting makes restoration impossible.
 // Snapshots and tags are actual registry entries so fork-pin assertions cannot pass vacuously.
+// ResumeActor picks its source as substrate does: the actor's own snapshot if it holds one, else a
+// fresh harness (the template's golden snapshot or a cold boot), so there is no per-call boot flag.
 type suspendControl struct {
 	actors       map[substrate.ActorRef]*suspendActor
 	snapshots    map[substrate.SnapshotID]suspendSnapshot
@@ -66,14 +68,14 @@ func (c *suspendControl) CreateActor(_ context.Context, ref substrate.ActorRef, 
 	return nil
 }
 
-func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef, boot bool) (substrate.ActorInfo, error) {
-	c.calls = append(c.calls, fmt.Sprintf("resume:%s:boot=%v", ref.Name, boot))
+func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef) (substrate.ActorInfo, error) {
+	c.calls = append(c.calls, "resume:"+ref.Name)
 	a, exists := c.actors[ref]
 	if !exists {
 		return substrate.ActorInfo{}, status.Error(codes.NotFound, "actor does not exist")
 	}
-	if boot {
-		a.turns = 0
+	if a.status == substrate.StatusSuspended && a.snapshot.Name == "" {
+		a.turns = 0 // no snapshot of its own yet: a fresh harness
 	} else if a.status == substrate.StatusSuspended {
 		snapshot, exists := c.snapshots[a.snapshot]
 		if !exists {
@@ -93,7 +95,7 @@ func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef, 
 		c.afterResume = nil
 		hook()
 	}
-	return substrate.ActorInfo{Status: a.status, PodIP: ref.Name}, nil
+	return c.info(ref, a), nil
 }
 
 func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef) (string, error) {
@@ -137,26 +139,38 @@ func (c *suspendControl) GetActor(_ context.Context, ref substrate.ActorRef) (su
 	if !exists {
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
-	info := substrate.ActorInfo{Status: a.status}
-	if a.worker {
-		info.PodIP = ref.Name
-	}
-	return info, nil
+	return c.info(ref, a), nil
 }
 
-func (c *suspendControl) TagSnapshot(_ context.Context, source, tag substrate.SnapshotID) error {
-	c.calls = append(c.calls, "tag:"+source.Name+"->"+tag.Name)
-	if _, exists := c.snapshots[source]; !exists {
+func (c *suspendControl) info(ref substrate.ActorRef, a *suspendActor) substrate.ActorInfo {
+	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name}
+	if a.worker {
+		info.Worker = ref.Name
+	}
+	return info
+}
+
+// TagActor tags the snapshot the suspended source actor holds now, as substrate's CreateTag does.
+func (c *suspendControl) TagActor(_ context.Context, ref substrate.ActorRef, tag substrate.SnapshotID) error {
+	c.calls = append(c.calls, "tag:"+ref.Name+"->"+tag.Name)
+	a, exists := c.actors[ref]
+	if !exists {
+		return status.Error(codes.NotFound, "actor does not exist")
+	}
+	if a.status != substrate.StatusSuspended || a.worker {
+		return status.Error(codes.FailedPrecondition, "source actor must be suspended")
+	}
+	if _, exists := c.snapshots[a.snapshot]; !exists {
 		return status.Error(codes.NotFound, "snapshot does not exist")
 	}
 	if _, exists := c.tags[tag]; exists {
 		return status.Error(codes.AlreadyExists, "tag exists")
 	}
-	c.tags[tag] = source
+	c.tags[tag] = a.snapshot
 	return nil
 }
 
-func (c *suspendControl) CreateActorFromSnapshot(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef, tag substrate.SnapshotID) error {
+func (c *suspendControl) CreateActorFromTag(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef, tag substrate.SnapshotID) error {
 	c.calls = append(c.calls, "clone:"+ref.Name+":from="+tag.Name)
 	source, exists := c.tags[tag]
 	if !exists {
@@ -178,7 +192,7 @@ func (c *suspendControl) CreateActorFromSnapshot(_ context.Context, ref substrat
 	return nil
 }
 
-func (c *suspendControl) DeleteSnapshotTag(_ context.Context, tag substrate.SnapshotID) error {
+func (c *suspendControl) DeleteTag(_ context.Context, tag substrate.SnapshotID) error {
 	c.calls = append(c.calls, "untag:"+tag.Name)
 	if _, exists := c.tags[tag]; !exists {
 		return status.Error(codes.NotFound, "tag does not exist")
@@ -227,9 +241,11 @@ func newSuspendPlacer(t *testing.T, ctl *suspendControl, memory bool) (*placemen
 	}
 	backend := substrate.New(ctl, "space", substrate.ObjectRef{Name: "echo"}, desc)
 	p := placement.New(backend, echoagent.Model, placement.WithDialer(func(inc api.Incarnation) (api.Harness, func() error, error) {
-		name, port, err := net.SplitHostPort(inc.Address)
-		if err != nil || port != substrate.HarnessPort {
-			return nil, nil, fmt.Errorf("unexpected harness address %q", inc.Address)
+		// Every incarnation addresses the router; the call metadata names the actor.
+		target := inc.CallMetadata[substrate.TargetActorHeader]
+		atespace, name, ok := strings.Cut(target, "/")
+		if inc.Address != substrate.DefaultRouterAddress || !ok || atespace != "space" {
+			return nil, nil, fmt.Errorf("unexpected harness route %q to %q", inc.Address, target)
 		}
 		ref := substrate.ActorRef{Atespace: "space", Name: name}
 		a, exists := ctl.actors[ref]
@@ -422,7 +438,7 @@ func TestSubstrateSuspendResumePreservesActor(t *testing.T) {
 	if !reflect.DeepEqual(kinds, wantKinds) {
 		t.Fatalf("record order=%v want %v", kinds, wantKinds)
 	}
-	wantCalls := []string{"create:session", "resume:session:boot=true", "suspend:session", "resume:session:boot=false"}
+	wantCalls := []string{"create:session", "resume:session", "suspend:session", "resume:session"}
 	if !reflect.DeepEqual(ctl.calls, wantCalls) {
 		t.Fatalf("lifecycle calls=%v want %v", ctl.calls, wantCalls)
 	}
@@ -479,7 +495,7 @@ func TestSubstrateSuspendThenExecWithoutResume(t *testing.T) {
 			if !reflect.DeepEqual(kinds, wantKinds) {
 				t.Fatalf("record order=%v want %v (no RESUME)", kinds, wantKinds)
 			}
-			wantCalls := []string{"create:session", "resume:session:boot=true", "suspend:session", "resume:session:boot=false"}
+			wantCalls := []string{"create:session", "resume:session", "suspend:session", "resume:session"}
 			if !reflect.DeepEqual(ctl.calls, wantCalls) {
 				t.Fatalf("lifecycle calls=%v want %v", ctl.calls, wantCalls)
 			}

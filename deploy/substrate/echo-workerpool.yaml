@@ -1,0 +1,39 @@
+# Stateless-tier WorkerPool: gVisor workers for the echo harness.
+#
+# Only the pool is a Kubernetes object. The ActorTemplate is a substrate API resource that lives in an
+# atespace, so the conformance suite creates it through Control (integrations/substrate/e2e/
+# templates_test.go) with the harness image under test.
+#
+# The `workload` label is repo-scoped on purpose: worker eligibility ignores namespaces and matches
+# labels across every pool in the cluster, so a label shared with a substrate demo pool would let the
+# scheduler place our actor there.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-agentsessions
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: echo-harness
+  namespace: ate-agentsessions
+  labels:
+    workload: agentsessions-echo-harness
+spec:
+  # One worker for the template's golden-snapshot build and one per concurrently running actor.
+  replicas: 3
+  sandboxClass: gvisor
+  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  template:
+    # Capacity comes from the limits and must cover the template's actor limits (1 CPU, 512Mi).
+    # Requests stay low so the pool fits on a single kind node next to ate-system.
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 100m
+        memory: 256Mi
