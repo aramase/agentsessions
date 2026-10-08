@@ -59,15 +59,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout agentsessions
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - name: Setup ko
-        uses: ko-build/setup-ko@v0.7
+        uses: ko-build/setup-ko@v0.10
 
       - name: Clone agent-substrate (pinned)
         run: |
@@ -87,7 +87,7 @@ jobs:
       - name: Cache micro-VM assets (kata-static + cloud-hypervisor + virtiofsd)
         # Assembling the assets is fully pinned by assemble.sh (all downloads on amd64), so key the
         # cache on its hash. run-microvm-demo-kind.sh skips assembling when these are present.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: _substrate/bin/microvm-assets/amd64
           key: microvm-assets-amd64-${{ hashFiles('_substrate/hack/microvm-assets/assemble.sh') }}

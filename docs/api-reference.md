@@ -962,7 +962,7 @@ ephemeral streaming Delta (transport only — not logged, not hash-chained).
 <a name="agentsessions-v1-ForkRequest"></a>
 
 ### ForkRequest
-
+Children inherit the parent&#39;s annotations and origin.
 
 
 | Field | Type | Label | Description |
@@ -970,8 +970,8 @@ ephemeral streaming Delta (transport only — not logged, not hash-chained).
 | session | [string](#string) |  |  |
 | at_seq | [int64](#int64) |  | 0 = HEAD. A REQUIRES_MEMORY_SNAPSHOT harness forks by cloning a memory snapshot, which captures RAM as of now, so it accepts only HEAD; a historical seq is FAILED_PRECONDITION. |
 | count | [int32](#int32) |  | fan-out N children; must be 1..128, else INVALID_ARGUMENT |
-| identity | [IdentityRef](#agentsessions-v1-IdentityRef) |  | optional child principal |
-| labels | [ForkRequest.LabelsEntry](#agentsessions-v1-ForkRequest-LabelsEntry) | repeated |  |
+| identity | [IdentityRef](#agentsessions-v1-IdentityRef) |  | Unsupported: per-child principals are not enforced. Any supplied identity, including an empty message, is INVALID_ARGUMENT before placement or mutation. Leave unset to fork. |
+| labels | [ForkRequest.LabelsEntry](#agentsessions-v1-ForkRequest-LabelsEntry) | repeated | Applied to every child instead of the parent&#39;s labels; never merged or inherited. Unset or empty gives children an empty label map. The parent&#39;s annotations are inherited unchanged. |
 | child_names | [string](#string) | repeated | Display names for the children, in the order they are returned. Length must be 0 or exactly count, else INVALID_ARGUMENT. Left unset, a child&#39;s name is empty rather than a copy of the parent&#39;s. A fork inherits the parent&#39;s workload (project, harness, model) because that is what defines the run, but a name is a caller-supplied label the server has no basis to invent. Copying it makes a listing report N&#43;1 rows that claim to be the same session, and synthesizing one (&#34;&lt;parent&gt; fork 2&#34;) would put a presentation convention in the wire contract and be wrong the moment the same parent is forked by two separate calls. Lineage is already on the child as parent_uid and fork_seq, so a caller that wants a derived label can render one without the server denormalizing it into a string. |
 
 

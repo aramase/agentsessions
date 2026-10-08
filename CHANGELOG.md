@@ -21,6 +21,11 @@ provide.
   sessions that execute another turn after upgrading. No SQLite schema migration or log rewrite is
   required. Replay streams and harness `History` now carry one extra `EXECUTION_START` event per
   turn (in `History`, only prior turns).
+- `ForkRequest.identity` is now rejected with `INVALID_ARGUMENT`, including an empty identity
+  message, because per-child principals are not enforced. v0.1.0–v0.1.2 accepted this field,
+  stored it on the child, and returned it from `GetSession` and `ListSessions`; callers must now
+  omit it to fork. `Session.identity` on `CreateSession` remains recorded provenance, not
+  authorization, and is unchanged.
 
 ## v0.1.2
 
