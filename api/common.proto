@@ -80,7 +80,7 @@ message ReasoningPart {
 
 // Message is a role-tagged sequence of content parts (A2A Message = role + Part[]).
 message Message {
-  string role = 1; // user | assistant | tool
+  string role = 1; // system, user, assistant, or tool
   repeated Part parts = 2;
 }
 
