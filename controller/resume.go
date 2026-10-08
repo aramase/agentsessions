@@ -161,7 +161,8 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 
 // resumeSink serves already-recorded effects (in order) and, once they are exhausted, delegates to
 // a liveSink to invoke-and-record the remainder. Serving never invokes the underlying op, so a
-// recorded effect is executed at most once across a crash (I3).
+// completed effect is served without invocation; an unanswered trailing model intent (a MODEL_CALL
+// with no recorded completion) may be re-invoked once per Resume (I3).
 type resumeSink struct {
 	live    liveSink
 	stream  []api.Event

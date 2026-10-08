@@ -16,8 +16,9 @@ provide.
   provider error or a process death. Previously every attempt failed with "recorded completion
   missing" and appended another `ERROR`, so the session could never resume. When the harness
   re-issues a request with the recorded input hash, the host invokes the provider once and records
-  the completion after the existing `MODEL_CALL`; a different hash still fails as divergence. A cut
-  during a model call costs at most one extra provider call. Journals with execution IDs that are in
+  the completion after the existing `MODEL_CALL`; a different hash still fails as divergence. Each
+  cut during a model call costs at most one extra provider call; a recovering call that fails is
+  itself a cut, and the next `Resume` re-drives it again. Journals with execution IDs that are in
   this state recover on the next `Resume`; their earlier `ERROR` events remain as audit records.
   A v0.1.2 journal without execution IDs is not re-driven and still fails with "recorded completion
   missing". No journal or wire schema change.
