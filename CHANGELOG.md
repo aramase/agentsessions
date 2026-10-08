@@ -12,6 +12,15 @@ provide.
 - Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
   and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
   remains destructive teardown.
+- `Resume` recovers a turn cut between `MODEL_CALL` and its recorded completion, whether by a
+  provider error or a process death. Previously every attempt failed with "recorded completion
+  missing" and appended another `ERROR`, so the session could never resume. When the harness
+  re-issues a request with the recorded input hash, the host invokes the provider once and records
+  the completion after the existing `MODEL_CALL`; a different hash still fails as divergence. A cut
+  during a model call costs at most one extra provider call. Journals with execution IDs that are in
+  this state recover on the next `Resume`; their earlier `ERROR` events remain as audit records.
+  A v0.1.2 journal without execution IDs is not re-driven and still fails with "recorded completion
+  missing". No journal or wire schema change.
 
 ### Added
 

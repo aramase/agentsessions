@@ -63,7 +63,11 @@ companion determinism contract, exercised by `conformance/`):
 - **I2 — reasoning continuity.** Opaque provider reasoning parts are recorded verbatim and replayed, so
   reasoning survives resume/fork on the stateless path.
 - **I3 — at-most-once effect re-drive.** A crash between an effect's intent and its result is re-driven
-  at most once; host-executed tools carry an idempotency key so the re-drive dedups.
+  at most once; host-executed tools carry an idempotency key so the re-drive dedups. A model call cut
+  after `MODEL_CALL` is re-invoked on `Resume` when the harness re-issues the same input hash, and its
+  completion is recorded against that call, so a cut during a model call costs at most one extra
+  provider call. This applies to journals with execution IDs; a v0.1.2 journal without them is not
+  re-driven and `Resume` still fails with "recorded completion missing".
 - **I4 — memory-restore is not replay.** On `ResumeActor{boot:false}` the harness already holds its state
   in RAM, so `Start.History` is empty and the journal is **not** replayed into it (replaying would
   double-apply). The `REQUIRES_MEMORY_SNAPSHOT` harness carries this on its side by never reconstructing
