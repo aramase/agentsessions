@@ -216,13 +216,13 @@ Limits that come with the router, measured or read rather than assumed:
   `cmd/atenet/internal/router/xds.go` at `fc0e3586`). `TestHarnessStreamIdlePastRouteTimeout` holds
   a Connect stream idle, as a turn parked on a slow model call does. On kind, with the echo harness
   on gVisor, the router tore the stream down after **5m30s**, both at `362637f9` and at `fc0e3586`
-  (held idle for 6m30s): a pending `Recv` got `Internal` "stream terminated by RST_STREAM with
-  error code: INTERNAL_ERROR", not a 504. Through the Placer, which does not read while the host's model call runs, the turn
-  failed only when the host sent its late reply, with a bare `EOF` (measured at `362637f9`). So a
-  turn that runs longer than the route timeout fails once its stream has been idle past the idle
-  timeout (5m30s by default). Until substrate offers a per-route or streaming timeout (tracked in
-  substrate issue 1291), raise the router's `--route-timeout` above the longest turn; the idle
-  timeout follows it.
+  (held idle for 6m30s): a pending `Recv` got `Internal` "stream terminated by RST_STREAM with error
+  code: INTERNAL_ERROR", not a 504. Through the Placer, which does not read while the host's model
+  call runs, the turn failed only when the host sent its late reply, with a bare `EOF` (measured at
+  `362637f9`). So a turn that runs longer than the route timeout fails once its stream has been idle
+  past the idle timeout (5m30s by default). Until substrate offers a per-route or streaming timeout
+  (tracked in substrate issue 1291), raise the router's `--route-timeout` above the longest turn;
+  the idle timeout follows it.
 - **Checkpoint drain.** Before it snapshots, the worker waits for the actor's in-flight requests to
   finish, and an idle open Connect stream is one of them. On kind with the echo harness on gVisor, at
   `362637f9`, `SuspendActor` under such a stream took **5m30s**: it waited for the router to reset
@@ -309,9 +309,9 @@ waits for each golden snapshot.
 The suite runs in three passes against that one cluster, all through `hack/run-e2e-job.sh`: the
 stateless tier and the suspend-under-an-idle-stream check first, so a break there fails before the
 stateful tier runs, then the idle-stream route-timeout check, then the stateful tier and fork. Each
-pass is the same image with a different `-test.run`, and the Job's full `go test -v` output is echoed
-into the step, so a failure names the test and the assertion instead of surfacing an exit code. The nested-module test and core-neutrality gate also run per-PR in
-`.github/workflows/ci.yml`.
+pass is the same image with a different `-test.run`, and the Job's full `go test -v` output is
+echoed into the step, so a failure names the test and the assertion instead of surfacing an exit
+code. The nested-module test and core-neutrality gate also run per-PR in `.github/workflows/ci.yml`.
 
 Reproduce:
 
@@ -320,15 +320,45 @@ gh workflow run substrate-e2e.yml --ref main
 gh run watch "$(gh run list --workflow=substrate-e2e.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 ```
 
-The micro-VM class needs a Linux host with `/dev/kvm`; the recipe mirrors the CI steps against `hack/` in
-an agent-substrate checkout. Each tier picks its class with its own variable, `ECHO_SANDBOX_CLASS` and
-`COUNTER_SANDBOX_CLASS`: `microvm` (the default) or `gvisor`. Any other value is refused. On a host
-without KVM (an arm64 Mac running kind), skip `run-microvm-demo-kind`, apply
-`deploy/substrate/namespace.yaml`, `echo-gvisor-workerpool.yaml` and `counter-gvisor-workerpool.yaml`,
-and run with `ECHO_SANDBOX_CLASS=gvisor COUNTER_SANDBOX_CLASS=gvisor`. A gVisor FULL checkpoint also
-captures memory, so the stateful and fork tests exercise the same code paths on gVisor; the micro-VM run
-in CI remains the reference for both tiers. `KIND_CLUSTER_NAME` selects the cluster for the `hack/`
-scripts.
+The micro-VM class needs a Linux host with `/dev/kvm`; the recipe mirrors the CI steps against
+`hack/` in an agent-substrate checkout. Each tier picks its class with its own variable,
+`ECHO_SANDBOX_CLASS` and `COUNTER_SANDBOX_CLASS`: `microvm` (the default) or `gvisor`. Any other
+value is refused. `KIND_CLUSTER_NAME` selects the cluster for the `hack/` scripts.
+
+On a host without KVM (an arm64 Mac running kind), skip `run-microvm-demo-kind`, install both gVisor
+WorkerPools, and run both tiers with `gvisor`. The pool manifests name the worker image as a `ko://`
+import path, which the WorkerPool controller passes to its Pods unchanged, so build `ateom-gvisor`
+from the same agent-substrate checkout and substitute its digest, as CI does for `ateom-microvm`.
+`KO_DOCKER_REPO` must be a registry the kind nodes pull from (`install-ate-kind` uses
+`localhost:5001`), and every image must match the node's architecture: ko builds `linux/amd64`
+unless `KO_DEFAULTPLATFORMS` says otherwise, and an amd64 harness image on an arm64 node fails
+`runsc start`.
+
+```bash
+# SUBSTRATE: agent-substrate checkout at the pinned commit.
+export KO_DOCKER_REPO=localhost:5001 KO_DEFAULTPLATFORMS="linux/$(go env GOARCH)"
+E2E_IMAGE=localhost:5001/agentsessions-e2e:local
+E2E_DIR="$(mktemp -d)"
+(cd integrations/substrate &&
+  CGO_ENABLED=0 GOOS=linux GOARCH="$(go env GOARCH)" go test -c -o "${E2E_DIR}/e2e.test" ./e2e)
+cp deploy/substrate/Dockerfile.e2e "${E2E_DIR}/Dockerfile"
+docker build -t "${E2E_IMAGE}" "${E2E_DIR}" && docker push "${E2E_IMAGE}"
+ATEOM_IMG="$(cd "${SUBSTRATE}" && ko build --base-import-paths ./cmd/ateom-gvisor)"
+HARNESS_IMAGE="$(ko build ./cmd/harnessnode)"
+kubectl --context "kind-${KIND_CLUSTER_NAME:-kind}" apply -f deploy/substrate/namespace.yaml
+for tier in echo counter; do
+  sed -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
+    "deploy/substrate/${tier}-gvisor-workerpool.yaml" |
+    kubectl --context "kind-${KIND_CLUSTER_NAME:-kind}" apply -f -
+  hack/wait-worker-pool.sh "${tier}-gvisor"
+done
+HARNESS_IMAGE="${HARNESS_IMAGE}" ECHO_SANDBOX_CLASS=gvisor COUNTER_SANDBOX_CLASS=gvisor \
+  hack/run-e2e-job.sh 'TestStatelessReplay|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestFork' \
+  "${E2E_IMAGE}" 1800
+```
+
+A gVisor FULL checkpoint also captures memory, so the stateful and fork tests exercise the same code
+paths on gVisor; the micro-VM run in CI remains the reference for both tiers.
 
 ## In progress
 

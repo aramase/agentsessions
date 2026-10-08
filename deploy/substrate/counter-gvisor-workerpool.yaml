@@ -4,6 +4,10 @@
 # and fork on it. Run the suite with COUNTER_SANDBOX_CLASS=gvisor to point the counter template at
 # this pool instead of the micro-VM one. CI keeps the micro-VM pool, which is the class the stateful
 # claim is made for.
+#
+# workerImage is a ko:// import path that the WorkerPool controller passes to its Pods unchanged:
+# build ateom-gvisor with ko and substitute its digest before applying (see the no-KVM recipe in
+# docs/substrate-conformance.md).
 
 apiVersion: ate.dev/v1alpha1
 kind: WorkerPool
