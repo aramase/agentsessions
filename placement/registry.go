@@ -28,9 +28,12 @@ type Registry struct {
 // caller does not specify one, and must itself be registered: a default that resolves to nothing
 // would turn every unqualified request into an error at call time rather than at startup.
 //
-// It wires a shared session guard into the supplied Placer pointers. Construct the Registry before
-// using any of those Placers, and do not register them in another Registry: rewiring running or
-// already-registered Placers is not supported. Separate Registries do not fence each other.
+// The placers are switched to one shared session guard and one shared set of per-session
+// connections and checkpoint marks. session.Service routes a turn by ExecRequest.harness but a
+// Suspend or Fork by the session's recorded harness, so the two can land on different Placers;
+// sharing them is what lets Suspend refuse a turn (ErrSessionBusy), and a stateful fork end and
+// refuse one, whichever Placer runs it. Call NewRegistry before any of the placers runs a turn, and
+// give each Placer to one registry only. Separate Registries do not fence each other.
 func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, error) {
 	if len(placers) == 0 {
 		return nil, errors.New("placement: registry needs at least one harness")
@@ -49,11 +52,18 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, 
 	if _, ok := placers[defaultHarness]; !ok {
 		return nil, fmt.Errorf("placement: default harness %q is not registered", defaultHarness)
 	}
+	shared := &sessionSet{shared: true}
 	byName := make(map[string]*Placer, len(placers))
 	guard := new(sessionGuard)
 	for name, p := range placers {
-		p.guard = guard
+		if p.sessions.shared {
+			return nil, fmt.Errorf("placement: harness %q: placer already belongs to another registry", name)
+		}
 		byName[name] = p
+	}
+	for _, p := range byName {
+		p.guard = guard
+		p.sessions = shared
 	}
 	return &Registry{byName: byName, defaultHarness: defaultHarness}, nil
 }

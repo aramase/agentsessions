@@ -100,11 +100,23 @@ type Placer struct {
 	// Private for a standalone Placer; NewRegistry wires one shared guard before use.
 	guard *sessionGuard
 
+	// sessions tracks open harness connections and checkpoints per session UID. New gives each
+	// Placer its own; NewRegistry replaces it with one set shared by every Placer it routes to, so a
+	// stateful fork's checkpoint taken through one harness's Placer also covers a turn another Placer
+	// runs on the same session (ExecRequest.harness can differ from the session's default).
+	sessions *sessionSet
+}
+
+// sessionSet is the per-session state a checkpoint coordinates on. It is keyed by session UID
+// alone, so Placers that share one see each other's connections and checkpoints.
+type sessionSet struct {
 	mu   sync.Mutex
-	live map[string]map[*liveHarness]struct{} // session UID -> harness connections open in this Placer
+	live map[string]map[*liveHarness]struct{} // session UID -> open harness connections
 	// checkpoints counts the stateful-fork checkpoints of each session UID in progress. While it is
 	// non-zero no harness connection can be opened for the session.
 	checkpoints map[string]int
+	// shared is set when a Registry owns the set, so a Placer cannot join two registries' sets.
+	shared bool
 }
 
 // Dialer opens a Harness.Connect client to the harness an incarnation names and returns a closer for
@@ -184,11 +196,12 @@ func WithLogger(logger *slog.Logger) Option { return func(p *Placer) { p.logger 
 // New builds a Placer over a compute backend and the live model.
 func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 	p := &Placer{
-		backend: backend,
-		model:   model,
-		dial:    DefaultDial,
-		logger:  slog.New(slog.DiscardHandler),
-		guard:   new(sessionGuard),
+		backend:  backend,
+		model:    model,
+		dial:     DefaultDial,
+		logger:   slog.New(slog.DiscardHandler),
+		guard:    new(sessionGuard),
+		sessions: &sessionSet{},
 	}
 	for _, o := range opts {
 		o(p)
@@ -534,32 +547,32 @@ func (p *Placer) openHarness(ctx context.Context, sessionUID string, inc api.Inc
 	}
 	ctx, cancel := context.WithCancelCause(ctx)
 	l := &liveHarness{harness: har, cancel: cancel, close: closeHarness, minted: make(chan struct{})}
-	p.mu.Lock()
-	if p.checkpoints[sessionUID] > 0 {
-		p.mu.Unlock()
+	p.sessions.mu.Lock()
+	if p.sessions.checkpoints[sessionUID] > 0 {
+		p.sessions.mu.Unlock()
 		// Nothing was sent on the connection, so the close error carries no information.
 		_ = l.end(context.Canceled)
 		return ctx, nil, fmt.Errorf("%w: session %q", ErrCheckpointing, sessionUID)
 	}
-	if p.live == nil {
-		p.live = map[string]map[*liveHarness]struct{}{}
+	if p.sessions.live == nil {
+		p.sessions.live = map[string]map[*liveHarness]struct{}{}
 	}
-	if p.live[sessionUID] == nil {
-		p.live[sessionUID] = map[*liveHarness]struct{}{}
+	if p.sessions.live[sessionUID] == nil {
+		p.sessions.live[sessionUID] = map[*liveHarness]struct{}{}
 	}
-	p.live[sessionUID][l] = struct{}{}
-	p.mu.Unlock()
+	p.sessions.live[sessionUID][l] = struct{}{}
+	p.sessions.mu.Unlock()
 	return ctx, l, nil
 }
 
 // releaseHarness deregisters and closes a turn's harness connection when the turn returns.
 func (p *Placer) releaseHarness(ctx context.Context, sessionUID, incarnationID string, l *liveHarness) {
-	p.mu.Lock()
-	delete(p.live[sessionUID], l)
-	if len(p.live[sessionUID]) == 0 {
-		delete(p.live, sessionUID)
+	p.sessions.mu.Lock()
+	delete(p.sessions.live[sessionUID], l)
+	if len(p.sessions.live[sessionUID]) == 0 {
+		delete(p.sessions.live, sessionUID)
 	}
-	p.mu.Unlock()
+	p.sessions.mu.Unlock()
 	l.fenceMinted() // a turn that returns before minting never will
 	finish := observability.StartDebug(context.WithoutCancel(ctx), p.logger, "placement", "close_harness",
 		"session_uid", sessionUID,
@@ -572,9 +585,9 @@ func (p *Placer) releaseHarness(ctx context.Context, sessionUID, incarnationID s
 // refuseDuringCheckpoint fails with ErrCheckpointing while a checkpoint of the session is in
 // progress. It is an early exit only; openHarness is where the refusal is enforced.
 func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.checkpoints[sessionUID] > 0 {
+	p.sessions.mu.Lock()
+	defer p.sessions.mu.Unlock()
+	if p.sessions.checkpoints[sessionUID] > 0 {
 		return fmt.Errorf("%w: session %q", ErrCheckpointing, sessionUID)
 	}
 	return nil
@@ -587,14 +600,14 @@ func (p *Placer) refuseDuringCheckpoint(sessionUID string) error {
 // mark (checkSuperseded) and writes nothing. A connection stays marked even if the checkpoint
 // aborts. Every call must be paired with endCheckpoint.
 func (p *Placer) beginCheckpoint(sessionUID string) []*liveHarness {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.checkpoints == nil {
-		p.checkpoints = map[string]int{}
+	p.sessions.mu.Lock()
+	defer p.sessions.mu.Unlock()
+	if p.sessions.checkpoints == nil {
+		p.sessions.checkpoints = map[string]int{}
 	}
-	p.checkpoints[sessionUID]++
-	open := make([]*liveHarness, 0, len(p.live[sessionUID]))
-	for l := range p.live[sessionUID] {
+	p.sessions.checkpoints[sessionUID]++
+	open := make([]*liveHarness, 0, len(p.sessions.live[sessionUID]))
+	for l := range p.sessions.live[sessionUID] {
 		l.superseded.Store(true)
 		open = append(open, l)
 	}
@@ -603,10 +616,10 @@ func (p *Placer) beginCheckpoint(sessionUID string) []*liveHarness {
 
 // endCheckpoint lifts the mark beginCheckpoint set.
 func (p *Placer) endCheckpoint(sessionUID string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.checkpoints[sessionUID]--; p.checkpoints[sessionUID] <= 0 {
-		delete(p.checkpoints, sessionUID)
+	p.sessions.mu.Lock()
+	defer p.sessions.mu.Unlock()
+	if p.sessions.checkpoints[sessionUID]--; p.sessions.checkpoints[sessionUID] <= 0 {
+		delete(p.sessions.checkpoints, sessionUID)
 	}
 }
 
@@ -625,12 +638,13 @@ func (p *Placer) endCheckpoint(sessionUID string) {
 //
 // Ending a stream only cancels the turn's context, and a turn that registered but has not yet
 // minted its fence still mints one. So endHarnesses then waits, bounded by ctx, until every ended
-// turn has made its fence call or returned. After it returns nil, no turn of this Placer can mint a
-// fence on the session, and the fence the caller mints next is the newest one the checkpoint will
+// turn has made its fence call or returned. After it returns nil, no turn run by a Placer sharing
+// this session set can mint a fence on the session, and the fence the caller mints next is the newest one the checkpoint will
 // see. If ctx ends first, it returns an error and the caller must abort before checkpointing.
 //
-// It covers connections opened by THIS Placer only. A turn driven by another process is fenced by
-// the log as before, but its stream stays open until that turn next touches the log or returns.
+// It covers connections opened by every Placer sharing this Placer's session set: all Placers of
+// one Registry, so a turn routed by ExecRequest.harness to another harness's Placer is ended too. A turn driven by another process is fenced by the log as before, but its stream stays
+// open until that turn next touches the log or returns.
 func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*liveHarness) (err error) {
 	if len(open) == 0 {
 		return nil
@@ -956,7 +970,7 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if err := p.endHarnesses(ctx, parentUID, open); err != nil {
 		return api.SnapshotRef{}, err
 	}
-	// A turn this Placer had open may have minted a newer fence after ours. It wrote nothing
+	// A turn ended above may have minted a newer fence after ours. It wrote nothing
 	// (checkSuperseded), but its fence would leave ours stale and fail the SUSPEND append after the
 	// parent is already cold. endHarnesses returned only once every such turn had minted, and no new
 	// turn can open, so mint the fence the record is written under now, and re-check the head while
