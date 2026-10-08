@@ -10,14 +10,17 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/client"
 	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/harnesswire"
 	"github.com/aramase/agentsessions/placement"
+	"github.com/aramase/agentsessions/session"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
@@ -85,10 +88,12 @@ func (b *routedBackend) Capabilities() api.RuntimeCapabilities {
 type harnessServer struct {
 	addr string
 
-	mu       sync.Mutex
-	targets  []string
-	started  chan struct{}
-	finished chan struct{}
+	mu      sync.Mutex
+	targets []string
+	// unaryTargets is the ate-target-actor metadata of each unary call (Describe), in order.
+	unaryTargets [][]string
+	started      chan struct{}
+	finished     chan struct{}
 }
 
 func startHarnessServer(t *testing.T, h api.Harness) *harnessServer {
@@ -98,7 +103,13 @@ func startHarnessServer(t *testing.T, h api.Harness) *harnessServer {
 		t.Fatal(err)
 	}
 	hs := &harnessServer{addr: lis.Addr().String(), started: make(chan struct{}, 8), finished: make(chan struct{}, 8)}
-	srv := grpc.NewServer(grpc.ChainStreamInterceptor(func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	srv := grpc.NewServer(grpc.ChainUnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		hs.mu.Lock()
+		hs.unaryTargets = append(hs.unaryTargets, md.Get("ate-target-actor"))
+		hs.mu.Unlock()
+		return handler(ctx, req)
+	}), grpc.ChainStreamInterceptor(func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		md, _ := metadata.FromIncomingContext(ss.Context())
 		hs.mu.Lock()
 		hs.targets = append(hs.targets, md.Get("ate-target-actor")...)
@@ -117,6 +128,12 @@ func (hs *harnessServer) seenTargets() []string {
 	hs.mu.Lock()
 	defer hs.mu.Unlock()
 	return append([]string(nil), hs.targets...)
+}
+
+func (hs *harnessServer) seenUnaryTargets() [][]string {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	return slices.Clone(hs.unaryTargets)
 }
 
 var statelessEcho = api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}
@@ -141,26 +158,97 @@ func TestDefaultDialAttachesCallMetadataToTheHarnessStream(t *testing.T) {
 	}
 }
 
-// The incarnation, not the caller, decides which sandbox a call reaches: a value the caller already
-// put on the context for the same key must not survive.
+// The incarnation, not the caller, decides which sandbox a call reaches. Whatever the caller already
+// put on the context for the same key, in any letter case and with any number of values, every call
+// must carry exactly one ate-target-actor: the incarnation's. Two values would let a router that
+// reads the last one route to an actor an upstream check that read the first one never approved.
 func TestDefaultDialCallMetadataOverridesTheCaller(t *testing.T) {
+	const mine, other = "space/mine", "space/someone-else"
+	cases := []struct {
+		name   string
+		caller func(context.Context) context.Context
+	}{
+		{"appended value", func(ctx context.Context) context.Context {
+			return metadata.AppendToOutgoingContext(ctx, "ate-target-actor", other)
+		}},
+		{"both values, other last", func(ctx context.Context) context.Context {
+			return metadata.AppendToOutgoingContext(ctx, "ate-target-actor", mine, "ate-target-actor", other)
+		}},
+		{"mixed-case key", func(ctx context.Context) context.Context {
+			return metadata.NewOutgoingContext(ctx, metadata.MD{"Ate-Target-Actor": {other}})
+		}},
+		{"mixed-case key and appended value", func(ctx context.Context) context.Context {
+			ctx = metadata.NewOutgoingContext(ctx, metadata.MD{"ATE-TARGET-ACTOR": {other}})
+			return metadata.AppendToOutgoingContext(ctx, "Ate-Target-Actor", other)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hs := startHarnessServer(t, echoagent.Harness{})
+			har, closeHarness, err := placement.DefaultDial(api.Incarnation{
+				Address:      hs.addr,
+				CallMetadata: map[string]string{"ate-target-actor": mine},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = closeHarness() }()
+			ctx := tc.caller(context.Background())
+
+			if _, err := har.Describe(ctx); err != nil {
+				t.Fatal(err)
+			}
+			start := &api.Start{ExecutionID: "e1", Inputs: []api.Message{*api.TextMessage("user", "hi")}}
+			if err := har.Run(ctx, start, echoSink{}); err != nil {
+				t.Fatal(err)
+			}
+			if got := hs.seenUnaryTargets(); len(got) != 1 || !slices.Equal(got[0], []string{mine}) {
+				t.Errorf("Describe carried ate-target-actor=%v, want only the incarnation's [[%s]]", got, mine)
+			}
+			if got := hs.seenTargets(); !slices.Equal(got, []string{mine}) {
+				t.Errorf("Connect stream carried ate-target-actor=%v, want only the incarnation's [%s]", got, mine)
+			}
+		})
+	}
+}
+
+// A caller of the Sessions API cannot pick the actor either: an ate-target-actor header on its Exec
+// call must not reach the harness call, which carries only the session's own actor.
+func TestExecCallerHeaderDoesNotReachTheHarnessCall(t *testing.T) {
 	hs := startHarnessServer(t, echoagent.Harness{})
-	har, closeHarness, err := placement.DefaultDial(api.Incarnation{
-		Address:      hs.addr,
-		CallMetadata: map[string]string{"ate-target-actor": "space/mine"},
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	registry, err := placement.NewRegistry("echo", map[string]*placement.Placer{
+		"echo": placement.New(&routedBackend{address: hs.addr, desc: statelessEcho}, echoagent.Model),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = closeHarness() }()
-
-	ctx := metadata.AppendToOutgoingContext(context.Background(), "ate-target-actor", "space/someone-else")
-	start := &api.Start{ExecutionID: "e1", Inputs: []api.Message{*api.TextMessage("user", "hi")}}
-	if err := har.Run(ctx, start, echoSink{}); err != nil {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := hs.seenTargets(); len(got) != 1 || got[0] != "space/mine" {
-		t.Fatalf("Connect stream carried ate-target-actor=%v, want only the incarnation's [space/mine]", got)
+	srv := grpc.NewServer()
+	v1.RegisterSessionsServer(srv, session.NewService(store, registry))
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	c, err := client.Dial(lis.Addr().String(), client.WithDialOptions(grpc.WithTransportCredentials(insecure.NewCredentials())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	ctx := metadata.AppendToOutgoingContext(t.Context(), "ate-target-actor", "space/victim")
+	turn, err := c.Exec(ctx, client.ExecOptions{Inputs: []string{"hi"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"space/" + turn.Session.GetMetadata().GetUid()}
+	if got := hs.seenTargets(); !slices.Equal(got, want) {
+		t.Fatalf("Connect stream carried ate-target-actor=%v, want only the session's %v", got, want)
 	}
 }
 
