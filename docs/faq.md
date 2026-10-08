@@ -45,9 +45,10 @@ swap on append is what makes "single writer" enforceable rather than a hope.
 
 ## Can Exec, Suspend, and Resume overlap?
 
-On the same Placer, overlapping calls for one session return gRPC `ABORTED` without changing compute
-or the journal. Retry after the active call finishes, using the current cursor for Exec. Other sessions
-remain independent. This is a local guard, not fencing between separate Placers or hosts.
+Across all Placers in one Registry, overlapping calls for one session return gRPC `ABORTED` without
+changing compute or the journal. Suspend will not interrupt a running turn. Retry after the active call
+finishes, using the current cursor for Exec. Other sessions remain independent. A standalone Placer
+has its own guard; separate Registries or hosts are not fenced by this local guard.
 
 ## Is the provenance chain Go-specific?
 

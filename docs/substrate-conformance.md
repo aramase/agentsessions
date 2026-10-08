@@ -101,9 +101,10 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - The fork checkpoint is committed under a fence and a CAS on the seq the caller validated, so a turn
   racing the fork can never widen the children's prefix past the RAM they were cloned from. A fork
   that is *refused* takes the fence path not at all: a request that changes nothing must not
-  supersede a turn in flight on the parent. A fork that proceeds does supersede it, which is the same
-  semantic `Suspend` has and is over-determined anyway, since the checkpoint frees the parent's
-  worker. The one rough edge is a fork that mints its fence and then aborts on the re-check: it
+  supersede a turn in flight on the parent. A fork that proceeds does supersede it, since the
+  checkpoint frees the parent's worker. Unlike `Suspend`, `Fork` is not covered by the Registry's
+  session guard; `Suspend` rejects overlap instead of interrupting the running turn. The one rough
+  edge is a fork that mints its fence and then aborts on the re-check: it
   supersedes the writer that beat it even though it gives up. Closing that needs a read-only fence
   accessor on `eventlog.Store` (`NewFence` is currently the only way to obtain one, and it mutates),
   which is a wider API change than this path warrants.

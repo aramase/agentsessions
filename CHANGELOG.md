@@ -36,9 +36,12 @@ provide.
 
 ### Compatibility
 
-- Overlapping `Exec`, `Suspend`, and `Resume` calls for one session on the same Placer now return
-  gRPC `ABORTED` without changing compute or the journal. Retry after the in-flight operation finishes;
-  other sessions remain independent. This guard is local to a Placer, not cross-host fencing.
+- Overlapping `Exec`, `Suspend`, and `Resume` calls for one session across all Placers in one Registry
+  now return gRPC `ABORTED` without changing compute or the journal. Retry after the in-flight operation
+  finishes; other sessions remain independent. Direct Placer calls return `placement.ErrSessionBusy`.
+  Standalone Placers have private guards; separate Registries or hosts are not fenced by this guard.
+  Construct the Registry before using its Placers; registering already-used Placers or sharing them
+  between Registries is unsupported. Idle session guard entries are reclaimed.
 
 - `Runtime.Snapshot(..., SnapshotExternal)` owns the cold transition: capture state, release dedicated
   compute where applicable, and retain any handle needed by `Restore`. Out-of-tree runtimes that only

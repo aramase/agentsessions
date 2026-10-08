@@ -12,6 +12,7 @@ import (
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/wire"
 )
@@ -43,11 +44,34 @@ func TestSessionOverlapReturnsAborted(t *testing.T) {
 	h := &overlapHarness{entered: make(chan struct{}), release: make(chan struct{}, 1)}
 	t.Cleanup(func() { close(h.release) })
 	c := newClientWith(t, local.New(h))
+	testSessionOverlap(t, c, h, "")
+}
+
+func TestSessionOverlapAcrossRegistryPlacers(t *testing.T) {
+	h := &overlapHarness{entered: make(chan struct{}), release: make(chan struct{}, 1)}
+	t.Cleanup(func() { close(h.release) })
+	recorded, override := local.New(echoagent.Harness{}), local.New(h)
+	t.Cleanup(func() { _ = recorded.Close() })
+	t.Cleanup(func() { _ = override.Close() })
+	registry, err := placement.NewRegistry("recorded", map[string]*placement.Placer{
+		"recorded": placement.New(recorded, echoagent.Model),
+		"override": placement.New(override, echoagent.Model),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testSessionOverlap(t, newClientWithRegistry(t, registry), h, "override")
+}
+
+// Exec uses the requested override; Suspend and Resume resolve the recorded harness instead.
+func testSessionOverlap(t *testing.T, c v1.SessionsClient, h *overlapHarness, harness string) {
+	t.Helper()
 	uid := mustCreate(t, c)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	first, err := c.Exec(ctx, &v1.ExecRequest{
 		Session: uid,
+		Harness: harness,
 		Inputs:  []*v1.Message{wire.MessageToProto(api.TextMessage("user", "first"))},
 	})
 	if err != nil {
@@ -57,6 +81,10 @@ func TestSessionOverlapReturnsAborted(t *testing.T) {
 	case <-h.entered:
 	case <-ctx.Done():
 		t.Fatal("first execution did not reach the harness")
+	}
+	before, err := c.GetSession(ctx, &v1.GetSessionRequest{Uid: uid})
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, operation := range []string{"Exec", "Suspend", "Resume"} {
 		t.Run(operation, func(t *testing.T) {
@@ -77,7 +105,11 @@ func TestSessionOverlapReturnsAborted(t *testing.T) {
 				_, err = c.Resume(ctx, &v1.ResumeRequest{Session: uid})
 			}
 			if status.Code(err) != codes.Aborted {
-				t.Fatalf("overlapping %s: want Aborted, got %v", operation, err)
+				t.Errorf("overlapping %s: want Aborted, got %v", operation, err)
+			}
+			after, err := c.GetSession(ctx, &v1.GetSessionRequest{Uid: uid})
+			if err != nil || after.GetLastSeq() != before.GetLastSeq() || after.GetComputeState() != before.GetComputeState() {
+				t.Errorf("overlapping %s changed the journal projection: %v, %v", operation, after, err)
 			}
 		})
 	}

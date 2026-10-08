@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net"
 	"strings"
-	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -34,6 +33,11 @@ import (
 // runs again on the turn's own connection, still before anything is written to the log.
 // session.Service surfaces it as codes.FailedPrecondition.
 var ErrUnplaceable = errors.New("placement: harness cannot be placed on this runtime")
+
+// ErrSessionBusy is returned when Exec, Suspend, or Resume overlaps another operation on the same
+// session through this Placer or its Registry. No compute or journal transition is attempted;
+// session.Service surfaces it as codes.Aborted, independently of any backend transport status.
+var ErrSessionBusy = errors.New("placement: another operation is in progress for this session")
 
 // ErrHarnessUnavailable is returned when the harness could not be reached to describe itself. It is
 // only ever raised by the admission check, which runs before any compute is provisioned or anything
@@ -88,8 +92,8 @@ type Placer struct {
 	dial    Dialer
 	logger  *slog.Logger
 
-	// Stable per-session locks live for this Placer's lifetime; they do not fence other Placers.
-	sessionLocks sync.Map // session UID -> *sync.Mutex
+	// Private for a standalone Placer; NewRegistry wires one shared guard before use.
+	guard *sessionGuard
 }
 
 // Dialer opens a Harness.Connect client to the harness at a runtime-specific address and returns a
@@ -165,6 +169,7 @@ func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 		model:   model,
 		dial:    defaultDial,
 		logger:  slog.New(slog.DiscardHandler),
+		guard:   new(sessionGuard),
 	}
 	for _, o := range opts {
 		o(p)
@@ -177,13 +182,8 @@ func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 
 // trySessionLock serializes Exec/Suspend/Resume through their compute and journal transitions.
 // Refuse overlap rather than queueing a request whose cursor may be stale by the time it runs.
-func (p *Placer) trySessionLock(sessionUID string) (*sync.Mutex, error) {
-	value, _ := p.sessionLocks.LoadOrStore(sessionUID, new(sync.Mutex))
-	lock := value.(*sync.Mutex)
-	if !lock.TryLock() {
-		return nil, status.Error(codes.Aborted, "placement: another operation is in progress for this session")
-	}
-	return lock, nil
+func (p *Placer) trySessionLock(sessionUID string) (func(), error) {
+	return p.guard.tryLock(sessionUID)
 }
 
 // Exec places one turn: Create the incarnation, mint the fence from the log and stamp it on the
@@ -209,11 +209,11 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
 
-	lock, err := p.trySessionLock(sessionUID)
+	release, err := p.trySessionLock(sessionUID)
 	if err != nil {
 		return api.Incarnation{}, err
 	}
-	defer lock.Unlock()
+	defer release()
 
 	if _, err := p.admit(ctx, sessionUID); err != nil {
 		return api.Incarnation{}, err
@@ -402,11 +402,11 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	finish := observability.StartDebug(ctx, p.logger, "placement", "suspend", "session_uid", sessionUID)
 	defer func() { finish(err, "error_kind", placementErrorKind(err)) }()
 
-	lock, err := p.trySessionLock(sessionUID)
+	release, err := p.trySessionLock(sessionUID)
 	if err != nil {
 		return api.SnapshotRef{}, err
 	}
-	defer lock.Unlock()
+	defer release()
 
 	inc := api.Incarnation{ID: sessionUID}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
@@ -434,11 +434,11 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
 
-	lock, err := p.trySessionLock(sessionUID)
+	release, err := p.trySessionLock(sessionUID)
 	if err != nil {
 		return err
 	}
-	defer lock.Unlock()
+	defer release()
 
 	// Gate before Restore, exactly as Exec does before Create: Resume re-drives an interrupted turn,
 	// so it must not reach a harness the backend cannot host.
@@ -528,7 +528,7 @@ func placementErrorKind(err error) string {
 		return "unplaceable"
 	case errors.Is(err, ErrHarnessUnavailable):
 		return "harness_unavailable"
-	case errors.Is(err, eventlog.ErrConflict):
+	case errors.Is(err, ErrSessionBusy), errors.Is(err, eventlog.ErrConflict):
 		return "conflict"
 	case errors.Is(err, eventlog.ErrFenced):
 		return "fenced"
@@ -661,9 +661,9 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 		return api.SnapshotRef{}, fmt.Errorf("%w: harness %q requires %s, which can only fork at the log head (%d), not seq %d",
 			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, head, atSeq)
 	}
-	// Past this point the fork is committing, so superseding the current writer is the intended
-	// semantic (the same one Suspend has). Fencing before the snapshot means an in-flight turn cannot
-	// advance the head underneath a checkpoint that is not undoable.
+	// Past this point the fork is committing, so superseding the current writer is intended.
+	// Unlike Suspend, Fork is not covered by the session guard. Fencing before the snapshot means
+	// an in-flight turn cannot advance the head underneath a checkpoint that is not undoable.
 	fence, err := parent.NewFence()
 	if err != nil {
 		return api.SnapshotRef{}, err
@@ -696,10 +696,10 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	return ref, nil
 }
 
-// appendLifecycle mints a fresh fence (superseding any prior writer) and records a lifecycle event at
-// the head observed after that fence. Used where the event has no sequence precondition (Suspend,
-// Resume): fencing first is what makes the head stable, so the append cannot lose a CAS to a turn
-// that was already in flight.
+// appendLifecycle mints a fresh fence and records a lifecycle event at the head observed afterward.
+// Suspend holds the session guard across snapshot and append, so it cannot interrupt an Exec or
+// Resume through the same guard. The fence still rejects stale writers outside that guard; a
+// separate Registry or host can race this append and make it fail.
 func appendLifecycle(log eventlog.Store, lc api.Lifecycle) error {
 	fence, err := log.NewFence()
 	if err != nil {

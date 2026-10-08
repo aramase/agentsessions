@@ -340,8 +340,8 @@ func TestPlacerSessionOperationsRejectOverlap(t *testing.T) {
 						before := suspendRecords(t, log)
 						actor := ctl.actors[substrate.ActorRef{Atespace: "space", Name: "session"}]
 						state := *actor
-						if err := invoke(overlap, log, "session"); status.Code(err) != codes.Aborted {
-							t.Fatalf("overlapping %s during %s: want Aborted, got %v", overlap, outer, err)
+						if err := invoke(overlap, log, "session"); !errors.Is(err, placement.ErrSessionBusy) {
+							t.Fatalf("overlapping %s during %s: want ErrSessionBusy, got %v", overlap, outer, err)
 						}
 						if *actor != state || !reflect.DeepEqual(suspendRecords(t, log), before) {
 							t.Fatal("rejected overlap changed the actor or journal")
