@@ -2,7 +2,9 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -194,6 +196,92 @@ func TestResumeForkedToolIntentFailedPrecondition(t *testing.T) {
 	}
 }
 
+func TestResumeV012JournalThroughSessions(t *testing.T) {
+	store := openStore(t, ":memory:")
+	client := serve(t, store)
+	uid := mustCreate(t, client)
+	log := store.Session(uid)
+	data, err := os.ReadFile(filepath.Join("..", "controller", "testdata", "v0.1.2", "crashed-output.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var original []eventlog.Record
+	if err := json.Unmarshal(data, &original); err != nil {
+		t.Fatal(err)
+	}
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range original {
+		got, err := log.Append(record.Seq-1, fence, record.Event)
+		if err != nil || !reflect.DeepEqual(record, got) {
+			t.Fatalf("copy v0.1.2 record: %#v, %v", got, err)
+		}
+	}
+	if _, err := client.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); err != nil {
+		t.Fatalf("v0.1.2 Sessions Resume: %v", err)
+	}
+	after, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(original, after[:len(original)]) {
+		t.Fatal("Sessions Resume rewrote old prefix")
+	}
+	var outputs []string
+	for _, record := range after {
+		if record.Event.Kind == api.EventOutput && record.Event.Message != nil {
+			outputs = append(outputs, record.Event.Message.Text())
+		}
+	}
+	if !reflect.DeepEqual(outputs, []string{"echo:hello"}) {
+		t.Fatalf("legacy completion = %v", outputs)
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResumeLegacyForkedToolIntentGuidance(t *testing.T) {
+	store := openStore(t, ":memory:")
+	client := serve(t, store)
+	uid := mustCreate(t, client)
+	log := store.Session(uid)
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := api.ToolCall{ID: "inherited", Tool: "charge", Mediation: api.MediationControllerMediated, IdempotencyKey: "key"}
+	for i, event := range []api.Event{
+		{Kind: api.EventInput, Message: api.TextMessage("user", "charge")},
+		{Kind: api.EventToolCall, ToolCall: &call},
+		{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleFork, Detail: "parent@2"}},
+	} {
+		if _, err := log.Append(int64(i), fence, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("legacy inherited Resume = %v", err)
+	}
+	if message := status.Convert(err).Message(); !strings.Contains(message, "Exec a new turn") || strings.Contains(message, "only for ID-bearing") {
+		t.Fatalf("legacy guidance must allow an explicit modern boundary: %q", message)
+	}
+	after, err := log.Read(1)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("legacy rejection changed journal: %v", err)
+	}
+	if outputs := execOutputs(t, client, uid, "new turn", int64(len(before))); !reflect.DeepEqual(outputs, []string{"echo:new turn"}) {
+		t.Fatalf("Exec after inherited legacy intent = %v", outputs)
+	}
+}
+
 func TestResumeInvalidExecutionLogDoesNotAssumeIncompleteInputs(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -201,8 +289,11 @@ func TestResumeInvalidExecutionLogDoesNotAssumeIncompleteInputs(t *testing.T) {
 		detail string
 	}{
 		{
-			name:   "missing execution identity",
-			events: []api.Event{{Kind: api.EventInput, Message: api.TextMessage("user", "hi")}},
+			name: "missing execution identity",
+			events: []api.Event{
+				{Kind: api.EventExecutionStart, ExecutionID: "interrupted", ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(1)}},
+				{Kind: api.EventInput, Message: api.TextMessage("user", "hi")},
+			},
 			detail: "no execution_id",
 		},
 		{
@@ -229,8 +320,8 @@ func TestResumeInvalidExecutionLogDoesNotAssumeIncompleteInputs(t *testing.T) {
 				}
 			}
 			_, err = client.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
-			if status.Code(err) != codes.Internal {
-				t.Errorf("invalid-log Resume = %v, want Internal", err)
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Errorf("invalid-log Resume = %v, want FailedPrecondition", err)
 			}
 			message := status.Convert(err).Message()
 			if !strings.Contains(message, tc.detail) {

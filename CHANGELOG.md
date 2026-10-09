@@ -36,6 +36,21 @@ provide.
 
 ### Compatibility
 
+- Controller Replay and Resume accept the ID-less journals written by v0.1.2 without rewriting
+  existing records or hashes. Pure legacy Replay retains v0.1.2's whole-log harness invocation,
+  including its multi-turn replay limitation. Resume retains the last-INPUT rule and continues
+  interrupted legacy turns with ID-less events; END or ERROR finishes a legacy turn. Original
+  config, resume cursor and input completeness remain unavailable. Harness invocations use a
+  deterministic `legacy-<sha256>` transport-only ID derived from host-bound session UID, original
+  record position and canonical content; it is not journaled. Direct controller callers must supply
+  a nonempty `WithSessionUID` for selected legacy invocations, or receive `ErrMissingSessionUID`
+  before the harness runs. Exec permits a new modern turn after an unfinished or errored legacy
+  tail. Its EXECUTION_START establishes the boundary: mixed Replay preserves the complete legacy
+  prefix's whole-log semantics and skips the abandoned tail, while modern History retains the
+  original bytes. Only the ID-less event kinds the released writer persisted qualify: ID-less
+  start markers and non-legacy kinds are invalid. Once a modern start marker or ID-bearing
+  execution event appears, later ID-less execution events still fail closed. Remaining invalid-log
+  refusals are FAILED_PRECONDITION. Inherited-tool safety checks and rollback restrictions remain.
 - Overlapping `Exec`, `Suspend`, and `Resume` calls for one session across all Placers in one Registry
   now return gRPC `ABORTED` without changing compute or the journal. Retry after the in-flight operation
   finishes; other sessions remain independent. Direct Placer calls return `placement.ErrSessionBusy`.

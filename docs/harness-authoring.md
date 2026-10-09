@@ -91,8 +91,23 @@ legacy behavior. Placement/runtime restoration can still precede controller vali
 
 Executions without a start marker use empty config and a zero cursor. This includes legacy logs:
 older discarded non-empty config/cursors are irrecoverable, so those executions may fail deterministic
-reconstruction if their original behavior depended on the missing values. See
-[durable execution invocation](concepts.md#durable-execution-invocation) for the journal layout.
+reconstruction if their original behavior depended on the missing values. Released v0.1.2
+journals also omit execution IDs. Their controller Replay retains the old single invocation with
+all legacy inputs and the entire legacy journal as `History`; it does not infer per-turn boundaries,
+so multi-turn legacy replay retains its historical limitations. Legacy Resume selects only the
+last `INPUT` and continues the invocation without adding an execution ID to journal records.
+`Start.ExecutionID` instead carries a stable `legacy-<sha256>` compatibility token, derived from
+session UID, original record position and canonical content; the wire uses it for correlation.
+Retries of the same legacy turn reuse it, but different sessions do not. It is never journaled as
+an event ID. Direct legacy replay/recovery callers must supply a nonempty `WithSessionUID`;
+otherwise the selected invocation returns `ErrMissingSessionUID` before running the harness.
+A legacy END or ERROR finishes the turn, making Resume a no-op. A new Exec may also supersede an
+unfinished legacy tail without rewriting it: EXECUTION_START establishes the modern boundary.
+Mixed Replay skips that abandoned tail while retaining whole-log replay of the complete legacy
+prefix; modern History still contains the full original legacy events. Modern turns still require
+execution IDs, and ID-bearing events without a start marker need a finished legacy boundary. See
+[durable execution invocation](concepts.md#durable-execution-invocation) for detection rules and
+the journal layout.
 Do not put credentials in config: it is durable journal content, not a secret channel.
 
 ## The event sink
@@ -224,7 +239,8 @@ Fork still copies the requested prefix, but Resume returns `controller.ErrInheri
 before running the harness or appending any event if the unfinished execution has inherited tool
 intents still unresolved at the journal head. This includes legacy turns without `EXECUTION_START`.
 `Sessions.Resume` reports `FAILED_PRECONDITION`: fork at or after the matching `TOOL_RESULT`, or
-Exec a new turn. Completed inherited pairs are served from the journal without invoking the executor,
+Exec a new turn. A new modern start marker can supersede an unfinished legacy prefix without
+re-driving its inherited intent. Completed inherited pairs are served from the journal without invoking the executor,
 including legacy results recorded after the fork marker. An intent first written by the child after
 the fork is not inherited and can be re-driven under the child's UID.
 

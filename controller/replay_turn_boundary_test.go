@@ -244,9 +244,14 @@ func TestReplayRejectsMissingExecutionID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Once an ID-bearing execution begins, a later unstamped effect cannot be legacy.
 	if _, err := log.Append(0, fence, api.Event{
-		Kind:    api.EventInput,
-		Message: api.TextMessage("user", "unstamped"),
+		ExecutionID: "modern", Kind: api.EventInput, Message: api.TextMessage("user", "hello"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(1, fence, api.Event{
+		Kind: api.EventOutput, Message: api.TextMessage("assistant", "unstamped"),
 	}); err != nil {
 		t.Fatal(err)
 	}

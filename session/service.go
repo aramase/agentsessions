@@ -642,6 +642,8 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; fork at or after the TOOL_RESULT, or Exec a new turn", err)
 		case errors.Is(err, controller.ErrIncompleteInvocation):
 			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
+		case errors.Is(err, controller.ErrInvalidExecutionLog):
+			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v", err)
 		case errors.Is(err, placement.ErrUnplaceable):
 			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v", err)
 		case errors.Is(err, placement.ErrHarnessUnavailable):
@@ -673,7 +675,7 @@ func execError(err error) error {
 	switch {
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, placement.ErrUnplaceable):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())

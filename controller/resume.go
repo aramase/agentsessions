@@ -13,7 +13,8 @@ import (
 // did not complete (no END), Resume re-runs the harness with a hybrid sink that SERVES the
 // already-recorded effects — never re-invoking a recorded model/tool call (at-most-once, I3) — and
 // switches to LIVE (invoke + record) for anything past the crash point, then appends END. If the
-// last turn is complete or the log is empty, it is a no-op (returns false). A start marker with
+// last turn is complete or the log is empty, it is a no-op (returns false); legacy ERROR also
+// finishes a turn. A start marker with
 // missing or inconsistent input completeness information is rejected before the harness runs.
 // An unresolved tool intent inherited across a fork returns ErrInheritedToolIntent before running
 // the harness or appending events: the child's dedup namespace cannot recover the parent's effect.
@@ -47,11 +48,18 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	if err != nil {
 		return false, err
 	}
-	if len(executions) == 0 || executions[len(executions)-1].completed {
+	if len(executions) == 0 {
 		return false, nil
 	}
 
 	execution := executions[len(executions)-1]
+	legacy := execution.legacyEnd > 0
+	if legacy {
+		execution = legacyResumeExecution(events[:execution.legacyEnd])
+	}
+	if execution.completed {
+		return false, nil
+	}
 	if err := execution.validateInputs(); err != nil {
 		return false, err
 	}
@@ -89,13 +97,21 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	if inheritedTools > 0 {
 		return false, fmt.Errorf("%w: execution %q", ErrInheritedToolIntent, execution.id)
 	}
+	invocationID := execution.id
+	if legacy {
+		// Select the original last INPUT, so retries retain identity while recovery remains pending.
+		invocationID, err = c.legacyExecutionID(recs[execution.start])
+		if err != nil {
+			return false, err
+		}
+	}
 	sink := &resumeSink{
-		live:   liveSink{c: c, executionID: execution.id},
+		live:   liveSink{c: c, executionID: execution.id, legacyRecovery: legacy},
 		stream: execution.stream,
 	}
 	recordedEffectCount = len(execution.stream)
 	start := &api.Start{
-		ExecutionID:   execution.id,
+		ExecutionID:   invocationID,
 		Inputs:        execution.inputs,
 		History:       events[:execution.start],
 		Config:        execution.config,
@@ -109,10 +125,10 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		runErr = fmt.Errorf("%w: recovery consumed %d of %d recorded effects", ErrReplayDiverged, sink.i, len(sink.stream))
 	}
 	if runErr != nil {
-		_, _ = c.appendSeq(execution.id, api.Event{Kind: api.EventError, Err: &api.Error{Description: runErr.Error()}})
+		_, _ = sink.live.append(api.Event{Kind: api.EventError, Err: &api.Error{Description: runErr.Error()}})
 		return true, runErr
 	}
-	_, err = c.appendSeq(execution.id, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	_, err = sink.live.append(api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	return true, err
 }
 
@@ -240,6 +256,12 @@ func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
 func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
 	if s.failure != nil {
 		return s.failure
+	}
+	if s.live.legacyRecovery {
+		if s.i < len(s.stream) {
+			return nil // v0.1.2 did not serve usage; past the crash point it journals it live.
+		}
+		return s.live.Usage(ctx, u)
 	}
 	if s.i < len(s.stream) {
 		ev, ok := s.recordedNext(api.EventUsage)

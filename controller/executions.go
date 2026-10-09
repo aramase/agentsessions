@@ -7,9 +7,9 @@ import (
 	"github.com/aramase/agentsessions/api"
 )
 
-// recordedExecution is the replay projection of one Harness.Run. Its first event establishes the
-// exact History boundary; every execution-scoped event carries id, so no content-based inference
-// is needed.
+// recordedExecution is the replay projection of one modern Harness.Run, or the whole legacy
+// prefix. Modern identities establish exact turn boundaries; legacyEnd retains the old whole-log
+// boundary without inventing an identity or inferring multiple invocations.
 type recordedExecution struct {
 	id            string
 	start         int
@@ -21,15 +21,39 @@ type recordedExecution struct {
 	hasStart      bool
 	inputCount    *int64
 	inputRecords  int
+	legacyEnd     int
 }
 
-// recordedExecutions groups execution-scoped events by ID in first-seen journal order. Lifecycle
-// events are session-scoped and carry no ID.
+// recordedExecutions validates identities and completed modern invocations before any harness
+// runs. It preserves an ID-less legacy prefix, then groups modern events by ID in first-seen order.
+// Lifecycle is session-scoped.
 func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
+	prefixEnd, err := legacyPrefix(events)
+	if err != nil {
+		return nil, err
+	}
 	var executions []recordedExecution
+	if prefixEnd > 0 {
+		replayEnd := prefixEnd
+		if prefixEnd < len(events) {
+			// A new modern turn abandons an incomplete/failed legacy tail. Replay only the
+			// last successful whole-log prefix; never infer separate legacy invocations.
+			// Modern Start.History still uses the original, untrimmed events.
+			replayEnd = 0
+			for i, event := range events[:prefixEnd] {
+				if event.Kind == api.EventEnd {
+					replayEnd = i + 1
+				}
+			}
+		}
+		if replayEnd > 0 {
+			executions = append(executions, legacyReplayExecution(events[:replayEnd]))
+		}
+	}
 	byID := make(map[string]int)
 
-	for i, event := range events {
+	for i := prefixEnd; i < len(events); i++ {
+		event := events[i]
 		if event.Kind == api.EventLifecycle {
 			continue
 		}
