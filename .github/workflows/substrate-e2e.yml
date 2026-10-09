@@ -151,7 +151,7 @@ jobs:
 
       - name: Stateless-tier conformance (in-cluster Job)
         # Runs before the expensive micro-VM staging below, so a break in the cheap tier fails fast.
-        run: hack/run-e2e-job.sh 'TestStatelessReplayOnGVisor' "${E2E_IMAGE}" 600
+        run: hack/run-e2e-job.sh '^(TestStatelessReplayOnGVisor|TestSessionSuspendResumeOnGVisor)$' "${E2E_IMAGE}" 600
 
       - name: Deploy the micro-VM sandbox class
         # run-microvm-demo-kind stages the (cached) kata-assets into rustfs and installs the

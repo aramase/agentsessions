@@ -101,9 +101,10 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - The fork checkpoint is committed under a fence and a CAS on the seq the caller validated, so a turn
   racing the fork can never widen the children's prefix past the RAM they were cloned from. A fork
   that is *refused* takes the fence path not at all: a request that changes nothing must not
-  supersede a turn in flight on the parent. A fork that proceeds does supersede it, which is the same
-  semantic `Suspend` has and is over-determined anyway, since the checkpoint frees the parent's
-  worker. The one rough edge is a fork that mints its fence and then aborts on the re-check: it
+  supersede a turn in flight on the parent. A fork that proceeds does supersede it, since the
+  checkpoint frees the parent's worker. Unlike `Suspend`, `Fork` is not covered by the Registry's
+  session guard; `Suspend` rejects overlap instead of interrupting the running turn. The one rough
+  edge is a fork that mints its fence and then aborts on the re-check: it
   supersedes the writer that beat it even though it gives up. Closing that needs a read-only fence
   accessor on `eventlog.Store` (`NewFence` is currently the only way to obtain one, and it mutates),
   which is a wider API change than this path warrants.
@@ -152,6 +153,19 @@ parent's snapshot and resumed **before** its UID is handed out, so it is already
 first turn lands; cold-booting it there would throw away the cloned RAM the fork exists to carry, and
 the harness would never rebuild it (I4). A control-client double that accepts every `CreateActor`
 cannot see any of this, which is why it is asserted against a live cluster.
+
+### Suspend and Resume failure boundaries
+
+An `Exec` after `Placer.Suspend` does not require an explicit `Placer.Resume`: `Create` restores the
+SUSPENDED actor with `boot:false`, then the controller records the new execution. This path preserves
+the actor's captured state but does not append a RESUME lifecycle marker.
+
+`Placer.Resume` restores compute before dialing the harness, minting a fence, recovering any interrupted
+turn, and appending RESUME. If a step after `Restore` fails, the actor may already be RUNNING while the
+journal's last lifecycle marker is still SUSPEND. There is no automatic re-snapshot on this failure.
+A later successful `Suspend` checkpoints the running actor and records a new SUSPEND; a later successful
+`Exec` attaches to it and records a new execution without a RESUME marker. Either reconciles the
+recorded compute state with the actor; neither rolls back effects from a failed interrupted turn.
 
 ## The transport: direct pod-IP dial, not the mesh
 
@@ -239,24 +253,36 @@ direct pod-IP dial, then re-dials and replays. Asserts: replay is **byte-identic
 are **0** (I1), and the hash chain verifies. Same determinism triple as the unit conformance suite, now
 over the substrate mesh.
 
+### `TestSessionSuspendResumeOnGVisor` — session-level stateless suspension
+
+Places the echo harness through the `Placer`, executes a turn, calls `Placer.Suspend` and explicit
+`Placer.Resume`, then executes another turn. The recorded snapshot retains the actor handle required
+by Restore, and both lifecycle markers and subsequent output remain on a valid hash chain. This
+regression is selected alongside stateless replay in the gVisor CI pass.
+
+Cold suspension is not teardown: `Snapshot(EXTERNAL)` releases the worker and keeps the actor
+SUSPENDED; `Stop` deletes it. Calling Stop after the snapshot would make explicit Resume fail with
+NotFound, even for a stateless harness.
+
 ### `TestMemorySnapshotSuspendResume` — memory continuity
 
 Places the in-RAM counter (`harness/counteragent`, `REQUIRES_MEMORY_SNAPSHOT`) on the micro-VM class:
 
 1. Drive to N through the `Placer` (count=N lives in **guest RAM**, not the journal).
-2. `Snapshot(EXTERNAL)` → memory snapshot to storage, worker freed (`SuspendActor`), SUSPEND recorded
-   on the chain.
-3. Drive one more turn. The actor is SUSPENDED, so placing it **restores** rather than boots over it.
+2. `Placer.Suspend` → `Snapshot(EXTERNAL)`: memory snapshot to storage, worker freed (`SuspendActor`),
+   actor retained, and SUSPEND recorded on the chain.
+3. Explicit `Placer.Resume` restores the actor and records RESUME.
+4. Drive one more turn through the Placer without booting over the restored RAM.
 
 Asserts:
 
 - **Continuity** — the counter returns **N+1**: the in-RAM state survived the snapshot round-trip.
 - **No double-application** — the value is N+1, not 2N+1: the journal was **not** replayed into restored
   RAM (I4 — the counter never reconstructs state from `Start.History`).
-- **Provenance** — the hash chain still verifies **across the SUSPEND boundary**.
+- **Provenance** — the hash chain still verifies **across the SUSPEND and RESUME boundary**.
 
-It suspends through the `Runtime` SPI rather than `Placer.Suspend`, which also `Stop`s (deletes) the
-actor — correct for a stateless session, fatal for one whose RAM is meant to come back.
+Both lifecycle operations use the Placer, rather than bypassing it with a raw Runtime snapshot and
+manually appended SUSPEND. Neither operation tears down the actor needed to restore its RAM.
 
 ### `TestForkFanOutFromMemorySnapshot` — branching a fleet from a base session
 
@@ -306,19 +332,26 @@ gh run watch "$(gh run list --workflow=substrate-e2e.yml --limit 1 --json databa
 Local reproduction needs a Linux host with `/dev/kvm` (micro-VM); the recipe mirrors the CI steps against
 `hack/` in an agent-substrate checkout.
 
+### Verification boundary
+
+The session-level stateless regression and explicit memory Resume are selected by the respective
+live CI passes. Ordinary local `go test` runs compile them but skip them unless `AGENTSESSIONS_E2E=1`;
+a skipped test is not live verification.
+
+Root placement tests separately exercise a lifecycle-faithful control fake: deletion removes actors,
+missing-actor Resume returns NotFound, Suspend retains established fork-child pins, and destructive
+Stop removes only the child's own pin while its sibling remains usable. Suspend followed by Exec
+without Resume restores through `Create(boot:false)`, preserves the fake's counter, and journals no
+RESUME marker. These tests prove orchestration and retention behavior, not real RAM snapshot continuity.
+
 ## In progress
 
-- **Placer-orchestrated suspend/resume.** `TestMemorySnapshotSuspendResume` suspends through the raw
-  `Runtime` SPI because `Placer.Suspend` currently also `Stop`s (deletes) the actor, which a memory
-  suspend must not. Dropping the `Stop` (Snapshot already frees the worker via `SuspendActor`) makes
-  session-level suspend/resume work through the `Placer` for the general memory harness. `Placer.Fork`
-  sidesteps this today by calling `Runtime.Snapshot` directly, because a fork's parent must survive as
-  the branch point.
 - **Fork tag lifecycle.** A fork tags the parent snapshot (`fork-<child-uid>`) so `CreateActor` can
   reference it, and a tag is a retention pin. The tag name is derived from the child session UID, so
   `Stop` releases it when the child is torn down and a failed fork releases it on the way out. A
-  long-lived child therefore holds one pin on its parent's snapshot for as long as it exists, which
-  is correct but means upstream snapshot GC (substrate #664) still governs the ceiling.
+  child holds one pin on its parent's snapshot indefinitely: `DeleteSession` is unimplemented and
+  no session teardown calls `Stop`. Suspended actors are likewise retained indefinitely. Operators
+  must reclaim actors and fork tags directly in Substrate; there is no automatic retention deadline.
 - **Controller-side I4.** `controller.Exec` sends the full journal as `Start.History` even on the
   post-restore turn; for the general case the controller should send empty `History` on memory-restore.
   The counter's harness-side I4 carries the stateful tier today.

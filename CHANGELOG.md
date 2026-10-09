@@ -7,6 +7,12 @@ provide.
 
 ## Unreleased
 
+### Fixed
+
+- Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
+  and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
+  remains destructive teardown.
+
 ### Added
 
 - The chat harness accepts a per-execution `system_prompt` in its JSON config, prepended before
@@ -31,20 +37,35 @@ provide.
 ### Compatibility
 
 - Controller Replay and Resume accept the ID-less journals written by v0.1.2 without rewriting
-  existing records or hashes. Replay retains v0.1.2's whole-log harness invocation, including its
-  multi-turn replay limitation: inferring turn boundaries would change historical behavior.
-  Resume retains the last-INPUT rule and continues interrupted legacy turns with ID-less events;
-  original config, resume cursor and input completeness remain unavailable. Harness invocations
-  use a deterministic `legacy-<sha256>` transport-only ID derived from host-bound session UID,
-  original record position and canonical content; it is not journaled. Direct controller callers
-  must supply a nonempty `WithSessionUID` for selected legacy invocations, or receive
-  `ErrMissingSessionUID` before the harness runs. A completed legacy
-  prefix, including a legacy turn recovered after upgrading, can precede modern executions.
-  An unfinished legacy-to-modern boundary fails with `ErrInvalidExecutionLog`; Exec rejects an
-  unfinished legacy prefix before appending or running the harness. Recover it before a new Exec. Only the ID-less event kinds the released writer persisted qualify:
-  ID-less start markers and non-legacy kinds are invalid. Once a modern start marker or ID-bearing
-  execution event appears, later ID-less execution events still fail closed. Existing inherited-tool
-  safety checks and the rollback restriction for newly written start markers remain unchanged.
+  existing records or hashes. Pure legacy Replay retains v0.1.2's whole-log harness invocation,
+  including its multi-turn replay limitation. Resume retains the last-INPUT rule and continues
+  interrupted legacy turns with ID-less events; END or ERROR finishes a legacy turn. Original
+  config, resume cursor and input completeness remain unavailable. Harness invocations use a
+  deterministic `legacy-<sha256>` transport-only ID derived from host-bound session UID, original
+  record position and canonical content; it is not journaled. Direct controller callers must supply
+  a nonempty `WithSessionUID` for selected legacy invocations, or receive `ErrMissingSessionUID`
+  before the harness runs. Exec permits a new modern turn after an unfinished or errored legacy
+  tail. Its EXECUTION_START establishes the boundary: mixed Replay preserves the complete legacy
+  prefix's whole-log semantics and skips the abandoned tail, while modern History retains the
+  original bytes. Only the ID-less event kinds the released writer persisted qualify: ID-less
+  start markers and non-legacy kinds are invalid. Once a modern start marker or ID-bearing
+  execution event appears, later ID-less execution events still fail closed. Remaining invalid-log
+  refusals are FAILED_PRECONDITION. Inherited-tool safety checks and rollback restrictions remain.
+- Overlapping `Exec`, `Suspend`, and `Resume` calls for one session across all Placers in one Registry
+  now return gRPC `ABORTED` without changing compute or the journal. Retry after the in-flight operation
+  finishes; other sessions remain independent. Direct Placer calls return `placement.ErrSessionBusy`.
+  Standalone Placers have private guards; separate Registries or hosts are not fenced by this guard.
+  Construct the Registry before using its Placers; registering already-used Placers or sharing them
+  between Registries is unsupported. Idle session guard entries are reclaimed.
+
+- `Runtime.Snapshot(..., SnapshotExternal)` owns the cold transition: capture state, release dedicated
+  compute where applicable, and retain any handle needed by `Restore`. Out-of-tree runtimes that only
+  capture state must implement that transition themselves; the Placer no longer calls `Stop` afterward.
+  Suspended actors and fork-child snapshot pins are retained indefinitely: `DeleteSession` is
+  unimplemented and no session teardown calls `Stop`. Operators must reclaim them directly in Substrate.
+  No signatures or wire formats change, and restoring a snapshot after destructive `Stop` is not
+  guaranteed.
+
 - `controller.ToolFunc` now takes `controller.ToolCallContext` between `ctx` and `call`. Custom tool
   executors must update their Go signatures and scope authorization and durable deduplication to
   `ToolCallContext.SessionUID` plus the harness-chosen idempotency key. Placement binds the UID for
@@ -57,9 +78,15 @@ provide.
   prefix, and completed inherited intent/result pairs remain recoverable without invoking the
   executor, including legacy results recorded after the fork marker. `Sessions.Resume` reports
   `FAILED_PRECONDITION` for unresolved inherited intents with guidance to fork at or after the
-  `TOOL_RESULT`, or Exec a new turn for ID-bearing executions only. An ID-less legacy child must
-  instead be re-forked at or after the matching result, since an unfinished legacy prefix followed
-  by a modern turn is not recoverable. No wire or journal schema change is required.
+  `TOOL_RESULT`, or Exec a new turn. No wire or journal schema change is required.
+- Replay and interrupted-turn resume now reject tool-call identity and result-correlation mismatches
+  that v0.1.0–v0.1.2 previously accepted. Resume also rejects harnesses that leave recorded effects
+  unconsumed instead of marking the turn complete. Direct controller sinks can recover handled tool
+  executor failures without re-executing nonterminal intents that have no result; Harness.Connect
+  still ends the turn on a sink tool-call error. An immediately following in-harness TOOL_RESULT
+  remains ambiguous without a failure receipt and is rejected if its ID differs from the preceding
+  call. Handled pre-intent mediation rejections remain recoverable when no recorded tool call is next,
+  without relaxing mediation identity checks on actual recorded calls.
 - Chat executions written on `main` since execution-config journaling was added in #76 with a
   non-empty `system_prompt` no longer pass deterministic controller replay or interrupted resume
   when their recorded model-input hashes exclude the prompt. Non-JSON config now fails whenever

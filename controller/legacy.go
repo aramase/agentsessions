@@ -17,9 +17,9 @@ func legacyPrefix(events []api.Event) (int, error) {
 	hasLegacy := false
 	for i, event := range events {
 		if event.Kind == api.EventExecutionStart || event.Kind != api.EventLifecycle && event.ExecutionID != "" {
-			// An unfinished old turn has no identity linking it to the new execution. Do not
-			// guess at that boundary, including when the first modern INPUT lost its ID.
-			if hasLegacy && !legacyBoundaryComplete(events[:i]) {
+			// An explicit start supersedes an abandoned old tail. Without that marker, an
+			// unfinished old turn remains ambiguous (including a modern INPUT missing its ID).
+			if hasLegacy && event.Kind != api.EventExecutionStart && !legacyBoundaryComplete(events[:i]) {
 				return 0, fmt.Errorf("%w: unfinished legacy prefix before event %d (%s)",
 					ErrInvalidExecutionLog, i+1, event.Kind)
 			}
@@ -44,11 +44,11 @@ func legacyPrefix(events []api.Event) (int, error) {
 	return len(events), nil
 }
 
-// A modern invocation can follow only a committed legacy END, with optional lifecycle markers.
+// Without a new start marker, only a terminal legacy END/ERROR establishes a clear boundary.
 func legacyBoundaryComplete(events []api.Event) bool {
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i].Kind != api.EventLifecycle {
-			return events[i].Kind == api.EventEnd
+			return events[i].Kind == api.EventEnd || events[i].Kind == api.EventError
 		}
 	}
 	return true
@@ -73,16 +73,16 @@ func legacyReplayExecution(events []api.Event) recordedExecution {
 // Config, resume cursor, and execution identity were not persisted and retain their defaults.
 func legacyResumeExecution(events []api.Event) recordedExecution {
 	execution := recordedExecution{start: -1, legacyEnd: len(events)}
-	lastEnd := -1
+	lastFinished := -1
 	for i, event := range events {
 		switch event.Kind {
 		case api.EventInput:
 			execution.start = i
-		case api.EventEnd:
-			lastEnd = i
+		case api.EventEnd, api.EventError:
+			lastFinished = i
 		}
 	}
-	execution.completed = execution.start < 0 || lastEnd > execution.start
+	execution.completed = execution.start < 0 || lastFinished > execution.start
 	if execution.completed {
 		return execution
 	}

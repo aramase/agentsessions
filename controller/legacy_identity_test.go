@@ -26,8 +26,8 @@ import (
 var legacyExecutionIDPattern = regexp.MustCompile(`^legacy-[0-9a-f]{64}$`)
 var modernExecutionIDPattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
-// Consume the real recorded effects before failing. Failing before Model would not exercise
-// retry after a served completion, nor prove that the appended ERROR stays out of the stream.
+// Consume the real recorded effects before failing. The test rejects that ERROR append, leaving
+// a genuinely pending invocation to retry after a served completion.
 type retryLegacyHarness struct {
 	echoagent.Harness
 	starts chan<- string
@@ -62,10 +62,24 @@ func legacyWireHarness(t *testing.T, har api.Harness) api.Harness {
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn))
 }
 
+type rejectLegacyErrorStore struct {
+	eventlog.Store
+	rejected int
+}
+
+func (s *rejectLegacyErrorStore) Append(seq, fence int64, event api.Event) (eventlog.Record, error) {
+	if event.Kind == api.EventError && s.rejected == 0 {
+		s.rejected++
+		return eventlog.Record{}, errors.New("injected ERROR append failure")
+	}
+	return s.Store.Append(seq, fence, event)
+}
+
 func TestLegacyCompatibilityIdentityStableAcrossRetryingControllers(t *testing.T) {
 	for _, transport := range []string{"local", "wire"} {
 		t.Run(transport, func(t *testing.T) {
 			log, original := v012Log(t, "crashed-output")
+			retryLog := &rejectLegacyErrorStore{Store: log}
 			var observed []eventlog.Record
 			modelCalls := 0
 			model := func(ctx context.Context, request api.ModelRequest) (api.ModelResponse, error) {
@@ -84,7 +98,7 @@ func TestLegacyCompatibilityIdentityStableAcrossRetryingControllers(t *testing.T
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			for attempt, failure := range []error{injected, nil} {
-				c, err := controller.New(log, model, opts...)
+				c, err := controller.New(retryLog, model, opts...)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -95,6 +109,12 @@ func TestLegacyCompatibilityIdentityStableAcrossRetryingControllers(t *testing.T
 				resumed, err := c.Resume(ctx, har)
 				if !resumed || attempt == 0 && (err == nil || !strings.Contains(err.Error(), injected.Error())) || attempt == 1 && err != nil {
 					t.Fatalf("attempt %d Resume = %v, %v", attempt, resumed, err)
+				}
+				if attempt == 0 {
+					pending, err := log.Read(1)
+					if err != nil || retryLog.rejected != 1 || !reflect.DeepEqual(pending, original) || len(observed) != 0 {
+						t.Fatalf("append failure did not leave the original pending INPUT: rejected=%d, %v", retryLog.rejected, err)
+					}
 				}
 				select {
 				case id := <-starts:
@@ -116,14 +136,14 @@ func TestLegacyCompatibilityIdentityStableAcrossRetryingControllers(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(after) != len(original)+2 || !reflect.DeepEqual(after[:len(original)], original) {
+			if len(after) != len(original)+1 || !reflect.DeepEqual(after[:len(original)], original) {
 				t.Fatalf("retry rewrote prefix or repeated effects: %#v", after)
 			}
-			if after[len(original)].Event.Kind != api.EventError || after[len(original)+1].Event.Kind != api.EventEnd {
-				t.Fatalf("retry terminal kinds = %s, %s", after[len(original)].Event.Kind, after[len(original)+1].Event.Kind)
+			if after[len(original)].Event.Kind != api.EventEnd {
+				t.Fatalf("retry terminal kind = %s", after[len(original)].Event.Kind)
 			}
 			if !reflect.DeepEqual(observed, after[len(original):]) {
-				t.Fatal("observer did not receive the durable ERROR/END records")
+				t.Fatal("observer did not receive the durable END record")
 			}
 			for _, record := range after {
 				if record.Event.ExecutionID != "" || wire.EventToProto(record.Event).GetExecutionId() != "" {

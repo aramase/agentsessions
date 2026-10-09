@@ -175,20 +175,23 @@ Legacy harness invocations receive a `legacy-<sha256>` compatibility ID in `Star
 frames only. The digest includes the host-bound session UID, the original input record's sequence
 position, and its canonical event content (whole-log Replay uses the first input; Resume uses the
 last). If Replay has no input, it uses the first legacy record. Retrying the same turn preserves the
-ID despite later recovery/error records; identical legacy bytes in different sessions have distinct
-IDs. This namespace cannot collide with the controller's hexadecimal modern IDs. The token is
+ID while the turn remains pending; identical legacy bytes in different sessions have distinct
+IDs. A recorded END or ERROR finishes a legacy turn, so Resume then becomes a no-op. This namespace cannot collide with the controller's hexadecimal modern IDs. The token is
 never copied into journal event identity, including when echoed by a remote harness. Direct
 controller callers must bind a nonempty `WithSessionUID`; a selected legacy invocation without it
 returns `ErrMissingSessionUID` before running the harness or appending execution records.
 It still refuses unresolved inherited tool intents; a recorded model intent without a completion
 still fails recovery rather than repeating the model call.
 
-A completed legacy prefix can be followed by modern executions: replay reconstructs the prefix
-with legacy semantics and each completed modern execution normally, and Resume selects the last
-turn. This includes a v0.1.2 crash recovered by the upgraded controller before a new Exec. Recover
-that legacy turn before starting a modern execution: Exec rejects an unfinished legacy prefix
-before appending or running the harness. An already-mixed unfinished legacy-to-modern boundary
-also returns `ErrInvalidExecutionLog`, since there is no recorded identity linking the invocations.
+A new Exec may follow a completed, errored or unfinished legacy tail, just as v0.1.2 allowed another
+Exec after a failure. Its `EXECUTION_START` is an explicit legacy boundary even without a preceding
+END. Mixed Replay reconstructs the complete legacy prefix with its whole-log semantics, skips the
+abandoned failed/incomplete tail, and replays each completed modern execution normally; modern
+`History` still includes every original legacy event because Exec saw that same history. Resume
+selects the last modern turn rather than reviving the superseded tail. A completed legacy prefix
+includes a v0.1.2 crash recovered by the upgraded controller before a new Exec. ID-bearing modern
+events without a start marker still require a finished legacy boundary; remaining invalid-log
+refusals return `FAILED_PRECONDITION` through Sessions Exec/Resume.
 Once an `EXECUTION_START` or ID-bearing execution event appears, subsequent ID-less execution
 events are invalid, not legacy. ID-less start markers and other non-legacy kinds likewise fail
 closed. Existing records and hashes are never rewritten.

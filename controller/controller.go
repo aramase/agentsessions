@@ -28,9 +28,9 @@ import (
 // ErrReplayInvokedModel is returned when a replay caused a live model call — an I1 violation.
 var ErrReplayInvokedModel = errors.New("controller: replay invoked the model (I1 violated)")
 
-// ErrReplayDiverged is returned when a replay does not consume the recorded effect stream exactly:
-// the harness requested fewer effects than were journaled, so it took a different path than when
-// the log was written (a determinism violation, symmetric to the I0 input-hash check).
+// ErrReplayDiverged is returned when replay or recorded-prefix recovery diverges from the journal:
+// tool request identity or result correlation differs, required tool evidence is missing, or the
+// harness leaves recorded effects unconsumed.
 var ErrReplayDiverged = errors.New("controller: replay diverged from the journal")
 
 // ErrInvalidExecutionLog is returned when modern execution-scoped events lack execution identity,
@@ -232,14 +232,10 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		history = append(history, r.Event)
 	}
 
-	// Do not commit an identified turn after an unfinished ID-less invocation: there is no
-	// identity linking the two, so even a successful new turn would strand later recovery.
-	prefixEnd, err := legacyPrefix(history)
-	if err != nil {
+	// Reject an already-ambiguous legacy/modern boundary. The start marker below explicitly
+	// supersedes an unfinished pure legacy tail, just as the old writer allowed a new Exec.
+	if _, err := legacyPrefix(history); err != nil {
 		return err
-	}
-	if prefixEnd > 0 && !legacyBoundaryComplete(history[:prefixEnd]) {
-		return fmt.Errorf("%w: unfinished legacy prefix; resume the legacy turn before Exec", ErrInvalidExecutionLog)
 	}
 
 	// Record every invocation before inputs so recovery can detect partially committed turns.
@@ -300,7 +296,8 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 }
 
 // Replay reconstructs the session by re-executing each completed modern execution with recorded
-// effects. An ID-less legacy prefix uses v0.1.2's whole-log Run, even if unfinished. Replay asserts
+// effects. Pure legacy logs use v0.1.2's whole-log Run, even if unfinished. A modern boundary
+// abandons the legacy tail after its last END for replay only; modern history retains it. Replay asserts
 // the model is never invoked (I1) and each recorded model-input hash matches (I0). It is read-only.
 func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []string, err error) {
 	ctx = observability.EnsureRequestID(ctx)
@@ -365,8 +362,12 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 			Config:        execution.config,
 			ResumeFromSeq: execution.resumeFromSeq,
 		}
-		if err := har.Run(ctx, start, sink); err != nil {
-			return nil, err
+		runErr := har.Run(ctx, start, sink)
+		if sink.failure != nil {
+			return nil, sink.failure
+		}
+		if runErr != nil {
+			return nil, runErr
 		}
 		if c.liveModelCalls != before {
 			return nil, ErrReplayInvokedModel

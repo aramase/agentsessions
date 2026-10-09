@@ -330,37 +330,44 @@ func TestSuspendResumeRoundtripThroughSPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ref, err := p.Suspend(context.Background(), log, "s")
-	if err != nil {
-		t.Fatalf("suspend: %v", err)
-	}
-	if ref.Local != "s" || ref.Memory {
-		t.Fatalf("local suspend ref must be the session handle, filesystem-only: %+v", ref)
-	}
-
-	// The ref rides the chain: the SUSPEND event carries it (§5.1), no side table.
-	recs, _ := log.Read(1)
-	var carried *api.SnapshotRef
-	for _, r := range recs {
-		if r.Event.Kind == api.EventLifecycle && r.Event.Lifecycle != nil && r.Event.Lifecycle.Kind == api.LifecycleSuspend {
-			carried = r.Event.Lifecycle.Snapshot
+	wantOutputs := []string{"echo:hi", "echo:again", "echo:third", "echo:fourth"}
+	assertSuspendOutputs(t, log, wantOutputs[:1])
+	for cycle, text := range []string{"again", "third", "fourth"} {
+		head, err := log.Head()
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if carried == nil || carried.Local != "s" {
-		t.Fatal("the SUSPEND event must carry the SnapshotRef on the chain (§5.1)")
-	}
-
-	// Resume recovers the ref, restores, and records a RESUME marker; the chain stays verifiable.
-	if err := p.Resume(context.Background(), log, "s"); err != nil {
-		t.Fatalf("resume: %v", err)
-	}
-	recs, _ = log.Read(1)
-	last := recs[len(recs)-1].Event
-	if last.Kind != api.EventLifecycle || last.Lifecycle == nil || last.Lifecycle.Kind != api.LifecycleResume {
-		t.Fatalf("resume must record a RESUME marker, last=%v", last.Kind)
-	}
-	if err := log.Verify(); err != nil {
-		t.Fatalf("verify after suspend/resume: %v", err)
+		ref, err := p.Suspend(context.Background(), log, "s")
+		if err != nil {
+			t.Fatalf("suspend cycle %d: %v", cycle, err)
+		}
+		if ref != (api.SnapshotRef{Local: "s"}) {
+			t.Fatalf("local suspend ref must be the session handle, filesystem-only: %+v", ref)
+		}
+		// The exact returned ref rides each SUSPEND record; no side table is needed.
+		assertSuspendRef(t, log, ref)
+		if err := p.Resume(context.Background(), log, "s"); err != nil {
+			t.Fatalf("resume cycle %d: %v", cycle, err)
+		}
+		recs := suspendRecords(t, log)
+		last := recs[len(recs)-1].Event
+		if last.Kind != api.EventLifecycle || last.Lifecycle == nil || last.Lifecycle.Kind != api.LifecycleResume {
+			t.Fatalf("resume must record a RESUME marker, last=%v", last.Kind)
+		}
+		execSuspendTurn(t, p, log, "s", text)
+		assertSuspendOutputs(t, log, wantOutputs[:cycle+2])
+		var kinds []string
+		for _, rec := range suspendRecords(t, log)[head:] {
+			if rec.Event.Lifecycle != nil {
+				kinds = append(kinds, string(rec.Event.Lifecycle.Kind))
+			} else {
+				kinds = append(kinds, string(rec.Event.Kind))
+			}
+		}
+		wantKinds := []string{"SUSPEND", "RESUME", "EXECUTION_START", "INPUT", "MODEL_CALL", "OUTPUT", "END"}
+		if !reflect.DeepEqual(kinds, wantKinds) {
+			t.Fatalf("cycle %d record order=%v want %v", cycle, kinds, wantKinds)
+		}
 	}
 }
 

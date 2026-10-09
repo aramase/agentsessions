@@ -101,8 +101,11 @@ session UID, original record position and canonical content; the wire uses it fo
 Retries of the same legacy turn reuse it, but different sessions do not. It is never journaled as
 an event ID. Direct legacy replay/recovery callers must supply a nonempty `WithSessionUID`;
 otherwise the selected invocation returns `ErrMissingSessionUID` before running the harness.
-After that recovery completes, a new Exec can append a modern turn without rewriting the prefix. Modern turns still
-require execution IDs; an unfinished legacy prefix followed by a modern turn fails closed. See
+A legacy END or ERROR finishes the turn, making Resume a no-op. A new Exec may also supersede an
+unfinished legacy tail without rewriting it: EXECUTION_START establishes the modern boundary.
+Mixed Replay skips that abandoned tail while retaining whole-log replay of the complete legacy
+prefix; modern History still contains the full original legacy events. Modern turns still require
+execution IDs, and ID-bearing events without a start marker need a finished legacy boundary. See
 [durable execution invocation](concepts.md#durable-execution-invocation) for detection rules and
 the journal layout.
 Do not put credentials in config: it is durable journal content, not a secret channel.
@@ -235,10 +238,9 @@ without a result is re-driven using the **original recorded key** only within th
 Fork still copies the requested prefix, but Resume returns `controller.ErrInheritedToolIntent`
 before running the harness or appending any event if the unfinished execution has inherited tool
 intents still unresolved at the journal head. This includes legacy turns without `EXECUTION_START`.
-`Sessions.Resume` reports `FAILED_PRECONDITION`: fork at or after the matching `TOOL_RESULT`, or,
-for ID-bearing executions only, Exec a new turn. An ID-less legacy child must be re-forked at or
-after the parent's matching result; a new modern Exec after its unfinished prefix cannot establish
-a recoverable boundary. Completed inherited pairs are served from the journal without invoking the executor,
+`Sessions.Resume` reports `FAILED_PRECONDITION`: fork at or after the matching `TOOL_RESULT`, or
+Exec a new turn. A new modern start marker can supersede an unfinished legacy prefix without
+re-driving its inherited intent. Completed inherited pairs are served from the journal without invoking the executor,
 including legacy results recorded after the fork marker. An intent first written by the child after
 the fork is not inherited and can be re-driven under the child's UID.
 
@@ -251,6 +253,17 @@ restarts; an in-memory cache is insufficient. Direct controller users must confi
 `controller.ErrMissingSessionUID` for an unscoped non-nil executor without advancing the log's fence.
 Journaling alone does not provide exactly-once external delivery. `REQUIRES_APPROVAL` still fails
 closed because its approval gate is unimplemented. The stock daemon does not configure a tool executor.
+
+For the same recorded call, re-emit the same `ToolCall.ID`, tool name, arguments, mediation and key.
+Replay and recorded-prefix recovery compare that identity before serving a result or re-driving an
+intent. Keep arguments JSON-shaped: booleans, strings, null, numbers, string-keyed objects and lists.
+Use finite numbers; integers should stay within −9,007,199,254,740,991 to +9,007,199,254,740,991, and
+fractional values must tolerate float64 rounding. These are author obligations for the existing
+protobuf representation, not a guarantee of strict argument validation. Non-nil arguments that
+cannot be represented by the journal conversion are rejected as replay divergence.
+
+On a direct controller sink, a handled `ToolCall` error replays as an error. A different identity
+for a recorded call is fatal. Over `Harness.Connect`, a tool-call error ends the turn.
 
 ### Rule 5: pass reasoning parts back verbatim
 

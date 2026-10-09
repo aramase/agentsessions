@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,8 +18,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		panic("usage: go run generate.go OUTPUT_DIRECTORY")
+	if len(os.Args) < 2 || len(os.Args) > 3 {
+		panic("usage: go run generate.go OUTPUT_DIRECTORY [FIXTURE_NAME]")
 	}
 	for _, fixture := range []struct {
 		name   string
@@ -31,9 +32,20 @@ func main() {
 		{"crashed-model", []string{"hello"}, api.EventModelCall},
 		{"multi-turn", []string{"first", "second"}, ""},
 		{"multi-turn-crashed-output", []string{"first", "second"}, api.EventOutput},
+		{"model-error", []string{"hello"}, ""},
 	} {
+		if len(os.Args) == 3 && os.Args[2] != fixture.name {
+			continue // regenerate a new fixture without changing frozen random IDs in older ones
+		}
 		log := eventlog.AsStore(eventlog.New())
-		c, err := controller.New(log, echoagent.Model, controller.WithObserver(controller.Observer{
+		model := echoagent.Model
+		modelError := errors.New("fixture model failure")
+		if fixture.name == "model-error" {
+			model = func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
+				return api.ModelResponse{}, modelError
+			}
+		}
+		c, err := controller.New(log, model, controller.WithObserver(controller.Observer{
 			OnRecord: func(record eventlog.Record) {
 				if record.Event.Kind == fixture.crash {
 					panic("simulated process death")
@@ -59,7 +71,12 @@ func main() {
 				if err != nil {
 					panic(err)
 				}
-				if err := c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", text)}, head); err != nil {
+				err = c.Exec(context.Background(), echoagent.Harness{}, []api.Message{*api.TextMessage("user", text)}, head)
+				if fixture.name == "model-error" {
+					if !errors.Is(err, modelError) {
+						panic(fmt.Sprintf("model-error Exec = %v", err))
+					}
+				} else if err != nil {
 					panic(err)
 				}
 			}()

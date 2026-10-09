@@ -34,7 +34,21 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 	}
 	var executions []recordedExecution
 	if prefixEnd > 0 {
-		executions = append(executions, legacyReplayExecution(events[:prefixEnd]))
+		replayEnd := prefixEnd
+		if prefixEnd < len(events) {
+			// A new modern turn abandons an incomplete/failed legacy tail. Replay only the
+			// last successful whole-log prefix; never infer separate legacy invocations.
+			// Modern Start.History still uses the original, untrimmed events.
+			replayEnd = 0
+			for i, event := range events[:prefixEnd] {
+				if event.Kind == api.EventEnd {
+					replayEnd = i + 1
+				}
+			}
+		}
+		if replayEnd > 0 {
+			executions = append(executions, legacyReplayExecution(events[:replayEnd]))
+		}
 	}
 	byID := make(map[string]int)
 

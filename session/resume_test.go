@@ -270,12 +270,15 @@ func TestResumeLegacyForkedToolIntentGuidance(t *testing.T) {
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("legacy inherited Resume = %v", err)
 	}
-	if message := status.Convert(err).Message(); !strings.Contains(message, "Exec a new turn (only for ID-bearing executions)") {
-		t.Fatalf("legacy guidance must not suggest an unrecoverable mixed boundary: %q", message)
+	if message := status.Convert(err).Message(); !strings.Contains(message, "Exec a new turn") || strings.Contains(message, "only for ID-bearing") {
+		t.Fatalf("legacy guidance must allow an explicit modern boundary: %q", message)
 	}
 	after, err := log.Read(1)
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatalf("legacy rejection changed journal: %v", err)
+	}
+	if outputs := execOutputs(t, client, uid, "new turn", int64(len(before))); !reflect.DeepEqual(outputs, []string{"echo:new turn"}) {
+		t.Fatalf("Exec after inherited legacy intent = %v", outputs)
 	}
 }
 
@@ -317,8 +320,8 @@ func TestResumeInvalidExecutionLogDoesNotAssumeIncompleteInputs(t *testing.T) {
 				}
 			}
 			_, err = client.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
-			if status.Code(err) != codes.Internal {
-				t.Errorf("invalid-log Resume = %v, want Internal", err)
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Errorf("invalid-log Resume = %v, want FailedPrecondition", err)
 			}
 			message := status.Convert(err).Message()
 			if !strings.Contains(message, tc.detail) {

@@ -252,32 +252,124 @@ func TestV012ResumeUsesOnlyLastInput(t *testing.T) {
 	}
 }
 
-func TestV012NewExecRequiresCompletedLegacyBoundary(t *testing.T) {
-	for _, name := range []string{"crashed-input", "crashed-output", "multi-turn-crashed-output"} {
+func TestV012NewExecSupersedesAbandonedLegacyTail(t *testing.T) {
+	for _, name := range []string{"crashed-input", "crashed-model", "crashed-output", "multi-turn-crashed-output", "model-error"} {
 		t.Run(name, func(t *testing.T) {
 			log, original := v012Log(t, name)
-			runs, modelCalls, observed := 0, 0, 0
+			modelCalls := 0
 			c, err := v012Controller(log, func(ctx context.Context, request api.ModelRequest) (api.ModelResponse, error) {
 				modelCalls++
 				return echoagent.Model(ctx, request)
-			}, controller.WithObserver(controller.Observer{OnRecord: func(eventlog.Record) { observed++ }}))
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			var starts []api.Start
-			err = c.Exec(t.Context(), observedLegacyHarness{&starts}, []api.Message{*api.TextMessage("user", "new")}, int64(len(original)))
-			runs = len(starts)
-			if !errors.Is(err, controller.ErrInvalidExecutionLog) || !strings.Contains(err.Error(), "resume the legacy turn") {
-				t.Fatalf("Exec must reject unfinished legacy boundary: %v", err)
+			har := observedLegacyHarness{&starts}
+			if err := c.Exec(t.Context(), har, []api.Message{*api.TextMessage("user", "new")}, int64(len(original))); err != nil {
+				t.Fatalf("new Exec after legacy tail: %v", err)
 			}
-			if runs != 0 || modelCalls != 0 || observed != 0 {
-				t.Fatalf("rejected Exec ran harness/model/appends: %d/%d/%d", runs, modelCalls, observed)
+			var history []api.Event
+			for _, record := range original {
+				history = append(history, record.Event)
+			}
+			if len(starts) != 1 || !reflect.DeepEqual(starts[0].History, history) || modelCalls != 1 {
+				t.Fatalf("new Exec lost old history or repeated effects: starts=%#v calls=%d", starts, modelCalls)
+			}
+			before, err := log.Read(1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before[:len(original)], original) || before[len(original)].Event.Kind != api.EventExecutionStart {
+				t.Fatal("new Exec rewrote old records or omitted the boundary marker")
+			}
+			modelCalls, starts = 0, nil
+			want := []string{"echo:new"}
+			if name == "multi-turn-crashed-output" {
+				want = []string{"echo:first", "echo:new"} // last complete END prefix, still one old Run
+			}
+			if out, err := c.Replay(t.Context(), har); err != nil || !reflect.DeepEqual(out, want) {
+				t.Fatalf("Replay after abandoned legacy tail = %v, %v; want %v", out, err, want)
+			}
+			if modelCalls != 0 || len(starts) != len(want) || !reflect.DeepEqual(starts[len(starts)-1].History, history) {
+				t.Fatalf("Replay repeated effects or trimmed modern history: %#v calls=%d", starts, modelCalls)
+			}
+			if name == "multi-turn-crashed-output" && len(starts[0].History) != 4 {
+				t.Fatal("legacy replay projection did not stop at the last complete END")
+			}
+			if resumed, err := c.Resume(t.Context(), har); resumed || err != nil {
+				t.Fatalf("completed modern Resume = %v, %v", resumed, err)
 			}
 			after, err := log.Read(1)
-			if err != nil || !reflect.DeepEqual(original, after) {
-				t.Fatalf("rejected Exec changed legacy journal: %v", err)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("Replay/Resume changed mixed journal: %v", err)
+			}
+			if err := log.Verify(); err != nil {
+				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestV012NewInterruptedExecResumesWithoutLegacyEffects(t *testing.T) {
+	log, original := v012Log(t, "crashed-model")
+	modelCalls := 0
+	c, err := v012Controller(log, func(ctx context.Context, request api.ModelRequest) (api.ModelResponse, error) {
+		modelCalls++
+		return echoagent.Model(ctx, request)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted := errors.New("modern interruption after output")
+	har := retryLegacyHarness{starts: make(chan string, 1), fail: interrupted}
+	if err := c.Exec(t.Context(), har, []api.Message{*api.TextMessage("user", "new")}, int64(len(original))); !errors.Is(err, interrupted) {
+		t.Fatalf("interrupted new Exec = %v", err)
+	}
+	modelCalls = 0
+	var starts []api.Start
+	if resumed, err := c.Resume(t.Context(), observedLegacyHarness{&starts}); !resumed || err != nil {
+		t.Fatalf("modern Resume over abandoned old MODEL_CALL = %v, %v", resumed, err)
+	}
+	if modelCalls != 0 || len(starts) != 1 || len(starts[0].History) != len(original) || !modernExecutionIDPattern.MatchString(starts[0].ExecutionID) {
+		t.Fatalf("Resume selected old tail or repeated effects: starts=%#v calls=%d", starts, modelCalls)
+	}
+	before, err := log.Read(1)
+	if err != nil || !reflect.DeepEqual(before[:len(original)], original) {
+		t.Fatalf("recovery rewrote old prefix: %v", err)
+	}
+	if out, err := c.Replay(t.Context(), echoagent.Harness{}); err != nil || !reflect.DeepEqual(out, []string{"echo:new"}) {
+		t.Fatalf("recovered mixed Replay = %v, %v", out, err)
+	}
+	if after, err := log.Read(1); err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("mixed Replay changed recovered journal: %v", err)
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestV012ErrorFinishesLegacyResume(t *testing.T) {
+	log, original := v012Log(t, "model-error")
+	if len(original) != 3 || original[0].Event.Kind != api.EventInput || original[1].Event.Kind != api.EventModelCall || original[2].Event.Kind != api.EventError {
+		t.Fatalf("tagged model-error fixture kinds: %#v", original)
+	}
+	c, err := v012Controller(log, func(context.Context, api.ModelRequest) (api.ModelResponse, error) {
+		t.Fatal("finished legacy ERROR invoked model")
+		return api.ModelResponse{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var starts []api.Start
+	if resumed, err := c.Resume(t.Context(), observedLegacyHarness{&starts}); resumed || err != nil {
+		t.Fatalf("legacy ERROR Resume = %v, %v; want completed no-op", resumed, err)
+	}
+	if len(starts) != 0 {
+		t.Fatal("legacy ERROR re-entered harness")
+	}
+	if after, err := log.Read(1); err != nil || !reflect.DeepEqual(after, original) {
+		t.Fatalf("finished legacy ERROR changed log: %v", err)
 	}
 }
 
@@ -402,6 +494,9 @@ func TestV012LegacyShapeAndUpgradeBoundaryFailClosed(t *testing.T) {
 		detail string
 	}{
 		{"idless start", []api.Event{{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{}}}, "no execution_id"},
+		{"idless start after unfinished legacy", []api.Event{{Kind: api.EventInput, Message: api.TextMessage("user", "old")}, {Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{}}}, "no execution_id"},
+		{"malformed start after unfinished legacy", []api.Event{{Kind: api.EventInput, Message: api.TextMessage("user", "old")}, {Kind: api.EventExecutionStart, ExecutionID: "modern"}}, "invalid start event"},
+		{"invalid legacy kind before new marker", []api.Event{{Kind: api.EventInput, Message: api.TextMessage("user", "old")}, {Kind: api.EventKind("INVALID")}, {Kind: api.EventExecutionStart, ExecutionID: "modern", ExecutionStart: &api.ExecutionStart{}}}, "not a legacy event"},
 		{"nonlegacy approval", []api.Event{{Kind: api.EventApprovalRequest}}, "not a legacy event"},
 		{"unfinished legacy then modern", []api.Event{{Kind: api.EventInput, Message: api.TextMessage("user", "old")}, {Kind: api.EventInput, ExecutionID: "modern", Message: api.TextMessage("user", "new")}}, "unfinished legacy prefix"},
 		{"idless after modern", []api.Event{{Kind: api.EventInput, ExecutionID: "modern", Message: api.TextMessage("user", "new")}, {Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}}}, "no execution_id"},
@@ -560,9 +655,13 @@ func TestV012ForkedToolIntentSafety(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			c, err := controller.New(child, echoagent.Model, controller.WithSessionUID("child"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
-				t.Fatal("legacy child repeated parent's effect")
-				return api.ToolResult{}, nil
+			toolCalls := 0
+			c, err := controller.New(child, echoagent.Model, controller.WithSessionUID("child"), controller.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+				toolCalls++
+				if scope.SessionUID != "child" || call.IdempotencyKey != "new-child-key" {
+					t.Fatal("legacy child repeated parent's effect")
+				}
+				return api.ToolResult{Output: map[string]any{"receipt": "new-child"}}, nil
 			}))
 			if err != nil {
 				t.Fatal(err)
@@ -572,12 +671,17 @@ func TestV012ForkedToolIntentSafety(t *testing.T) {
 				if resumed || !errors.Is(err, controller.ErrInheritedToolIntent) {
 					t.Fatalf("Resume = %v, %v", resumed, err)
 				}
-				if err := c.Exec(t.Context(), sessionToolHarness{}, []api.Message{*api.TextMessage("user", "new charge")}, int64(len(before))); !errors.Is(err, controller.ErrInvalidExecutionLog) {
+				after, err := child.Read(1)
+				if err != nil || !reflect.DeepEqual(before, after) || toolCalls != 0 {
+					t.Fatalf("rejected recovery changed journal or executed inherited intent: %v", err)
+				}
+				newCall := call
+				newCall.ID, newCall.IdempotencyKey = "new-child-call", "new-child-key"
+				if err := c.Exec(t.Context(), &callHarness{calls: []api.ToolCall{newCall}}, []api.Message{*api.TextMessage("user", "new charge")}, int64(len(before))); err != nil {
 					t.Fatalf("Exec after unresolved legacy fork = %v", err)
 				}
-				after, err := child.Read(1)
-				if err != nil || !reflect.DeepEqual(before, after) {
-					t.Fatalf("rejected recovery changed journal: %v", err)
+				if _, err := c.Replay(t.Context(), &callHarness{calls: []api.ToolCall{newCall}}); err != nil || toolCalls != 1 {
+					t.Fatalf("new child replay executed inherited intent: calls=%d, %v", toolCalls, err)
 				}
 			} else {
 				if !resumed || err != nil {
