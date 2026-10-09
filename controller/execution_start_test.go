@@ -208,12 +208,12 @@ func TestResumeRestoresExecutionStartAfterSQLiteReopen(t *testing.T) {
 				modelCalls++
 				return api.ModelResponse{Message: *api.TextMessage("assistant", "recorded")}, nil
 			}
-			tool := func(context.Context, api.ToolCall) (api.ToolResult, error) {
+			tool := func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 				toolCalls++
 				return api.ToolResult{ID: "t1", Output: map[string]any{"ok": true}}, nil
 			}
 			log := store.Session("session")
-			live, err := controller.New(log, model, controller.WithStart(tc.config, tc.cursor), controller.WithToolExecutor(tool))
+			live, err := controller.New(log, model, controller.WithStart(tc.config, tc.cursor), controller.WithSessionUID("session"), controller.WithToolExecutor(tool))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -234,7 +234,7 @@ func TestResumeRestoresExecutionStartAfterSQLiteReopen(t *testing.T) {
 			}
 			defer store.Close()
 			log = store.Session("session")
-			resume, err := controller.New(log, model, controller.WithStart([]byte("wrong"), 999), controller.WithToolExecutor(tool))
+			resume, err := controller.New(log, model, controller.WithStart([]byte("wrong"), 999), controller.WithSessionUID("session"), controller.WithToolExecutor(tool))
 			if err != nil {
 				t.Fatal(err)
 			}

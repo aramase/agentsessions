@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -17,6 +18,8 @@ import (
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/harness/echoagent"
+	"github.com/aramase/agentsessions/placement"
+	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
@@ -124,6 +127,70 @@ func TestResumeIncompleteInvocationCanExecAgain(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// An inherited intent is a caller recovery precondition, not a retryable server failure.
+func TestResumeForkedToolIntentFailedPrecondition(t *testing.T) {
+	store := openStore(t, ":memory:")
+	backend := local.New(registryToolHarness{key: "shared-key"})
+	t.Cleanup(func() { _ = backend.Close() })
+	var effects atomic.Int32
+	client := serveRegistry(t, store, echoRegistry(t, backend, placement.WithToolExecutor(
+		func(_ context.Context, scope controller.ToolCallContext, _ api.ToolCall) (api.ToolResult, error) {
+			effects.Add(1)
+			return api.ToolResult{Output: map[string]any{"receipt": scope.SessionUID}}, nil
+		},
+	)))
+	uid := mustCreate(t, client)
+	if outputs := execOutputs(t, client, uid, "charge", 0); !reflect.DeepEqual(outputs, []string{"service-call:" + uid}) {
+		t.Fatalf("parent Exec outputs = %v", outputs)
+	}
+	parent, err := store.Session(uid).Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cut int64
+	for _, record := range parent {
+		if record.Event.Kind == api.EventToolCall {
+			cut = record.Seq
+		}
+	}
+	if cut == 0 {
+		t.Fatal("Exec did not journal a TOOL_CALL")
+	}
+	fork, err := client.Fork(t.Context(), &v1.ForkRequest{Session: uid, AtSeq: cut, Count: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childUID := fork.GetChildren()[0].GetMetadata().GetUid()
+	child := store.Session(childUID)
+	before, err := child.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Resume(t.Context(), &v1.ResumeRequest{Session: childUID})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("inherited intent Resume = %v, want FailedPrecondition", err)
+	}
+	if message := status.Convert(err).Message(); !strings.Contains(message, "fork at or after the TOOL_RESULT, or Exec a new turn") {
+		t.Errorf("Resume message lacks recovery guidance: %q", message)
+	}
+	after, err := child.Read(1)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("rejected Resume changed child journal: %v", err)
+	}
+	if got := effects.Load(); got != 1 {
+		t.Fatalf("inherited Resume repeated the parent's effect: effects=%d, want 1", got)
+	}
+	if outputs := execOutputs(t, client, childUID, "new charge", int64(len(before))); !reflect.DeepEqual(outputs, []string{"service-call:" + childUID}) {
+		t.Fatalf("new child Exec outputs = %v", outputs)
+	}
+	if got := effects.Load(); got != 2 {
+		t.Fatalf("new child Exec effects=%d, want 2", got)
+	}
+	if err := child.Verify(); err != nil {
+		t.Fatal(err)
 	}
 }
 
