@@ -76,7 +76,8 @@ provide.
   passed to `placement.WithDialer` must change signature; `placement.DefaultDial` is the stock one.
 - `Placer.Suspend` and a stateful `Placer.Fork` now fence the log and close the session's open
   harness streams before checkpointing, and refuse new turns on that session until the checkpoint
-  is recorded, so nothing holds the checkpoint up. This holds across every Placer of a
+  is recorded (for a stateful fork, until every child is cloned from it), so nothing holds the
+  checkpoint up or invalidates it before the children are cloned. This holds across every Placer of a
   `placement.Registry`, so a turn that `ExecRequest.harness` routed to another harness is covered:
   `placement.NewRegistry` gives its Placers one shared per-session state, and now fails if a Placer
   already belongs to another registry or has a turn or checkpoint in progress. On kind, a suspend
@@ -92,6 +93,14 @@ provide.
   - A turn superseded by a checkpoint, or started while one runs, returns an error wrapping the new
     `placement.ErrCheckpointing` (the superseded turn also wraps `eventlog.ErrFenced`).
     `Exec` and `Resume` report it as `ABORTED`, which callers retry.
+- `Exec`, `Resume`, `Suspend` and a stateful `Fork` of one session are serialized by a per-session
+  state machine in the Placer (see `docs/substrate-conformance.md`). A turn is now admitted before
+  `Runtime.Create` or `Runtime.Restore`, and `Suspend` or a stateful `Fork` that arrives while that
+  call is in flight is refused with the new `placement.ErrTurnStarting`. `Suspend` and stateful
+  `Fork` no longer nest: one that arrives while another checkpoint or a fork's fan-out holds the
+  session is refused with `placement.ErrCheckpointing`. Both refusals have no side effects, and
+  `Suspend` and `Fork` now report them as `ABORTED`; `Suspend` reported every failure as `INTERNAL`
+  before.
 - The substrate conformance suite (`integrations/substrate/e2e`) runs both tiers on the micro-VM
   sandbox class by default; the stateless tier used gVisor before. A host without KVM opts each
   tier back into gVisor with `ECHO_SANDBOX_CLASS=gvisor` and `COUNTER_SANDBOX_CLASS=gvisor`, after
@@ -113,7 +122,9 @@ provide.
   `integrations/substrate`'s `New` and `FromClient` drop their `dnsSuffix` argument, since nothing
   dials an actor's mesh DNS name any more. A stateful fork now
   checks the parent still holds the checkpoint it took around the tag, and fails with
-  `ErrSnapshotSuperseded` if the parent was resumed and suspended in between.
+  `ErrSnapshotSuperseded` if the parent was resumed and suspended in between. It wraps the new
+  `api.ErrSnapshotSuperseded`, which a runtime returns for a fork source the parent no longer
+  holds, and `Fork` reports it as `ABORTED`, which callers retry at the parent's new head.
 
 ## v0.1.2
 

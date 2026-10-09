@@ -37,6 +37,9 @@ type routedBackend struct {
 	onSnapshot func()
 	// snapshotErr, when set, fails the next Snapshot (after onSnapshot) and is then cleared.
 	snapshotErr error
+	// onFork runs inside Fork before the child exists, standing in for the window in which the
+	// runtime clones the parent's checkpoint into the child.
+	onFork func()
 }
 
 func (b *routedBackend) Describe(context.Context) (api.Descriptor, error) { return b.desc, nil }
@@ -70,6 +73,9 @@ func (b *routedBackend) Restore(ctx context.Context, ref api.SnapshotRef) (api.I
 }
 
 func (b *routedBackend) Fork(ctx context.Context, _ api.SnapshotRef, opts api.ForkOpts) (api.Incarnation, error) {
+	if b.onFork != nil {
+		b.onFork()
+	}
 	return b.Create(ctx, &api.SessionSpec{SessionUID: opts.ChildSessionUID})
 }
 
@@ -473,6 +479,65 @@ func testCheckpointRefusesANewTurn(t *testing.T, checkpoint func(*placement.Plac
 	}
 }
 
+// A stateful fork clones every child from the parent's checkpoint, and a runtime may clone from the
+// parent's current state rather than an immutable copy (substrate tags the suspended actor). A
+// parent turn that resumed the parent between the checkpoint and a child's clone would invalidate
+// the fork, so the parent stays refused until every child is cloned, on every Placer of a Registry.
+func TestForkRefusesAParentTurnUntilEveryChildIsCloned(t *testing.T) {
+	testForkRefusesAParentTurnWhileCloning(t, samePlacer)
+}
+
+func TestForkRefusesAParentTurnOnAnotherPlacerUntilEveryChildIsCloned(t *testing.T) {
+	testForkRefusesAParentTurnWhileCloning(t, registryPair)
+}
+
+func testForkRefusesAParentTurnWhileCloning(t *testing.T, pair placerPair) {
+	t.Helper()
+	hs := startHarnessServer(t, echoagent.Harness{})
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("s1")
+
+	var turn *placement.Placer
+	var execErrs []error
+	backend := &routedBackend{address: hs.addr, desc: memDescriptor}
+	backend.onFork = func() {
+		_, err := turn.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, 0)
+		execErrs = append(execErrs, err)
+	}
+	var p *placement.Placer
+	p, turn = pair(t, backend, echoagent.Model)
+	children := []placement.ForkChild{
+		{UID: "c1", Log: store.Session("c1")},
+		{UID: "c2", Log: store.Session("c2")},
+	}
+	if err := p.Fork(context.Background(), log, "s1", children, 0); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	if len(execErrs) != len(children) {
+		t.Fatalf("ran %d parent turns during the fan-out, want %d", len(execErrs), len(children))
+	}
+	for i, err := range execErrs {
+		if !errors.Is(err, placement.ErrCheckpointing) {
+			t.Fatalf("parent turn while cloning child %d returned %v, want ErrCheckpointing", i+1, err)
+		}
+	}
+	if n := len(hs.started); n != 0 {
+		t.Fatalf("%d harness stream(s) opened on the parent while its children were cloned", n)
+	}
+	// The guard is lifted once the fork returns: the parent takes turns again.
+	head, err := log.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := turn.Exec(context.Background(), log, "s1", []api.Message{*api.TextMessage("user", "hi")}, head); err != nil {
+		t.Fatalf("parent turn after the fork returned %v", err)
+	}
+}
+
 // NewRegistry replaces each Placer's session set. Replacing it under a running turn would orphan
 // the turn's connection, so a checkpoint through the registry would neither end nor refuse it.
 // NewRegistry must reject a Placer with a turn in progress and accept it again once the turn ends.
@@ -545,17 +610,45 @@ func TestNewRegistryRejectsAPlacerWithACheckpointInProgress(t *testing.T) {
 	}
 }
 
-// The other interleaving: the turn passed every early check and is about to register its connection
-// when the checkpoint begins. Registration must still be refused.
+// The other interleaving: the turn has placed its compute and is dialing its harness when the
+// checkpoint begins. The checkpoint supersedes it, so the turn must not open a stream, and the
+// checkpoint must wait for it to give up before it snapshots.
 func TestSuspendRefusesATurnRegisteringAsTheCheckpointBegins(t *testing.T) {
-	testCheckpointRefusesARegisteringTurn(t, suspendCheckpoint)
+	testCheckpointRefusesARegisteringTurn(t, func(p *placement.Placer, log eventlog.Store, uid string) error {
+		_, err := p.Suspend(context.Background(), log, uid)
+		return err
+	})
 }
 
 func TestForkRefusesAParentTurnRegisteringAsTheCheckpointBegins(t *testing.T) {
-	testCheckpointRefusesARegisteringTurn(t, forkCheckpoint)
+	testCheckpointRefusesARegisteringTurn(t, func(p *placement.Placer, log eventlog.Store, uid string) error {
+		head, err := log.Head()
+		if err != nil {
+			return err
+		}
+		store, err := sqlitelog.Open(":memory:")
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		return p.Fork(context.Background(), log, uid, []placement.ForkChild{{UID: uid + "-child", Log: store.Session(uid + "-child")}}, head)
+	})
 }
 
-func testCheckpointRefusesARegisteringTurn(t *testing.T, checkpoint func(*placement.Placer, *sqlitelog.Log, string) error) {
+// fenceSignalStore closes fenced on its first NewFence call. The turn under test never reaches its
+// own fence, so the first call is the checkpoint's, made right after the checkpoint began.
+type fenceSignalStore struct {
+	eventlog.Store
+	once   sync.Once
+	fenced chan struct{}
+}
+
+func (f *fenceSignalStore) NewFence() (int64, error) {
+	f.once.Do(func() { close(f.fenced) })
+	return f.Store.NewFence()
+}
+
+func testCheckpointRefusesARegisteringTurn(t *testing.T, checkpoint func(*placement.Placer, eventlog.Store, string) error) {
 	t.Helper()
 	hs := startHarnessServer(t, echoagent.Harness{})
 	store, err := sqlitelog.Open(":memory:")
@@ -563,12 +656,12 @@ func testCheckpointRefusesARegisteringTurn(t *testing.T, checkpoint func(*placem
 		t.Fatal(err)
 	}
 	defer store.Close()
-	log := store.Session("s1")
+	log := &fenceSignalStore{Store: store.Session("s1"), fenced: make(chan struct{})}
 
-	dialing, release := make(chan struct{}), make(chan struct{})
+	dialing := make(chan struct{})
 	dial := func(inc api.Incarnation) (api.Harness, func() error, error) {
 		close(dialing)
-		<-release
+		<-log.fenced // hold the turn until the checkpoint has begun
 		return placement.DefaultDial(inc)
 	}
 	execErr := make(chan error, 1)
@@ -576,12 +669,11 @@ func testCheckpointRefusesARegisteringTurn(t *testing.T, checkpoint func(*placem
 	p := placement.New(backend, echoagent.Model, placement.WithDialer(dial))
 	var gotErr error
 	backend.onSnapshot = func() {
-		// The checkpoint has begun; now let the held turn try to register, and wait for it.
-		close(release)
+		// The checkpoint waited for the turn to give up, so its result is on its way.
 		select {
 		case gotErr = <-execErr:
 		case <-time.After(10 * time.Second):
-			gotErr = errors.New("held turn did not return while the checkpoint ran")
+			gotErr = errors.New("the superseded turn did not return while the checkpoint ran")
 		}
 	}
 	go func() {

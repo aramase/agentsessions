@@ -1,6 +1,15 @@
 package api
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrSnapshotSuperseded reports that a fork's source snapshot is no longer the one the parent holds,
+// because the parent was resumed (and possibly checkpointed again) after the snapshot was taken. The
+// fork cannot clone it without pairing the children's journal prefix with different RAM; the
+// caller can retry the fork at the parent's new head.
+var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was superseded")
 
 // Runtime is the compute/sandbox SPI. Pod, Kata Pod Sandboxing, Cloud Hypervisor,
 // Dragonball, Hyperlight, and agent-substrate all implement it. There is no gVisor
@@ -28,6 +37,8 @@ type Runtime interface {
 	// the child continues from the parent's RAM; a filesystem-only backend returns a fresh incarnation
 	// and relies on the host replaying the child's copied log prefix. Implementations must not leak a
 	// partially-provisioned child: on any failure after the child exists, tear it down before returning.
+	// A backend that finds ref no longer held by the parent returns an error wrapping
+	// ErrSnapshotSuperseded.
 	Fork(ctx context.Context, ref SnapshotRef, opts ForkOpts) (Incarnation, error)
 
 	// Stop destroys the incarnation and frees the worker.

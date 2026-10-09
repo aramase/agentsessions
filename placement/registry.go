@@ -28,14 +28,14 @@ type Registry struct {
 // caller does not specify one, and must itself be registered: a default that resolves to nothing
 // would turn every unqualified request into an error at call time rather than at startup.
 //
-// The placers are switched to one shared set of per-session connections and checkpoint marks.
+// The placers are switched to one shared per-session state machine (see sessionSet).
 // session.Service routes a turn by ExecRequest.harness but a Suspend or Fork by the session's
 // recorded harness, so the two can land on different Placers; sharing the set is what lets a
-// checkpoint end, and refuse, a turn whichever Placer runs it.
+// checkpoint end, and refuse, a turn whichever Placer runs it, and the reverse.
 //
 // NewRegistry rejects a Placer that already belongs to a registry, and one with a turn or
-// checkpoint in progress: replacing its set would orphan that turn's connection and that
-// checkpoint's mark, so a later checkpoint would neither end nor refuse the turn. A Placer that has
+// checkpoint in progress: replacing its set would orphan that turn and that checkpoint, so a later
+// checkpoint would neither end nor refuse the turn. A Placer that has
 // run turns and is now idle holds nothing in its set and is accepted. The check cannot see a turn
 // that starts while NewRegistry runs, and the set is replaced without synchronization, so
 // NewRegistry must not run concurrently with any method of the placers it is given: build the
