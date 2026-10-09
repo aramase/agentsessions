@@ -21,8 +21,9 @@ var _ api.Harness = Harness{}
 // Describe declares the configured model and stateless replay contract.
 func (h Harness) Describe(context.Context) (api.Descriptor, error) {
 	return api.Descriptor{
-		ID:     "chat",
-		Models: []string{h.Model},
+		ID:      "chat",
+		Version: "1", // bump when execution or config interpretation changes, not for host releases
+		Models:  []string{h.Model},
 		Capabilities: api.Capabilities{
 			Resumability: api.ResumabilityStatelessReplay,
 			ForkSafe:     true,

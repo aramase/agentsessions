@@ -41,6 +41,11 @@ message HarnessDescriptor {
   repeated string models = 2; // model-agnostic: supported/required model ids
   repeated ToolSpec tools = 3;
   Capabilities capabilities = 4;
+  // Stable, opaque implementation replay-compatibility version, owned by the harness author.
+  // Change it when deterministic execution or config interpretation changes. Hosts record it
+  // in ExecutionStart and compare known recorded versions exactly on replay/recovery.
+  // Empty is supported for older/unversioned harnesses and records an unknown version.
+  string version = 5;
 }
 
 message DescribeRequest {}

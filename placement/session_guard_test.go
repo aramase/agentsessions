@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/runtime/local"
@@ -97,10 +98,51 @@ type failingGuardStore struct {
 
 func (s failingGuardStore) NewFence() (int64, error) { return 0, s.err }
 
+func TestRegistryResumeGuardDrainsAfterRoutingErrors(t *testing.T) {
+	zero, one := int64(0), int64(1)
+	for _, tc := range []struct {
+		name        string
+		event       *api.Event
+		defaultName string
+		want        error
+	}{
+		{"incomplete invocation", &api.Event{Kind: api.EventExecutionStart, ExecutionID: "pending", ExecutionStart: &api.ExecutionStart{InputCount: &one}}, "default", controller.ErrIncompleteInvocation},
+		{"unserved recorded name", &api.Event{Kind: api.EventExecutionStart, ExecutionID: "pending", ExecutionStart: &api.ExecutionStart{InputCount: &zero, Harness: "unserved"}}, "default", ErrRecordedHarnessNotServed},
+		{"unknown stored default", nil, "unserved", ErrUnknownHarness},
+		{"invalid journal", &api.Event{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: &zero}}, "default", controller.ErrInvalidExecutionLog},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(nil, nil)
+			r, err := NewRegistry("default", map[string]*Placer{"default": p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			log := eventlog.AsStore(eventlog.New())
+			if tc.event != nil {
+				fence, err := log.NewFence()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := log.Append(0, fence, *tc.event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 2 {
+				if err := r.Resume(t.Context(), log, "session", tc.defaultName); !errors.Is(err, tc.want) {
+					t.Fatalf("Registry.Resume=%v, want %v", err, tc.want)
+				}
+				if n := guardEntries(p); n != 0 {
+					t.Fatalf("routing failure retained %d guard entries", n)
+				}
+			}
+		})
+	}
+}
+
 // Exercise each operation's deferred release, including backend and journal error returns.
 func TestSessionGuardDrainsAfterOperations(t *testing.T) {
 	for _, failure := range []string{"none", "backend", "journal"} {
-		for _, operation := range []string{"Exec", "Suspend", "Resume"} {
+		for _, operation := range []string{"Exec", "Suspend", "Resume", "Registry.Resume"} {
 			t.Run(failure+"/"+operation, func(t *testing.T) {
 				backend := local.New(echoagent.Harness{})
 				t.Cleanup(func() { _ = backend.Close() })
@@ -111,6 +153,10 @@ func TestSessionGuardDrainsAfterOperations(t *testing.T) {
 					b = failingGuardBackend{Backend: backend, err: backendErr}
 				}
 				p := New(b, echoagent.Model)
+				registry, err := NewRegistry("echo", map[string]*Placer{"echo": p})
+				if err != nil {
+					t.Fatal(err)
+				}
 				store, err := sqlitelog.Open(":memory:")
 				if err != nil {
 					t.Fatal(err)
@@ -129,6 +175,8 @@ func TestSessionGuardDrainsAfterOperations(t *testing.T) {
 						_, err = p.Suspend(t.Context(), log, "session")
 					case "Resume":
 						err = p.Resume(t.Context(), log, "session")
+					case "Registry.Resume":
+						err = registry.Resume(t.Context(), log, "session", "echo")
 					}
 					if failure == "none" && err != nil {
 						t.Fatal(err)

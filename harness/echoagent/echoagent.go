@@ -17,8 +17,9 @@ type Harness struct{}
 // Describe returns the static contract: an echo harness that resumes by stateless replay.
 func (Harness) Describe(ctx context.Context) (api.Descriptor, error) {
 	return api.Descriptor{
-		ID:     "echo",
-		Models: []string{"echo"},
+		ID:      "echo",
+		Version: "1", // bump when deterministic execution behavior changes, not for host releases
+		Models:  []string{"echo"},
 		Capabilities: api.Capabilities{
 			Resumability: api.ResumabilityStatelessReplay,
 			ForkSafe:     true,

@@ -2,12 +2,15 @@ package session_test
 
 import (
 	"context"
+	"reflect"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -38,6 +41,89 @@ func (h *overlapHarness) Run(ctx context.Context, start *api.Start, sink api.Eve
 		}
 	}
 	return (echoagent.Harness{}).Run(ctx, start, sink)
+}
+
+// Holding Create parks Exec inside the shared Registry guard before it writes a new invocation.
+// Resume must report contention before inspecting a stale incomplete or unserved-name prefix.
+type blockedCreateBackend struct {
+	*local.Backend
+	entered chan struct{}
+	release chan struct{}
+	started atomic.Bool
+}
+
+func (b *blockedCreateBackend) Create(ctx context.Context, spec *api.SessionSpec) (api.Incarnation, error) {
+	if b.started.CompareAndSwap(false, true) {
+		close(b.entered)
+		select {
+		case <-b.release:
+		case <-ctx.Done():
+			return api.Incarnation{}, ctx.Err()
+		}
+	}
+	return b.Backend.Create(ctx, spec)
+}
+
+func TestResumeOverlapPrecedesPendingInvocationResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		invocation *api.ExecutionStart
+	}{
+		{"incomplete old invocation", &api.ExecutionStart{InputCount: proto.Int64(1), Harness: "recorded"}},
+		{"unserved recorded alias", &api.ExecutionStart{InputCount: proto.Int64(0), Harness: "no-longer-served"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openStore(t, ":memory:")
+			recorded := &countedRoutingBackend{Backend: local.New(echoagent.Harness{})}
+			override := &blockedCreateBackend{Backend: local.New(echoagent.Harness{}), entered: make(chan struct{}), release: make(chan struct{})}
+			unblock := sync.OnceFunc(func() { close(override.release) })
+			t.Cleanup(unblock)
+			t.Cleanup(func() { _ = recorded.Close(); _ = override.Close() })
+			registry, err := placement.NewRegistry("recorded", map[string]*placement.Placer{
+				"recorded": placement.New(recorded, echoagent.Model),
+				"override": placement.New(override, echoagent.Model),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := serveRegistry(t, store, registry)
+			uid := mustCreate(t, client)
+			log := store.Session(uid)
+			fence, err := log.NewFence()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := log.Append(0, fence, api.Event{Kind: api.EventExecutionStart, ExecutionID: "old-interrupted", ExecutionStart: tc.invocation}); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			stream, err := client.Exec(ctx, &v1.ExecRequest{Session: uid, Harness: "override", Inputs: []*v1.Message{wire.MessageToProto(api.TextMessage("user", "retry"))}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-override.entered:
+			case <-ctx.Done():
+				t.Fatal("Exec did not acquire the shared guard and reach Create")
+			}
+			before := routingRecords(t, log)
+			_, err = client.Resume(ctx, &v1.ResumeRequest{Session: uid})
+			if status.Code(err) != codes.Aborted {
+				t.Errorf("overlapping Resume inspected pending evidence before checking busy: %v, want Aborted", err)
+			}
+			if !reflect.DeepEqual(before, routingRecords(t, log)) || recorded.describes.Load() != 0 || recorded.restores.Load() != 0 {
+				t.Error("overlapping Resume changed journal or attempted default placement")
+			}
+			unblock()
+			if err := drainExec(stream); err != nil {
+				t.Fatalf("overlapping Resume disrupted Exec: %v", err)
+			}
+			if _, err := client.Resume(ctx, &v1.ResumeRequest{Session: uid}); err != nil {
+				t.Fatalf("completed replacement invocation did not Resume after guard release: %v", err)
+			}
+		})
+	}
 }
 
 func TestSessionOverlapReturnsAborted(t *testing.T) {

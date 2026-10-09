@@ -11,17 +11,19 @@ import (
 // prefix. Modern identities establish exact turn boundaries; legacyEnd retains the old whole-log
 // boundary without inventing an identity or inferring multiple invocations.
 type recordedExecution struct {
-	id            string
-	start         int
-	inputs        []api.Message
-	stream        []api.Event
-	completed     bool
-	config        []byte
-	resumeFromSeq int64
-	hasStart      bool
-	inputCount    *int64
-	inputRecords  int
-	legacyEnd     int
+	id             string
+	start          int
+	inputs         []api.Message
+	stream         []api.Event
+	completed      bool
+	config         []byte
+	resumeFromSeq  int64
+	hasStart       bool
+	inputCount     *int64
+	inputRecords   int
+	harness        string
+	harnessVersion string
+	legacyEnd      int
 }
 
 // recordedExecutions validates identities and completed modern invocations before any harness
@@ -82,6 +84,8 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 			execution.resumeFromSeq = event.ExecutionStart.ResumeFromSeq
 			execution.hasStart = true
 			execution.inputCount = event.ExecutionStart.InputCount
+			execution.harness = event.ExecutionStart.Harness
+			execution.harnessVersion = event.ExecutionStart.HarnessVersion
 		case api.EventInput:
 			execution.inputRecords++
 			if event.Message != nil {
@@ -104,6 +108,52 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 		}
 	}
 	return executions, nil
+}
+
+// pendingExecution selects the trailing replay projection. Journal order is first-seen
+// execution order, not the execution ID on the final record.
+func pendingExecution(executions []recordedExecution) (*recordedExecution, error) {
+	if len(executions) == 0 || executions[len(executions)-1].completed {
+		return nil, nil
+	}
+	execution := &executions[len(executions)-1]
+	if err := execution.validateInputs(); err != nil {
+		return nil, err
+	}
+	return execution, nil
+}
+
+// pendingResumeExecution is shared by routing and recovery: a whole-log legacy replay
+// projection must be replaced by v0.1.2's last-INPUT recovery projection before either selects
+// an invocation. Legacy END/ERROR may make that replacement a completed no-op.
+func pendingResumeExecution(events []api.Event, executions []recordedExecution) (*recordedExecution, error) {
+	execution, err := pendingExecution(executions)
+	if err != nil || execution == nil {
+		return nil, err
+	}
+	if execution.legacyEnd > 0 {
+		legacy := legacyResumeExecution(events[:execution.legacyEnd])
+		if legacy.completed {
+			return nil, nil
+		}
+		execution = &legacy
+	}
+	return execution, nil
+}
+
+func (e recordedExecution) invocation() *api.ExecutionStart {
+	if !e.hasStart {
+		return nil
+	}
+	var count *int64
+	if e.inputCount != nil {
+		value := *e.inputCount
+		count = &value
+	}
+	return &api.ExecutionStart{
+		Config: bytes.Clone(e.config), ResumeFromSeq: e.resumeFromSeq, InputCount: count,
+		Harness: e.harness, HarnessVersion: e.harnessVersion,
+	}
 }
 
 func (e recordedExecution) validateInputs() error {

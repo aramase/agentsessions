@@ -21,6 +21,7 @@ type Harness interface {
 // Descriptor is a harness's static contract.
 type Descriptor struct {
 	ID           string
+	Version      string   // stable author-owned replay version; empty is supported as unknown
 	Models       []string // model-agnostic: supported/required model ids
 	Tools        []ToolSpec
 	Capabilities Capabilities

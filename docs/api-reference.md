@@ -217,6 +217,8 @@ non-empty values cannot be recovered. Config is opaque: preserve bytes verbatim,
 | config | [bytes](#bytes) |  |  |
 | resume_from_seq | [int64](#int64) |  | harness cursor, distinct from the append CAS cursor |
 | input_count | [int64](#int64) | optional | Expected number of INPUT events for this invocation, always set by new writers (including zero). Replay/resume reject a completed or selected invocation with a missing/negative count or a different committed INPUT count before running the harness. An incomplete trailing invocation is skipped by completed replay. Count-less experimental start markers fail closed; truly markerless legacy executions retain their existing reconstruction behavior. |
+| harness | [string](#string) |  | Host-resolved registry name used for this execution, not necessarily HarnessDescriptor.id. Interrupted Resume resolves this exact name; absent legacy names use the session harness. |
+| harness_version | [string](#string) |  | Advertised, opaque harness replay-compatibility version. Empty means unknown/unversioned. When nonempty, controller replay and interrupted resume require an exact served-version match (including rejection of an empty served version) before running the harness. Empty recorded versions retain existing behavior; this field is opt-in, not required. |
 
 
 
@@ -753,6 +755,7 @@ ControllerFrame is sent by the host to the harness during an execution.
 | models | [string](#string) | repeated | model-agnostic: supported/required model ids |
 | tools | [ToolSpec](#agentsessions-v1-ToolSpec) | repeated |  |
 | capabilities | [Capabilities](#agentsessions-v1-Capabilities) |  |  |
+| version | [string](#string) |  | Stable, opaque implementation replay-compatibility version, owned by the harness author. Change it when deterministic execution or config interpretation changes. Hosts record it in ExecutionStart and compare known recorded versions exactly on replay/recovery. Empty is supported for older/unversioned harnesses and records an unknown version. |
 
 
 

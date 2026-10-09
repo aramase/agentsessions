@@ -6,8 +6,33 @@ import (
 	"fmt"
 
 	"github.com/aramase/agentsessions/api"
+	"github.com/aramase/agentsessions/eventlog"
 	"github.com/aramase/agentsessions/observability"
 )
+
+// ResumeInvocation returns a copy of the start marker for the pending execution Resume would
+// select, so callers can resolve its recorded harness before routing. Completed/empty journals
+// and legacy markerless turns return nil. Invalid invocation evidence fails closed as in Resume.
+// This query is read-only; the caller must serialize routing and recovery with other session work.
+func ResumeInvocation(log eventlog.Store) (*api.ExecutionStart, error) {
+	recs, err := log.Read(1)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]api.Event, 0, len(recs))
+	for _, record := range recs {
+		events = append(events, record.Event)
+	}
+	executions, err := recordedExecutions(events)
+	if err != nil {
+		return nil, err
+	}
+	execution, err := pendingResumeExecution(events, executions)
+	if err != nil || execution == nil {
+		return nil, err
+	}
+	return execution.invocation(), nil
+}
 
 // Resume re-drives an interrupted last execution (crash-recovery, I4). If the journal's last turn
 // did not complete (no END), Resume re-runs the harness with a hybrid sink that SERVES the
@@ -48,21 +73,11 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	if err != nil {
 		return false, err
 	}
-	if len(executions) == 0 {
-		return false, nil
-	}
-
-	execution := executions[len(executions)-1]
-	legacy := execution.legacyEnd > 0
-	if legacy {
-		execution = legacyResumeExecution(events[:execution.legacyEnd])
-	}
-	if execution.completed {
-		return false, nil
-	}
-	if err := execution.validateInputs(); err != nil {
+	execution, err := pendingResumeExecution(events, executions)
+	if err != nil || execution == nil {
 		return false, err
 	}
+	legacy := execution.legacyEnd > 0
 	// An inherited intent belongs to the parent's dedup namespace, not this controller's UID.
 	// Scan to the end: legacy child recovery may have recorded the result after the fork marker.
 	// Check before running the harness so even a harness that handles errors cannot bypass it.
@@ -96,6 +111,10 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	}
 	if inheritedTools > 0 {
 		return false, fmt.Errorf("%w: execution %q", ErrInheritedToolIntent, execution.id)
+	}
+	// Reject identity mismatches before Run or its best-effort ERROR append path.
+	if err := c.checkHarness(ctx, har, []recordedExecution{*execution}); err != nil {
+		return false, err
 	}
 	invocationID := execution.id
 	if legacy {

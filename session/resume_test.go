@@ -1,12 +1,14 @@
 package session_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -196,12 +198,170 @@ func TestResumeForkedToolIntentFailedPrecondition(t *testing.T) {
 	}
 }
 
+// These released-writer journals catch routing legacy recovery to another entry, changing the
+// last-INPUT selection, repeating recorded effects, or treating a legacy ERROR as unfinished.
 func TestResumeV012JournalThroughSessions(t *testing.T) {
-	store := openStore(t, ":memory:")
-	client := serve(t, store)
-	uid := mustCreate(t, client)
-	log := store.Session(uid)
-	data, err := os.ReadFile(filepath.Join("..", "controller", "testdata", "v0.1.2", "crashed-output.json"))
+	for _, tc := range []struct {
+		name         string
+		runs, models int32
+		input        string
+		history      int
+		outputs      []string
+		appended     []api.EventKind
+		code         codes.Code
+	}{
+		{name: "crashed-input", runs: 1, models: 1, input: "hello", outputs: []string{"echo:hello"}, appended: []api.EventKind{api.EventModelCall, api.EventOutput, api.EventEnd, api.EventLifecycle}},
+		{name: "crashed-output", runs: 1, input: "hello", outputs: []string{"echo:hello"}, appended: []api.EventKind{api.EventEnd, api.EventLifecycle}},
+		{name: "crashed-model", runs: 1, input: "hello", appended: []api.EventKind{api.EventError}, code: codes.Internal},
+		{name: "multi-turn-crashed-output", runs: 1, input: "second", history: 4, outputs: []string{"echo:first", "echo:second"}, appended: []api.EventKind{api.EventEnd, api.EventLifecycle}},
+		{name: "mixed-interrupted", runs: 1, input: "new", history: 4, outputs: []string{"echo:hello", "echo:new"}, appended: []api.EventKind{api.EventEnd, api.EventLifecycle}},
+		{name: "completed", outputs: []string{"echo:hello"}, appended: []api.EventKind{api.EventLifecycle}},
+		{name: "multi-turn", outputs: []string{"echo:first", "echo:second"}, appended: []api.EventKind{api.EventLifecycle}},
+		{name: "model-error", appended: []api.EventKind{api.EventLifecycle}},
+		{name: "upgraded-resume", outputs: []string{"echo:hello"}, appended: []api.EventKind{api.EventLifecycle}},
+		{name: "mixed-completed", outputs: []string{"echo:hello", "echo:new"}, appended: []api.EventKind{api.EventLifecycle}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const uid = "legacy-routing-session"
+			store, original := reopenedV012Session(t, tc.name, uid)
+			log := store.Session(uid)
+			invocation, err := controller.ResumeInvocation(log)
+			if err != nil {
+				t.Fatalf("fixture routing query: %v", err)
+			}
+			if tc.name == "mixed-interrupted" {
+				if invocation == nil || invocation.Harness != "" || invocation.HarnessVersion != "" {
+					t.Fatalf("old start marker must retain absent harness/version: %+v", invocation)
+				}
+			} else if invocation != nil {
+				t.Fatalf("legacy/completed fixture invented a pending start marker: %+v", invocation)
+			}
+
+			a := &v012RoutingHarness{id: "descriptor-a", version: "current-a"}
+			b := &v012RoutingHarness{id: "descriptor-b", version: "current-b"}
+			var aModels, aTools, bModels, bTools atomic.Int32
+			// The stored session default wins even if the host's registry default changes.
+			registry, err := placement.NewRegistry("alias-b", map[string]*placement.Placer{
+				"alias-a": v012RoutingPlacer(t, a, &aModels, &aTools),
+				"alias-b": v012RoutingPlacer(t, b, &bModels, &bTools),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := serveRegistry(t, store, registry)
+			resumed, err := client.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
+			if status.Code(err) != tc.code {
+				t.Fatalf("Sessions Resume = %v, want %v", err, tc.code)
+			}
+			if tc.code == codes.Internal && (!strings.Contains(status.Convert(err).Message(), "recorded completion missing") || strings.Contains(status.Convert(err).Message(), "Exec again")) {
+				t.Fatalf("missing completion lost historical failure classification: %v", err)
+			}
+			if a.runs.Load() != tc.runs || aModels.Load() != tc.models || aTools.Load() != 0 || b.runs.Load() != 0 || bModels.Load() != 0 || bTools.Load() != 0 {
+				t.Fatalf("wrong recovery route/effects: A Run/model/tool=%d/%d/%d B=%d/%d/%d; want A=%d/%d/0 B=0/0/0",
+					a.runs.Load(), aModels.Load(), aTools.Load(), b.runs.Load(), bModels.Load(), bTools.Load(), tc.runs, tc.models)
+			}
+			if tc.runs == 1 {
+				start := <-a.starts
+				if len(start.Inputs) != 1 || start.Inputs[0].Role != "user" || start.Inputs[0].Text() != tc.input || start.Config != nil || start.ResumeFromSeq != 0 {
+					t.Fatalf("recovered Start changed original invocation or inserted Role.Context: %+v", start)
+				}
+				var history []api.Event
+				for _, record := range original[:tc.history] {
+					history = append(history, record.Event)
+				}
+				if len(start.History) != tc.history || tc.history > 0 && !reflect.DeepEqual(start.History, history) {
+					t.Fatalf("recovered Start lost original last-INPUT history: %+v", start)
+				}
+				if tc.name == "mixed-interrupted" {
+					if start.ExecutionID != routingEvent(t, original, api.EventExecutionStart).ExecutionID {
+						t.Fatalf("mixed recovery changed recorded execution ID: %q", start.ExecutionID)
+					}
+				} else if !regexp.MustCompile(`^legacy-[0-9a-f]{64}$`).MatchString(start.ExecutionID) {
+					t.Fatalf("legacy Start lacks scoped compatibility identity: %q", start.ExecutionID)
+				}
+			}
+
+			after := routingRecords(t, log)
+			if len(after) != len(original)+len(tc.appended) {
+				t.Fatalf("Resume record count = %d, want %d", len(after), len(original)+len(tc.appended))
+			}
+			assertV012Prefix(t, original, after)
+			var outputs []string
+			for _, record := range after {
+				if record.Event.Kind == api.EventOutput && record.Event.Message != nil {
+					outputs = append(outputs, record.Event.Message.Text())
+				}
+			}
+			if !reflect.DeepEqual(outputs, tc.outputs) {
+				t.Fatalf("recovered outputs = %v, want %v", outputs, tc.outputs)
+			}
+			for i, kind := range tc.appended {
+				ev := after[len(original)+i].Event
+				if ev.Kind != kind {
+					t.Fatalf("continuation event %d = %s, want %s", i, ev.Kind, kind)
+				}
+				wantID := ""
+				if tc.name == "mixed-interrupted" && kind != api.EventLifecycle {
+					wantID = routingEvent(t, original, api.EventExecutionStart).ExecutionID
+				}
+				if ev.ExecutionID != wantID {
+					t.Fatalf("continuation event %s execution ID = %q, want %q", kind, ev.ExecutionID, wantID)
+				}
+				switch kind {
+				case api.EventEnd:
+					if ev.End == nil || ev.End.State != "COMPLETED" {
+						t.Fatalf("recovery did not finish with COMPLETED END: %+v", ev)
+					}
+				case api.EventError:
+					if ev.Err == nil || ev.Err.Description != "resume: recorded completion missing" {
+						t.Fatalf("missing completion ERROR changed: %+v", ev)
+					}
+				case api.EventLifecycle:
+					if ev.Lifecycle == nil || ev.Lifecycle.Kind != api.LifecycleResume {
+						t.Fatalf("completed recovery did not append RESUME: %+v", ev)
+					}
+				}
+			}
+			if tc.code == codes.OK && (resumed.GetHarness() != "alias-a" || resumed.GetLastSeq() != int64(len(after)) || resumed.GetComputeState() != v1.ComputeState_COMPUTE_LIVE) {
+				t.Fatalf("Resume changed stored default or lost lifecycle: %v", resumed)
+			}
+			info, err := store.SessionInfo(uid)
+			if err != nil || info.Harness != "alias-a" {
+				t.Fatalf("Resume mutated Session.Harness: %+v, %v", info, err)
+			}
+			// Sessions.Replay remains a raw read, even for a durable missing-completion ERROR.
+			stream, err := client.Replay(t.Context(), &v1.ReplayRequest{Session: uid})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, record := range after {
+				got, err := stream.Recv()
+				if err != nil || !proto.Equal(got, eventlog.RecordToProto(record)) {
+					t.Fatalf("raw Replay changed record %d: %v, %v", record.Seq, got, err)
+				}
+			}
+			if _, err := stream.Recv(); err != io.EOF {
+				t.Fatalf("raw Replay did not stop at journal head: %v", err)
+			}
+			// A successful retry must release the registry guard; legacy ERROR is finished too.
+			if _, err := client.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); err != nil {
+				t.Fatalf("completed second Resume: %v", err)
+			}
+			finished := routingRecords(t, log)
+			if len(finished) != len(after)+1 || finished[len(after)].Event.Lifecycle == nil || finished[len(after)].Event.Lifecycle.Kind != api.LifecycleResume {
+				t.Fatalf("completed second Resume must append only RESUME: %+v", finished)
+			}
+			assertV012Prefix(t, after, finished)
+			if a.runs.Load() != tc.runs || aModels.Load() != tc.models || aTools.Load() != 0 || b.runs.Load() != 0 || bModels.Load() != 0 || bTools.Load() != 0 {
+				t.Fatal("raw Replay or completed second Resume repeated execution effects")
+			}
+		})
+	}
+}
+
+func reopenedV012Session(t *testing.T, name, uid string) (*sqlitelog.Store, []eventlog.Record) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "controller", "testdata", "v0.1.2", name+".json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,38 +369,84 @@ func TestResumeV012JournalThroughSessions(t *testing.T) {
 	if err := json.Unmarshal(data, &original); err != nil {
 		t.Fatal(err)
 	}
+	if err := eventlog.NewFrom(original).Verify(); err != nil {
+		t.Fatalf("released-writer fixture chain: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "journal.db")
+	store := openStore(t, path)
+	if err := store.PutSession(sqlitelog.SessionMeta{UID: uid, Harness: "alias-a"}); err != nil {
+		t.Fatal(err)
+	}
+	log := store.Session(uid)
 	fence, err := log.NewFence()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, record := range original {
+		for fence < record.Fence {
+			fence, err = log.NewFence()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 		got, err := log.Append(record.Seq-1, fence, record.Event)
 		if err != nil || !reflect.DeepEqual(record, got) {
-			t.Fatalf("copy v0.1.2 record: %#v, %v", got, err)
+			t.Fatalf("copy original record %d: %#v, %v", record.Seq, got, err)
 		}
 	}
-	if _, err := client.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); err != nil {
-		t.Fatalf("v0.1.2 Sessions Resume: %v", err)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
-	after, err := log.Read(1)
+	store = openStore(t, path)
+	assertV012Prefix(t, original, routingRecords(t, store.Session(uid)))
+	return store, original
+}
+
+func assertV012Prefix(t *testing.T, original, after []eventlog.Record) {
+	t.Helper()
+	if len(after) < len(original) || !reflect.DeepEqual(original, after[:len(original)]) {
+		t.Fatal("recovery rewrote original records, fences or hashes")
+	}
+	beforeBytes, err := json.Marshal(original)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(original, after[:len(original)]) {
-		t.Fatal("Sessions Resume rewrote old prefix")
+	afterBytes, err := json.Marshal(after[:len(original)])
+	if err != nil || !bytes.Equal(beforeBytes, afterBytes) {
+		t.Fatalf("recovery changed original encoded journal bytes: %v", err)
 	}
-	var outputs []string
-	for _, record := range after {
-		if record.Event.Kind == api.EventOutput && record.Event.Message != nil {
-			outputs = append(outputs, record.Event.Message.Text())
-		}
-	}
-	if !reflect.DeepEqual(outputs, []string{"echo:hello"}) {
-		t.Fatalf("legacy completion = %v", outputs)
-	}
-	if err := log.Verify(); err != nil {
-		t.Fatal(err)
-	}
+}
+
+type v012RoutingHarness struct {
+	id, version string
+	runs        atomic.Int32
+	starts      chan api.Start
+}
+
+func (h *v012RoutingHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+	descriptor, err := (echoagent.Harness{}).Describe(ctx)
+	descriptor.ID, descriptor.Version = h.id, h.version
+	return descriptor, err
+}
+
+func (h *v012RoutingHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	h.runs.Add(1)
+	h.starts <- *start
+	return (echoagent.Harness{}).Run(ctx, start, sink)
+}
+
+func v012RoutingPlacer(t *testing.T, h *v012RoutingHarness, models, tools *atomic.Int32) *placement.Placer {
+	t.Helper()
+	h.starts = make(chan api.Start, 2)
+	backend := local.New(h)
+	t.Cleanup(func() { _ = backend.Close() })
+	return placement.New(backend, func(ctx context.Context, request api.ModelRequest) (api.ModelResponse, error) {
+		models.Add(1)
+		return echoagent.Model(ctx, request)
+	}, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+		tools.Add(1)
+		return api.ToolResult{}, nil
+	}))
 }
 
 func TestResumeLegacyForkedToolIntentGuidance(t *testing.T) {

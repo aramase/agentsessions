@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -87,6 +88,69 @@ func TestStatelessReplayOnGVisor(t *testing.T) {
 	}
 	t.Log("replay byte-identical, model invocations=0, chain verified")
 
+	t.Run("recorded-harness-version", func(t *testing.T) {
+		observed, err := har.Describe(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if observed.Version == "" {
+			t.Fatal("reference actor did not advertise its version over the wire")
+		}
+		records, err := log.Read(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var invocation *api.ExecutionStart
+		var prefix []eventlog.Record
+		for _, record := range records {
+			if record.Event.Kind == api.EventExecutionStart {
+				invocation = record.Event.ExecutionStart
+			}
+			if record.Event.Kind == api.EventEnd {
+				break
+			}
+			prefix = append(prefix, record)
+		}
+		if invocation == nil || invocation.Harness != observed.ID || invocation.HarnessVersion != observed.Version {
+			t.Fatalf("placed marker = %#v, actor descriptor = %#v", invocation, observed)
+		}
+		if len(prefix) == len(records) {
+			t.Fatal("placed execution has no terminal cut")
+		}
+		for _, version := range []string{"", observed.Version + "-changed"} {
+			for _, resume := range []bool{false, true} {
+				original := records
+				if resume {
+					original = prefix
+				}
+				copyLog := eventlog.AsStore(eventlog.NewFrom(original))
+				guarded, err := controller.New(copyLog, echoagent.Model)
+				if err != nil {
+					t.Fatal(err)
+				}
+				changed := &versionOverrideHarness{Harness: har, version: version}
+				if resume {
+					resumed, err := guarded.Resume(ctx, changed)
+					if resumed || !errors.Is(err, controller.ErrHarnessVersionMismatch) {
+						t.Fatalf("version %q Resume = %v, %v", version, resumed, err)
+					}
+				} else if _, err := guarded.Replay(ctx, changed); !errors.Is(err, controller.ErrHarnessVersionMismatch) {
+					t.Fatalf("version %q Replay = %v", version, err)
+				}
+				if changed.runs != 0 || guarded.ModelInvocations() != 0 {
+					t.Fatal("mismatched version reached actor/model execution")
+				}
+				after, err := copyLog.Read(1)
+				if err != nil || !reflect.DeepEqual(after, original) {
+					t.Fatalf("version rejection changed journal: %v", err)
+				}
+				if err := copyLog.Verify(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		t.Log("actor's advertised version recorded; known-version mismatches rejected before Run or writes")
+	})
 	t.Run("v0.1.2-recovery", func(t *testing.T) {
 		testLegacyRecoveryOnActor(t, ctx, har)
 	})
@@ -265,4 +329,23 @@ func testLegacyRecoveryOnActor(t *testing.T, ctx context.Context, har api.Harnes
 		t.Fatal(err)
 	}
 	t.Log("released SQLite prefix recovered over actor wire, compatibility ID not journaled, mixed replay exact")
+}
+
+// Keep the real wire-backed harness beneath this adapter; changing its advertised contract must
+// prevent both completed replay and interrupted recovery from invoking that actor.
+type versionOverrideHarness struct {
+	api.Harness
+	version string
+	runs    int
+}
+
+func (h *versionOverrideHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+	desc, err := h.Harness.Describe(ctx)
+	desc.Version = h.version
+	return desc, err
+}
+
+func (h *versionOverrideHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	h.runs++
+	return h.Harness.Run(ctx, start, sink)
 }

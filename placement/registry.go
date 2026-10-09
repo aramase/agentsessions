@@ -1,9 +1,13 @@
 package placement
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
+
+	"github.com/aramase/agentsessions/controller"
+	"github.com/aramase/agentsessions/eventlog"
 )
 
 // ErrUnknownHarness is returned for a harness name the host does not serve. session.Service
@@ -12,6 +16,10 @@ import (
 // session on something other than what was asked for, and the log would record that as if it had
 // been intended.
 var ErrUnknownHarness = errors.New("placement: unknown harness")
+
+// ErrRecordedHarnessNotServed refuses recovery when the pending invocation names a registry entry
+// this host no longer serves. Unlike a caller's unknown name, it is a recovery precondition.
+var ErrRecordedHarnessNotServed = errors.New("placement: recorded harness is not served")
 
 // Registry resolves a harness name to the Placer that runs it.
 //
@@ -22,6 +30,7 @@ var ErrUnknownHarness = errors.New("placement: unknown harness")
 type Registry struct {
 	byName         map[string]*Placer
 	defaultHarness string
+	guard          *sessionGuard
 }
 
 // NewRegistry builds a registry over the named placers. defaultHarness names the entry used when a
@@ -55,7 +64,7 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, 
 		p.guard = guard
 		byName[name] = p
 	}
-	return &Registry{byName: byName, defaultHarness: defaultHarness}, nil
+	return &Registry{byName: byName, defaultHarness: defaultHarness, guard: guard}, nil
 }
 
 // For returns the Placer for a harness name. An empty name selects the default, which is how a
@@ -69,6 +78,39 @@ func (r *Registry) For(harness string) (*Placer, error) {
 		return nil, fmt.Errorf("%w %q (registered: %v)", ErrUnknownHarness, harness, r.Names())
 	}
 	return p, nil
+}
+
+// Resume resolves and recovers a pending invocation under the Registry's shared session guard.
+// Selection cannot race with Exec or Suspend through this Registry: contention wins over stale
+// invocation errors, and routing plus recovery share one local critical section.
+// Legacy markerless and completed journals retain sessionDefaultName (empty = registry default).
+func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, sessionDefaultName string) error {
+	release, err := r.guard.tryLock(sessionUID)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	invocation, err := controller.ResumeInvocation(log)
+	if err != nil {
+		return err
+	}
+	name := sessionDefaultName
+	recordedName := invocation != nil && invocation.Harness != ""
+	if recordedName {
+		name = invocation.Harness
+	}
+	if name == "" {
+		name = r.defaultHarness
+	}
+	p, err := r.For(name)
+	if err != nil {
+		if recordedName && errors.Is(err, ErrUnknownHarness) {
+			return fmt.Errorf("%w: %w", ErrRecordedHarnessNotServed, err)
+		}
+		return err
+	}
+	return p.resume(ctx, log, sessionUID, resumeConfig{harness: name})
 }
 
 // Default is the harness used when a caller names none. session.Service records it on a session

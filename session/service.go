@@ -252,30 +252,32 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 	return &v1.ListSessionsResponse{Sessions: out, NextPageToken: page.NextPageToken}, nil
 }
 
-// placerFor routes a session to the harness that runs it. override comes from
-// ExecRequest.harness, which the contract defines as "empty = session default"; anything else
-// falls back to the harness recorded on the session at create time.
+// placerFor returns the Placer and resolved registry name for a session. override comes from
+// ExecRequest.harness; an empty override uses the harness stored on the session at create time.
 //
 // The lookup is by stored harness rather than by a single configured one, which is what makes
 // Session.harness mean something. A session that names a harness this host does not serve fails
 // here instead of silently running on whatever the host happens to have wired.
-func (s *Service) placerFor(uid, override string) (*placement.Placer, error) {
+func (s *Service) placerFor(uid, override string) (*placement.Placer, string, error) {
 	if uid == "" {
-		return nil, status.Error(codes.InvalidArgument, "session is required")
+		return nil, "", status.Error(codes.InvalidArgument, "session is required")
 	}
 	harness := override
 	if harness == "" {
 		info, err := s.store.SessionInfo(uid)
 		if err != nil {
-			return nil, sessionStoreError(err, uid)
+			return nil, "", sessionStoreError(err, uid)
 		}
 		harness = info.Harness
 	}
+	if harness == "" {
+		harness = s.registry.Default()
+	}
 	p, err := s.registry.For(harness)
 	if err != nil {
-		return nil, harnessError(err)
+		return nil, "", harnessError(err)
 	}
-	return p, nil
+	return p, harness, nil
 }
 
 // harnessError reports an unservable harness as InvalidArgument. Naming a harness the host does
@@ -325,7 +327,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 		sess = created
 	}
 
-	placer, err := s.placerFor(uid, req.GetHarness())
+	placer, harness, err := s.placerFor(uid, req.GetHarness())
 	if err != nil {
 		return err
 	}
@@ -399,6 +401,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	// Route the turn through the placement seam: Create the incarnation, mint+bind the fence, and
 	// drive the placed harness through the Runtime SPI instead of a co-located controller.
 	execOpts := []placement.ExecOption{
+		placement.WithHarness(harness),
 		placement.WithObserver(observer),
 		placement.WithStart(req.GetConfig(), req.GetResumeFromSeq()),
 	}
@@ -486,7 +489,7 @@ func (s *Service) Fork(ctx context.Context, req *v1.ForkRequest) (response *v1.F
 		return nil, status.Error(codes.InvalidArgument, "ForkRequest.identity is unsupported: per-child principals are not enforced")
 	}
 
-	placer, err := s.placerFor(req.GetSession(), "")
+	placer, _, err := s.placerFor(req.GetSession(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -602,7 +605,7 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	finish := observability.Start(ctx, s.logger, "session", "suspend", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 
-	placer, err := s.placerFor(req.GetSession(), "")
+	placer, _, err := s.placerFor(req.GetSession(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -623,47 +626,58 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 }
 
 // Resume restores the incarnation via the Runtime SPI, re-drives any interrupted turn, and records a
-// RESUME marker.
+// RESUME marker. A pending turn's recorded name selects its exact registry entry; legacy turns and
+// completed sessions retain the stored session default.
 func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v1.Session, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.Start(ctx, s.logger, "session", "resume", "session_uid", req.GetSession())
 	defer func() { finish(err, "error_kind", serviceErrorKind(err)) }()
 
-	placer, err := s.placerFor(req.GetSession(), "")
-	if err != nil {
-		return nil, err
+	uid := req.GetSession()
+	if uid == "" {
+		return nil, status.Error(codes.InvalidArgument, "session is required")
 	}
-	log := s.store.Session(req.GetSession())
-	if err := placer.Resume(ctx, log, req.GetSession()); err != nil {
-		switch {
-		case errors.Is(err, placement.ErrSessionBusy):
-			return nil, status.Error(codes.Aborted, err.Error())
-		case errors.Is(err, controller.ErrInheritedToolIntent):
-			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; fork at or after the TOOL_RESULT, or Exec a new turn", err)
-		case errors.Is(err, controller.ErrIncompleteInvocation):
-			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
-		case errors.Is(err, controller.ErrInvalidExecutionLog):
-			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v", err)
-		case errors.Is(err, placement.ErrUnplaceable):
-			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v", err)
-		case errors.Is(err, placement.ErrHarnessUnavailable):
-			return nil, status.Errorf(codes.Unavailable, "resume: %v", err)
-		case errors.Is(err, placement.ErrAdmissionInterrupted):
-			return nil, status.Errorf(admissionInterruptedCode(err), "resume: %v", err)
-		}
-		return nil, status.Errorf(codes.Internal, "resume: %v", err)
-	}
-	info, err := s.store.SessionInfo(req.GetSession())
+	info, err := s.store.SessionInfo(uid)
 	if err != nil {
-		return nil, sessionStoreError(err, req.GetSession())
+		return nil, sessionStoreError(err, uid)
+	}
+	log := s.store.Session(uid)
+	if err := s.registry.Resume(ctx, log, uid, info.Harness); err != nil {
+		return nil, resumeError(err)
+	}
+	info, err = s.store.SessionInfo(uid)
+	if err != nil {
+		return nil, sessionStoreError(err, uid)
 	}
 	return sessionProto(info)
 }
 
+func resumeError(err error) error {
+	switch {
+	case errors.Is(err, placement.ErrSessionBusy):
+		return status.Error(codes.Aborted, err.Error())
+	case errors.Is(err, controller.ErrInheritedToolIntent):
+		return status.Errorf(codes.FailedPrecondition, "resume: %v; fork at or after the TOOL_RESULT, or Exec a new turn", err)
+	case errors.Is(err, controller.ErrIncompleteInvocation):
+		return status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
+	case errors.Is(err, controller.ErrInvalidExecutionLog):
+		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
+		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
+	case errors.Is(err, placement.ErrUnknownHarness):
+		return harnessError(err)
+	case errors.Is(err, placement.ErrHarnessUnavailable):
+		return status.Errorf(codes.Unavailable, "resume: %v", err)
+	case errors.Is(err, placement.ErrAdmissionInterrupted):
+		return status.Errorf(admissionInterruptedCode(err), "resume: %v", err)
+	default:
+		return status.Errorf(codes.Internal, "resume: %v", err)
+	}
+}
+
 // admissionInterruptedCode is the public code for a call whose own deadline or cancellation ended
-// the placement check: nothing was provisioned or journaled, and resending the same expired call
-// cannot succeed, so it is not an outage. Only admission is mapped here; a turn that the caller's
-// deadline interrupts after admission keeps its existing code.
+// an admission or connected-harness Describe check. No new turn records were journaled, and the same
+// expired call cannot succeed. A deadline that interrupts Run keeps its existing code.
 func admissionInterruptedCode(err error) codes.Code {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return codes.DeadlineExceeded
@@ -675,7 +689,7 @@ func execError(err error) error {
 	switch {
 	case errors.Is(err, placement.ErrSessionBusy):
 		return status.Error(codes.Aborted, err.Error())
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, controller.ErrInvalidExecutionLog), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):
 		return status.Error(codes.Unavailable, err.Error())

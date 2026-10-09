@@ -410,6 +410,7 @@ func startFromProto(p *v1.Start) *api.Start {
 func descriptorToProto(d api.Descriptor) *v1.HarnessDescriptor {
 	out := &v1.HarnessDescriptor{
 		Id:           d.ID,
+		Version:      d.Version,
 		Models:       d.Models,
 		Capabilities: capabilitiesToProto(d.Capabilities),
 	}
@@ -422,6 +423,7 @@ func descriptorToProto(d api.Descriptor) *v1.HarnessDescriptor {
 func descriptorFromProto(p *v1.HarnessDescriptor) api.Descriptor {
 	out := api.Descriptor{
 		ID:           p.GetId(),
+		Version:      p.GetVersion(),
 		Models:       p.GetModels(),
 		Capabilities: capabilitiesFromProto(p.GetCapabilities()),
 	}

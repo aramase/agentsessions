@@ -60,6 +60,7 @@ func EventToProto(e api.Event) *v1.Event {
 		out.Body = &v1.Event_ExecutionStart{ExecutionStart: &v1.ExecutionStart{
 			Config: e.ExecutionStart.Config, ResumeFromSeq: e.ExecutionStart.ResumeFromSeq,
 			InputCount: e.ExecutionStart.InputCount,
+			Harness:    e.ExecutionStart.Harness, HarnessVersion: e.ExecutionStart.HarnessVersion,
 		}}
 	}
 	return out
@@ -105,6 +106,7 @@ func EventFromProto(p *v1.Event) api.Event {
 			out.ExecutionStart = &api.ExecutionStart{
 				Config: b.ExecutionStart.GetConfig(), ResumeFromSeq: b.ExecutionStart.GetResumeFromSeq(),
 				InputCount: b.ExecutionStart.InputCount,
+				Harness:    b.ExecutionStart.GetHarness(), HarnessVersion: b.ExecutionStart.GetHarnessVersion(),
 			}
 		}
 	}
