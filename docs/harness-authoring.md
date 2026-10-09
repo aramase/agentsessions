@@ -238,6 +238,17 @@ restarts; an in-memory cache is insufficient. Direct controller users must confi
 Journaling alone does not provide exactly-once external delivery. `REQUIRES_APPROVAL` still fails
 closed because its approval gate is unimplemented. The stock daemon does not configure a tool executor.
 
+For the same recorded call, re-emit the same `ToolCall.ID`, tool name, arguments, mediation and key.
+Replay and recorded-prefix recovery compare that identity before serving a result or re-driving an
+intent. Keep arguments JSON-shaped: booleans, strings, null, numbers, string-keyed objects and lists.
+Use finite numbers; integers should stay within −9,007,199,254,740,991 to +9,007,199,254,740,991, and
+fractional values must tolerate float64 rounding. These are author obligations for the existing
+protobuf representation, not a guarantee of strict argument validation. Non-nil arguments that
+cannot be represented by the journal conversion are rejected as replay divergence.
+
+On a direct controller sink, a handled `ToolCall` error replays as an error. A different identity
+for a recorded call is fatal. Over `Harness.Connect`, a tool-call error ends the turn.
+
 ### Rule 5: pass reasoning parts back verbatim
 
 If your provider returns opaque reasoning parts, return them inside `ModelResponse.Message` unchanged and

@@ -43,6 +43,14 @@ provide.
   executor, including legacy results recorded after the fork marker. `Sessions.Resume` reports
   `FAILED_PRECONDITION` for unresolved inherited intents with guidance to fork at or after the
   `TOOL_RESULT`, or Exec a new turn. No wire or journal schema change is required.
+- Replay and interrupted-turn resume now reject tool-call identity and result-correlation mismatches
+  that v0.1.0–v0.1.2 previously accepted. Resume also rejects harnesses that leave recorded effects
+  unconsumed instead of marking the turn complete. Direct controller sinks can recover handled tool
+  executor failures without re-executing nonterminal intents that have no result; Harness.Connect
+  still ends the turn on a sink tool-call error. An immediately following in-harness TOOL_RESULT
+  remains ambiguous without a failure receipt and is rejected if its ID differs from the preceding
+  call. Handled pre-intent mediation rejections remain recoverable when no recorded tool call is next,
+  without relaxing mediation identity checks on actual recorded calls.
 - Chat executions written on `main` since execution-config journaling was added in #76 with a
   non-empty `system_prompt` no longer pass deterministic controller replay or interrupted resume
   when their recorded model-input hashes exclude the prompt. Non-JSON config now fails whenever
