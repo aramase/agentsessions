@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -911,6 +914,439 @@ func TestForkRollbackBudgetsEachChildSeparately(t *testing.T) {
 		if !slices.Contains(ctl.calls, "delete:"+uid) {
 			t.Fatalf("every provisioned child must be torn down, missing %q in %v", uid, ctl.calls)
 		}
+	}
+}
+
+// hostToolHarness makes the result returned across harnesswire observable in the journal.
+// Its call does not depend on Start.Config.
+type hostToolHarness struct{ key string }
+
+func (hostToolHarness) Describe(context.Context) (api.Descriptor, error) {
+	return api.Descriptor{ID: "host-tool", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, nil
+}
+
+func (h hostToolHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	result, err := sink.ToolCall(ctx, hostToolCall(h.key))
+	if err != nil {
+		return err
+	}
+	return sink.Output(ctx, fmt.Sprintf("%s:%v", result.ID, result.Output["receipt"]))
+}
+
+func hostToolCall(key string) api.ToolCall {
+	return api.ToolCall{
+		ID: "call-1", Tool: "charge", Args: map[string]any{"account": "a1"},
+		Mediation: api.MediationControllerMediated, IdempotencyKey: key,
+	}
+}
+
+func toolRecords(t *testing.T, log eventlog.Store) []eventlog.Record {
+	t.Helper()
+	if err := log.Verify(); err != nil {
+		t.Fatalf("verify journal: %v", err)
+	}
+	recs, err := log.Read(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recs
+}
+
+func assertToolKinds(t *testing.T, log eventlog.Store, want ...api.EventKind) []eventlog.Record {
+	t.Helper()
+	recs := toolRecords(t, log)
+	var got []api.EventKind
+	for _, r := range recs {
+		got = append(got, r.Event.Kind)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("journal kinds = %v, want %v", got, want)
+	}
+	return recs
+}
+
+func toolEvent(t *testing.T, recs []eventlog.Record, kind api.EventKind) api.Event {
+	t.Helper()
+	for _, rec := range recs {
+		if rec.Event.Kind == kind {
+			return rec.Event
+		}
+	}
+	t.Fatalf("journal has no %s event", kind)
+	return api.Event{}
+}
+
+// Removing placement's executor propagation must fail this test: the real local bridge must
+// record the exact intent BEFORE the host effect, stamp correlation, and return the receipt.
+func TestPlacerHostToolExecRecordsIntentBeforeEffect(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("tool-live")
+	effects := 0
+	p := newLocalPlacer(t, hostToolHarness{key: "live-key"}, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+		if scope.SessionUID != "tool-live" {
+			return api.ToolResult{}, fmt.Errorf("executor session = %q, want tool-live", scope.SessionUID)
+		}
+		recs := assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall)
+		if !reflect.DeepEqual(call, hostToolCall("live-key")) || !reflect.DeepEqual(*recs[2].Event.ToolCall, call) {
+			return api.ToolResult{}, fmt.Errorf("executor call or durable intent changed: %+v", call)
+		}
+		effects++
+		return api.ToolResult{ID: "executor-does-not-own-correlation", Output: map[string]any{"receipt": "receipt-1"}}, nil
+	}))
+	if _, err := p.Exec(context.Background(), log, "tool-live", []api.Message{*api.TextMessage("user", "charge")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	recs := assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventToolResult, api.EventOutput, api.EventEnd)
+	result := toolEvent(t, recs, api.EventToolResult).Result
+	output := toolEvent(t, recs, api.EventOutput).Message.Text()
+	if effects != 1 || result == nil || result.ID != "call-1" || result.Output["receipt"] != "receipt-1" || output != "call-1:receipt-1" {
+		t.Fatalf("effect/result roundtrip: effects=%d result=%+v output=%q", effects, result, output)
+	}
+}
+
+func TestPlacerHostToolFailures(t *testing.T) {
+	errExecutor := errors.New("host policy denied charge")
+	for _, tc := range []struct {
+		name, key, wantError string
+		wantErr              error
+		executor             bool
+		wantKinds            []api.EventKind
+		wantAttempts         int
+	}{
+		{"missing executor", "k1", "no tool executor configured", nil, false, []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventError}, 0},
+		{"empty key", "", controller.ErrMissingIdempotencyKey.Error(), controller.ErrMissingIdempotencyKey, true, []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventError}, 0},
+		{"executor error", "k1", errExecutor.Error(), errExecutor, true, []api.EventKind{api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventError}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			log := store.Session("tool-failure")
+			attempts := 0
+			var opts []placement.Option
+			if tc.executor {
+				opts = append(opts, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					attempts++
+					return api.ToolResult{}, errExecutor
+				}))
+			}
+			p := newLocalPlacer(t, hostToolHarness{key: tc.key}, opts...)
+			_, err = p.Exec(context.Background(), log, "tool-failure", []api.Message{*api.TextMessage("user", "charge")}, 0)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("exec error = %v, want %v", err, tc.wantErr)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("exec error = %v, want %q", err, tc.wantError)
+			}
+			if attempts != tc.wantAttempts {
+				t.Fatalf("executor attempts=%d want %d", attempts, tc.wantAttempts)
+			}
+			recs := assertToolKinds(t, log, tc.wantKinds...)
+			if !strings.Contains(recs[len(recs)-1].Event.Err.Description, tc.wantError) {
+				t.Fatalf("failure was not journaled: %+v", recs[len(recs)-1].Event)
+			}
+		})
+	}
+}
+
+func TestPlacerHostToolExecutorsAreIndependent(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	newHost := func(receipt string) *placement.Placer {
+		return newLocalPlacer(t, hostToolHarness{key: "shared-key"}, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+			return api.ToolResult{Output: map[string]any{"receipt": receipt}}, nil
+		}))
+	}
+	first, second := newHost("host-a"), newHost("host-b")
+	for _, tc := range []struct {
+		p            *placement.Placer
+		uid, receipt string
+	}{{first, "a1", "host-a"}, {second, "b1", "host-b"}, {first, "a2", "host-a"}} {
+		log := store.Session(tc.uid)
+		if _, err := tc.p.Exec(context.Background(), log, tc.uid, []api.Message{*api.TextMessage("user", "charge")}, 0); err != nil {
+			t.Fatal(err)
+		}
+		result := toolEvent(t, toolRecords(t, log), api.EventToolResult).Result
+		if result == nil || result.Output["receipt"] != tc.receipt {
+			t.Fatalf("%s used another placer's executor: %+v", tc.uid, result)
+		}
+	}
+	// Constructing configured hosts must not change the default for another Placer.
+	denied := newLocalPlacer(t, hostToolHarness{key: "shared-key"})
+	if _, err := denied.Exec(context.Background(), store.Session("denied"), "denied", nil, 0); err == nil || !strings.Contains(err.Error(), "no tool executor configured") {
+		t.Fatalf("unconfigured placer inherited an executor: %v", err)
+	}
+}
+
+func seedToolPrefix(t *testing.T, log eventlog.Store, withResult bool) {
+	t.Helper()
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := hostToolCall("original-key")
+	events := []api.Event{
+		{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(1)}},
+		{Kind: api.EventInput, Message: api.TextMessage("user", "charge")},
+		{Kind: api.EventToolCall, ToolCall: &call},
+	}
+	if withResult {
+		events = append(events, api.Event{Kind: api.EventToolResult, Result: &api.ToolResult{ID: "call-1", Output: map[string]any{"receipt": "original-receipt"}}})
+	}
+	for i, ev := range events {
+		ev.ExecutionID = "interrupted-execution"
+		if _, err := log.Append(int64(i), fence, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestPlacerHostToolResumeServesCompletedPrefixWithoutExecutor(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("completed-prefix")
+	seedToolPrefix(t, log, true) // No END: Resume must actually run the harness, not no-op.
+	p := newLocalPlacer(t, hostToolHarness{key: "original-key"})
+	if err := p.Resume(context.Background(), log, "completed-prefix"); err != nil {
+		t.Fatal(err)
+	}
+	recs := assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventToolResult, api.EventOutput, api.EventEnd, api.EventLifecycle)
+	output := toolEvent(t, recs, api.EventOutput)
+	if output.Message.Text() != "call-1:original-receipt" {
+		t.Fatalf("recorded receipt was not served: %+v", output)
+	}
+}
+
+func TestPlacerHostToolResumeRedrivesTerminalIntentWithOriginalKey(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("terminal-intent")
+	seedToolPrefix(t, log, false)
+	p := newLocalPlacer(t, hostToolHarness{key: "original-key"}, placement.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+		if scope.SessionUID != "terminal-intent" {
+			return api.ToolResult{}, fmt.Errorf("resume executor session = %q, want terminal-intent", scope.SessionUID)
+		}
+		assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall)
+		if !reflect.DeepEqual(call, hostToolCall("original-key")) {
+			return api.ToolResult{}, fmt.Errorf("re-drive lost original call: %+v", call)
+		}
+		return api.ToolResult{ID: "wrong-id", Output: map[string]any{"receipt": "recovered"}}, nil
+	}))
+	if err := p.Resume(context.Background(), log, "terminal-intent"); err != nil {
+		t.Fatal(err)
+	}
+	recs := assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventToolResult, api.EventOutput, api.EventEnd, api.EventLifecycle)
+	result := toolEvent(t, recs, api.EventToolResult).Result
+	output := toolEvent(t, recs, api.EventOutput).Message.Text()
+	if result == nil || result.ID != "call-1" || output != "call-1:recovered" {
+		t.Fatalf("recovered result lost correlation or receipt: %+v", recs)
+	}
+}
+
+// failToolResultLog preserves real SQLite appends up to the crash window, then refuses the
+// result and the controller's best-effort ERROR append so the last durable record is intent.
+type failToolResultLog struct {
+	eventlog.Store
+	failed bool
+}
+
+var errToolResultAppend = errors.New("injected result append failure")
+
+func (l *failToolResultLog) Append(seq, fence int64, ev api.Event) (eventlog.Record, error) {
+	if ev.Kind == api.EventToolResult {
+		l.failed = true
+	}
+	if l.failed {
+		return eventlog.Record{}, errToolResultAppend
+	}
+	return l.Store.Append(seq, fence, ev)
+}
+
+// durableTool owns an independent SQLite effect ledger and receipt table. The effect and
+// dedup receipt commit together; neither is retained in memory when the host is recreated.
+type durableTool struct{ db *sql.DB }
+
+func openDurableTool(t *testing.T, path string) *durableTool {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?_txlock=immediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	for _, stmt := range []string{
+		"PRAGMA synchronous=FULL",
+		"CREATE TABLE IF NOT EXISTS effects (id INTEGER PRIMARY KEY, session_uid TEXT NOT NULL, account TEXT NOT NULL)",
+		"CREATE TABLE IF NOT EXISTS receipts (session_uid TEXT NOT NULL, key TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY (session_uid, key))",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &durableTool{db: db}
+}
+
+func (d *durableTool) exec(ctx context.Context, scope controller.ToolCallContext, call api.ToolCall) (api.ToolResult, error) {
+	sessionUID := scope.SessionUID
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return api.ToolResult{}, err
+	}
+	defer tx.Rollback()
+	var receipt string
+	err = tx.QueryRowContext(ctx, "SELECT receipt FROM receipts WHERE session_uid = ? AND key = ?", sessionUID, call.IdempotencyKey).Scan(&receipt)
+	if errors.Is(err, sql.ErrNoRows) {
+		effect, err := tx.ExecContext(ctx, "INSERT INTO effects(session_uid, account) VALUES (?, ?)", sessionUID, call.Args["account"])
+		if err != nil {
+			return api.ToolResult{}, err
+		}
+		id, err := effect.LastInsertId()
+		if err != nil {
+			return api.ToolResult{}, err
+		}
+		receipt = fmt.Sprintf("receipt-%d", id)
+		if _, err := tx.ExecContext(ctx, "INSERT INTO receipts(session_uid, key, receipt) VALUES (?, ?, ?)", sessionUID, call.IdempotencyKey, receipt); err != nil {
+			return api.ToolResult{}, err
+		}
+	} else if err != nil {
+		return api.ToolResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return api.ToolResult{}, err
+	}
+	return api.ToolResult{ID: "executor-id", Output: map[string]any{"receipt": receipt}}, nil
+}
+
+// One host must not return another session's receipt when the harness reuses a key.
+func TestPlacerHostToolSessionsScopeEffectsAndReceipts(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	tool := openDurableTool(t, filepath.Join(t.TempDir(), "tool.db"))
+	p := newLocalPlacer(t, hostToolHarness{key: "shared-key"}, placement.WithToolExecutor(tool.exec))
+	for _, tc := range []struct{ uid, receipt string }{
+		{"session-a", "receipt-1"}, {"session-b", "receipt-2"},
+		{"session-a", "receipt-1"}, {"session-b", "receipt-2"},
+	} {
+		log := store.Session(tc.uid)
+		head, err := log.Head()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.Exec(t.Context(), log, tc.uid, []api.Message{*api.TextMessage("user", "charge")}, head); err != nil {
+			t.Fatal(err)
+		}
+		recs := toolRecords(t, log)
+		for _, rec := range recs {
+			if rec.Event.Kind == api.EventToolResult && (rec.Event.Result == nil || rec.Event.Result.Output["receipt"] != tc.receipt) {
+				t.Fatalf("%s received another session's receipt: %+v", tc.uid, rec.Event.Result)
+			}
+		}
+		if output := recs[len(recs)-2].Event.Message.Text(); output != "call-1:"+tc.receipt {
+			t.Fatalf("%s output = %q, want call-1:%s", tc.uid, output, tc.receipt)
+		}
+	}
+	for _, uid := range []string{"session-a", "session-b"} {
+		var effects, receipts int
+		if err := tool.db.QueryRow("SELECT COUNT(*) FROM effects WHERE session_uid = ?", uid).Scan(&effects); err != nil {
+			t.Fatal(err)
+		}
+		if err := tool.db.QueryRow("SELECT COUNT(*) FROM receipts WHERE session_uid = ? AND key = 'shared-key'", uid).Scan(&receipts); err != nil {
+			t.Fatal(err)
+		}
+		if effects != 1 || receipts != 1 {
+			t.Fatalf("%s durable state: effects=%d receipts=%d, want 1/1", uid, effects, receipts)
+		}
+	}
+}
+
+func TestPlacerHostToolResumeFailsClosedWithoutExecutor(t *testing.T) {
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	log := store.Session("missing-resume-executor")
+	seedToolPrefix(t, log, false)
+	p := newLocalPlacer(t, hostToolHarness{key: "original-key"})
+	if err := p.Resume(t.Context(), log, "missing-resume-executor"); err == nil || !strings.Contains(err.Error(), "no tool executor configured") {
+		t.Fatalf("unconfigured Resume = %v, want fail closed", err)
+	}
+	assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventError)
+}
+
+func TestPlacerHostToolResumeDedupsAfterReopeningJournalAndExecutor(t *testing.T) {
+	dir := t.TempDir()
+	journalPath, receiptPath := filepath.Join(dir, "journal.db"), filepath.Join(dir, "tool.db")
+	store, err := sqlitelog.Open(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	tool := openDurableTool(t, receiptPath)
+	backend := local.New(hostToolHarness{key: "original-key"})
+	t.Cleanup(func() { _ = backend.Close() })
+	p := placement.New(backend, echoagent.Model, placement.WithToolExecutor(tool.exec))
+	log := store.Session("durable-recovery")
+	faulted := &failToolResultLog{Store: log}
+	if _, err := p.Exec(context.Background(), faulted, "durable-recovery", []api.Message{*api.TextMessage("user", "charge")}, 0); !errors.Is(err, errToolResultAppend) {
+		t.Fatalf("exec must surface the failed result append, got %v", err)
+	}
+	assertToolKinds(t, log, api.EventExecutionStart, api.EventInput, api.EventToolCall)
+	var receipt string
+	if err := tool.db.QueryRow("SELECT receipt FROM receipts WHERE session_uid = 'durable-recovery' AND key = 'original-key'").Scan(&receipt); err != nil || receipt != "receipt-1" {
+		t.Fatalf("effect's durable receipt missing before restart: receipt=%q err=%v", receipt, err)
+	}
+	for _, close := range []func() error{backend.Close, tool.db.Close, store.Close} {
+		if err := close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reopened, err := sqlitelog.Open(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	recreatedTool := openDurableTool(t, receiptPath)
+	recreatedHost := newLocalPlacer(t, hostToolHarness{key: "original-key"}, placement.WithToolExecutor(recreatedTool.exec))
+	recoveredLog := reopened.Session("durable-recovery")
+	if err := recreatedHost.Resume(context.Background(), recoveredLog, "durable-recovery"); err != nil {
+		t.Fatal(err)
+	}
+	recs := assertToolKinds(t, recoveredLog, api.EventExecutionStart, api.EventInput, api.EventToolCall, api.EventToolResult, api.EventOutput, api.EventEnd, api.EventLifecycle)
+	result := toolEvent(t, recs, api.EventToolResult).Result
+	output := toolEvent(t, recs, api.EventOutput).Message.Text()
+	if result == nil || result.ID != "call-1" || result.Output["receipt"] != "receipt-1" || output != "call-1:receipt-1" {
+		t.Fatalf("recovery did not serve the original receipt: %+v", recs)
+	}
+	var effects, receipts int
+	if err := recreatedTool.db.QueryRow("SELECT COUNT(*) FROM effects").Scan(&effects); err != nil {
+		t.Fatal(err)
+	}
+	if err := recreatedTool.db.QueryRow("SELECT COUNT(*) FROM receipts").Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if effects != 1 || receipts != 1 {
+		t.Fatalf("re-drive duplicated durable state: effects=%d receipts=%d", effects, receipts)
 	}
 }
 

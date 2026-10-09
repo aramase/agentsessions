@@ -30,8 +30,21 @@ provide.
 
 ### Compatibility
 
+- `controller.ToolFunc` now takes `controller.ToolCallContext` between `ctx` and `call`. Custom tool
+  executors must update their Go signatures and scope authorization and durable deduplication to
+  `ToolCallContext.SessionUID` plus the harness-chosen idempotency key. Placement binds the UID for
+  Exec and Resume; `controller.New` rejects a non-nil tool executor without a nonempty
+  `controller.WithSessionUID` with `controller.ErrMissingSessionUID`, before advancing the fence.
+  This is a Go source compatibility change, not a wire or journal schema change.
+- Resume now rejects a forked unfinished execution with unresolved inherited tool intents with
+  `controller.ErrInheritedToolIntent`, rather than re-driving a parent's effect under the child's
+  UID. This applies to existing journals, including legacy markerless turns; Fork still copies the
+  prefix, and completed inherited intent/result pairs remain recoverable without invoking the
+  executor, including legacy results recorded after the fork marker. `Sessions.Resume` reports
+  `FAILED_PRECONDITION` for unresolved inherited intents with guidance to fork at or after the
+  `TOOL_RESULT`, or Exec a new turn. No wire or journal schema change is required.
 - Replay and interrupted-turn resume now reject tool-call identity and result-correlation mismatches
-  that `main` previously accepted. Resume also rejects harnesses that leave recorded effects
+  that v0.1.0–v0.1.2 previously accepted. Resume also rejects harnesses that leave recorded effects
   unconsumed instead of marking the turn complete. Direct controller sinks can recover handled tool
   executor failures without re-executing nonterminal intents that have no result; Harness.Connect
   still ends the turn on a sink tool-call error. An immediately following in-harness TOOL_RESULT

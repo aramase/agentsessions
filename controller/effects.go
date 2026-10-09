@@ -60,7 +60,8 @@ func (s *liveSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResul
 		return api.ToolResult{}, err
 	}
 	// Every host-executed tool MUST carry an idempotency key: the crash-recovery re-drive (§3/I3)
-	// dedups on it. Reject before recording, so a keyless call leaves no unrecoverable intent.
+	// dedups on session UID plus key. Reject before recording, so a keyless call leaves no
+	// unrecoverable intent.
 	if call.IdempotencyKey == "" {
 		return api.ToolResult{}, ErrMissingIdempotencyKey
 	}
@@ -93,7 +94,7 @@ func (s *liveSink) execTool(ctx context.Context, call api.ToolCall) (api.ToolRes
 		// (in-harness-reported tools use Report instead).
 		return api.ToolResult{}, errors.New("controller: no tool executor configured")
 	}
-	res, err := s.c.tool(ctx, call)
+	res, err := s.c.tool(ctx, ToolCallContext{SessionUID: s.c.sessionUID}, call)
 	if err != nil {
 		return api.ToolResult{}, err
 	}

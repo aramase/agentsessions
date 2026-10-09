@@ -38,6 +38,13 @@ var ErrReplayDiverged = errors.New("controller: replay diverged from the journal
 // before running the harness.
 var ErrInvalidExecutionLog = errors.New("controller: invalid execution log")
 
+// ErrInheritedToolIntent rejects recovery of a forked execution whose copied prefix contains an
+// unresolved tool intent. Re-driving it under the child's UID could repeat the parent's effect.
+var ErrInheritedToolIntent = fmt.Errorf("%w: inherited tool intent cannot be resumed", ErrInvalidExecutionLog)
+
+// ErrMissingSessionUID rejects a tool executor without a session-scoped authorization/dedup identity.
+var ErrMissingSessionUID = errors.New("controller: tool executor requires a session UID")
+
 // ErrIncompleteInvocation identifies an unfinished trailing turn whose inputs were only partly
 // committed. It wraps ErrInvalidExecutionLog; the caller can retry with Exec and all inputs.
 var ErrIncompleteInvocation = fmt.Errorf("%w: incomplete invocation", ErrInvalidExecutionLog)
@@ -45,7 +52,7 @@ var ErrIncompleteInvocation = fmt.Errorf("%w: incomplete invocation", ErrInvalid
 // ErrMissingIdempotencyKey rejects a CONTROLLER_MEDIATED tool call that omits the idempotency key
 // the crash-recovery re-drive needs to dedup its side effect (I3). Without a key, at-most-once
 // silently would not hold, so the host fails loud rather than record an unrecoverable intent. The
-// full key contract (generation, TTL, scope) is the §10 spike; this is the minimal guard.
+// remaining key contract (generation, TTL) is the §10 spike; this is the minimal guard.
 var ErrMissingIdempotencyKey = errors.New("controller: CONTROLLER_MEDIATED tool call requires an idempotency key")
 
 // ErrUnmediatedToolCall rejects a ToolCall whose mediation tier is not host-executed. ToolCall is
@@ -82,18 +89,27 @@ type Observer struct {
 	OnDelta func(api.Delta)
 }
 
+// ToolCallContext carries host-owned identity for tool authorization and durable deduplication.
+// It is separate from context.Context, which carries execution cancellation and deadlines.
+type ToolCallContext struct {
+	SessionUID string // Nonempty identity configured by WithSessionUID.
+}
+
 // ToolFunc executes a CONTROLLER_MEDIATED tool. The host calls it between appending the TOOL_CALL
-// intent and appending the TOOL_RESULT (the two-phase write-ahead of §3/I3). It receives the call's
-// IdempotencyKey and owns tool-side deduplication: on crash-recovery the host re-executes the same
-// call under the same key, and an idempotent tool MUST NOT repeat the external effect. ctx carries
-// the execution's cancellation and deadline.
-type ToolFunc func(ctx context.Context, tc api.ToolCall) (api.ToolResult, error)
+// intent and appending the TOOL_RESULT (the two-phase write-ahead of §3/I3). The host owns
+// tool/resource authorization and durable deduplication scoped by scope.SessionUID plus the
+// harness-chosen IdempotencyKey, which is only unique within a session. On same-session
+// crash-recovery it receives the same session and recorded call, and MUST NOT repeat the external
+// effect. Resume rejects unresolved inherited intents across a fork. ctx carries the execution's
+// cancellation and deadline.
+type ToolFunc func(ctx context.Context, scope ToolCallContext, call api.ToolCall) (api.ToolResult, error)
 
 // Option configures a Controller at construction.
 type Option func(*Controller)
 
 // WithToolExecutor sets the executor for CONTROLLER_MEDIATED tool calls. Without it, a harness that
 // emits a host-mediated ToolCall gets an error (in-harness-reported tools use Report instead).
+// A non-nil executor requires a nonempty WithSessionUID; New rejects an unscoped executor.
 func WithToolExecutor(tool ToolFunc) Option { return func(c *Controller) { c.tool = tool } }
 
 // WithFence binds the controller to a fence the caller already minted from the log (via NewFence),
@@ -124,7 +140,8 @@ func WithStart(config []byte, resumeFromSeq int64) Option {
 	}
 }
 
-// WithSessionUID adds session correlation to controller logs.
+// WithSessionUID binds the session identity passed to tool executors and controller logs.
+// Direct controller users must set it to scope host authorization and durable tool deduplication.
 func WithSessionUID(sessionUID string) Option {
 	return func(c *Controller) { c.sessionUID = sessionUID }
 }
@@ -151,11 +168,15 @@ type Controller struct {
 // New starts an incarnation over log. Unless the caller supplies a fence via WithFence, it advances
 // the log's fencing token (superseding any prior incarnation, e.g. a dead pod) and binds to it. When
 // WithFence is supplied (the placement layer minted the fence and stamped it on the incarnation), New
-// uses that token instead — the log remains the single authority either way.
+// uses that token instead — the log remains the single authority either way. A tool executor
+// without a nonempty WithSessionUID returns ErrMissingSessionUID before advancing the fence.
 func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, error) {
 	c := &Controller{log: log, model: model, logger: slog.New(slog.DiscardHandler)}
 	for _, o := range opts {
 		o(c)
+	}
+	if c.tool != nil && c.sessionUID == "" {
+		return nil, ErrMissingSessionUID
 	}
 	if c.logger == nil {
 		c.logger = slog.New(slog.DiscardHandler)

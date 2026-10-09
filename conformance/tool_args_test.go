@@ -37,9 +37,10 @@ func TestWireToolRequestChangesFailReplayAndRecovery(t *testing.T) {
 			t.Run(path+"/"+change.name, func(t *testing.T) {
 				store, _ := openFile(t)
 				defer store.Close()
-				log := store.Session("s")
+				uid := "s"
+				log := store.Session(uid)
 				interrupted := errors.New("interrupted")
-				c, err := controller.New(log, nil, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) {
+				c, err := controller.New(log, nil, controller.WithSessionUID(uid), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
 					if path == "resume intent" {
 						return api.ToolResult{}, interrupted
 					}
@@ -73,9 +74,13 @@ func TestWireToolRequestChangesFailReplayAndRecovery(t *testing.T) {
 						t.Fatal(err)
 					}
 					log = child
+					uid = "child"
 				}
 				attempts := 0
-				fresh, err := controller.New(log, nil, controller.WithToolExecutor(func(context.Context, api.ToolCall) (api.ToolResult, error) { attempts++; return api.ToolResult{}, nil }))
+				fresh, err := controller.New(log, nil, controller.WithSessionUID(uid), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					attempts++
+					return api.ToolResult{}, nil
+				}))
 				if err != nil {
 					t.Fatal(err)
 				}
