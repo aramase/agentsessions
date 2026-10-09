@@ -228,6 +228,13 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 		return api.ToolResult{}, ErrMissingIdempotencyKey
 	}
 	if s.i < len(s.stream) {
+		// Preserve a distinct fallback's intent while reproducing a pre-intent rejection.
+		next := s.stream[s.i]
+		if next.Kind == api.EventToolCall && next.ToolCall != nil && next.ToolCall.ID != tc.ID {
+			if err := toolMediationError(tc.Mediation); err != nil {
+				return api.ToolResult{}, err
+			}
+		}
 		call, ok := s.recordedNext(api.EventToolCall)
 		if !ok {
 			if err := toolMediationError(tc.Mediation); err != nil {
