@@ -47,11 +47,18 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	if err != nil {
 		return false, err
 	}
-	if len(executions) == 0 || executions[len(executions)-1].completed {
+	if len(executions) == 0 {
 		return false, nil
 	}
 
 	execution := executions[len(executions)-1]
+	legacy := execution.legacyEnd > 0
+	if legacy {
+		execution = legacyResumeExecution(events[:execution.legacyEnd])
+	}
+	if execution.completed {
+		return false, nil
+	}
 	if err := execution.validateInputs(); err != nil {
 		return false, err
 	}
@@ -89,23 +96,31 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	if inheritedTools > 0 {
 		return false, fmt.Errorf("%w: execution %q", ErrInheritedToolIntent, execution.id)
 	}
+	invocationID := execution.id
+	if legacy {
+		// Select the original last INPUT, so retries retain identity even after ERROR/live appends.
+		invocationID, err = c.legacyExecutionID(recs[execution.start])
+		if err != nil {
+			return false, err
+		}
+	}
 	sink := &resumeSink{
-		live:   liveSink{c: c, executionID: execution.id},
+		live:   liveSink{c: c, executionID: execution.id, legacyRecovery: legacy},
 		stream: execution.stream,
 	}
 	recordedEffectCount = len(execution.stream)
 	start := &api.Start{
-		ExecutionID:   execution.id,
+		ExecutionID:   invocationID,
 		Inputs:        execution.inputs,
 		History:       events[:execution.start],
 		Config:        execution.config,
 		ResumeFromSeq: execution.resumeFromSeq,
 	}
 	if err := har.Run(ctx, start, sink); err != nil {
-		_, _ = c.appendSeq(execution.id, api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
+		_, _ = sink.live.append(api.Event{Kind: api.EventError, Err: &api.Error{Description: err.Error()}})
 		return true, err
 	}
-	_, err = c.appendSeq(execution.id, api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
+	_, err = sink.live.append(api.Event{Kind: api.EventEnd, End: &api.HarnessEnd{State: "COMPLETED"}})
 	return true, err
 }
 
@@ -205,6 +220,12 @@ func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
 }
 
 func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
+	if s.live.legacyRecovery {
+		if s.i < len(s.stream) {
+			return nil // v0.1.2 did not serve usage; past the crash point it journals it live.
+		}
+		return s.live.Usage(ctx, u)
+	}
 	if s.i < len(s.stream) {
 		ev, ok := s.recordedNext(api.EventUsage)
 		if !ok {

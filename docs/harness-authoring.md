@@ -91,8 +91,20 @@ legacy behavior. Placement/runtime restoration can still precede controller vali
 
 Executions without a start marker use empty config and a zero cursor. This includes legacy logs:
 older discarded non-empty config/cursors are irrecoverable, so those executions may fail deterministic
-reconstruction if their original behavior depended on the missing values. See
-[durable execution invocation](concepts.md#durable-execution-invocation) for the journal layout.
+reconstruction if their original behavior depended on the missing values. Released v0.1.2
+journals also omit execution IDs. Their controller Replay retains the old single invocation with
+all legacy inputs and the entire legacy journal as `History`; it does not infer per-turn boundaries,
+so multi-turn legacy replay retains its historical limitations. Legacy Resume selects only the
+last `INPUT` and continues the invocation without adding an execution ID to journal records.
+`Start.ExecutionID` instead carries a stable `legacy-<sha256>` compatibility token, derived from
+session UID, original record position and canonical content; the wire uses it for correlation.
+Retries of the same legacy turn reuse it, but different sessions do not. It is never journaled as
+an event ID. Direct legacy replay/recovery callers must supply a nonempty `WithSessionUID`;
+otherwise the selected invocation returns `ErrMissingSessionUID` before running the harness.
+After that recovery completes, a new Exec can append a modern turn without rewriting the prefix. Modern turns still
+require execution IDs; an unfinished legacy prefix followed by a modern turn fails closed. See
+[durable execution invocation](concepts.md#durable-execution-invocation) for detection rules and
+the journal layout.
 Do not put credentials in config: it is durable journal content, not a secret channel.
 
 ## The event sink
@@ -223,8 +235,10 @@ without a result is re-driven using the **original recorded key** only within th
 Fork still copies the requested prefix, but Resume returns `controller.ErrInheritedToolIntent`
 before running the harness or appending any event if the unfinished execution has inherited tool
 intents still unresolved at the journal head. This includes legacy turns without `EXECUTION_START`.
-`Sessions.Resume` reports `FAILED_PRECONDITION`: fork at or after the matching `TOOL_RESULT`, or
-Exec a new turn. Completed inherited pairs are served from the journal without invoking the executor,
+`Sessions.Resume` reports `FAILED_PRECONDITION`: fork at or after the matching `TOOL_RESULT`, or,
+for ID-bearing executions only, Exec a new turn. An ID-less legacy child must be re-forked at or
+after the parent's matching result; a new modern Exec after its unfinished prefix cannot establish
+a recoverable boundary. Completed inherited pairs are served from the journal without invoking the executor,
 including legacy results recorded after the fork marker. An intent first written by the child after
 the fork is not inherited and can be re-driven under the child's UID.
 

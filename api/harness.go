@@ -62,7 +62,9 @@ type Capabilities struct {
 
 // Start is the per-execution invocation the host sends to the harness.
 type Start struct {
-	ExecutionID   string    // host-assigned identity of this Run; shared by its events and deltas
+	// ExecutionID identifies this Run on the wire. Modern runs share it with journal events;
+	// legacy runs use a session-scoped legacy- compatibility token that is never journaled.
+	ExecutionID   string
 	Config        []byte    // opaque per-execution config; journaled verbatim and restored on replay/resume
 	History       []Event   // replay context; empty if the sandbox was memory-restored
 	Inputs        []Message // invocation inputs; originals are restored on controller replay/resume

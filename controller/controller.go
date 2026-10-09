@@ -33,8 +33,9 @@ var ErrReplayInvokedModel = errors.New("controller: replay invoked the model (I1
 // the log was written (a determinism violation, symmetric to the I0 input-hash check).
 var ErrReplayDiverged = errors.New("controller: replay diverged from the journal")
 
-// ErrInvalidExecutionLog is returned when execution-scoped events lack valid execution identity
-// or a start marker cannot establish a complete invocation. Replay and resume reject such turns
+// ErrInvalidExecutionLog is returned when modern execution-scoped events lack execution identity,
+// a legacy-to-modern boundary is ambiguous, or a start marker cannot establish a complete
+// invocation. Replay and resume reject such turns
 // before running the harness.
 var ErrInvalidExecutionLog = errors.New("controller: invalid execution log")
 
@@ -42,8 +43,9 @@ var ErrInvalidExecutionLog = errors.New("controller: invalid execution log")
 // unresolved tool intent. Re-driving it under the child's UID could repeat the parent's effect.
 var ErrInheritedToolIntent = fmt.Errorf("%w: inherited tool intent cannot be resumed", ErrInvalidExecutionLog)
 
-// ErrMissingSessionUID rejects a tool executor without a session-scoped authorization/dedup identity.
-var ErrMissingSessionUID = errors.New("controller: tool executor requires a session UID")
+// ErrMissingSessionUID rejects an unscoped tool executor or a selected legacy harness invocation
+// whose compatibility identity cannot be scoped to a session.
+var ErrMissingSessionUID = errors.New("controller: a session UID is required")
 
 // ErrIncompleteInvocation identifies an unfinished trailing turn whose inputs were only partly
 // committed. It wraps ErrInvalidExecutionLog; the caller can retry with Exec and all inputs.
@@ -230,6 +232,16 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		history = append(history, r.Event)
 	}
 
+	// Do not commit an identified turn after an unfinished ID-less invocation: there is no
+	// identity linking the two, so even a successful new turn would strand later recovery.
+	prefixEnd, err := legacyPrefix(history)
+	if err != nil {
+		return err
+	}
+	if prefixEnd > 0 && !legacyBoundaryComplete(history[:prefixEnd]) {
+		return fmt.Errorf("%w: unfinished legacy prefix; resume the legacy turn before Exec", ErrInvalidExecutionLog)
+	}
+
 	// Record every invocation before inputs so recovery can detect partially committed turns.
 	config := bytes.Clone(c.startConfig)
 	last := expectedLastSeq
@@ -287,9 +299,9 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 	return err
 }
 
-// Replay reconstructs the session by re-executing each completed execution with its recorded
-// effects. It asserts the model is never invoked (I1) and that each recorded model-input hash
-// matches (I0), returning the reconstructed outputs for an equivalence check. It is read-only.
+// Replay reconstructs the session by re-executing each completed modern execution with recorded
+// effects. An ID-less legacy prefix uses v0.1.2's whole-log Run, even if unfinished. Replay asserts
+// the model is never invoked (I1) and each recorded model-input hash matches (I0). It is read-only.
 func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []string, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, effectCount int
@@ -319,14 +331,36 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 
 	before := c.liveModelCalls
 	for _, execution := range executions {
-		if !execution.completed {
+		legacy := execution.legacyEnd > 0
+		if !execution.completed && !legacy {
 			continue
 		}
 		effectCount += len(execution.stream)
-		sink := &replaySink{stream: execution.stream}
+		sink := &replaySink{stream: execution.stream, legacy: legacy}
+		history := events[:execution.start]
+		invocationID := execution.id
+		if legacy {
+			history = events[:execution.legacyEnd]
+			// Whole-log legacy Replay has one invocation. Its first INPUT is a stable anchor;
+			// inputless legacy logs fall back to the first execution-scoped legacy record.
+			anchor := recs[0]
+			for _, record := range recs[:execution.legacyEnd] {
+				if record.Event.Kind == api.EventInput {
+					anchor = record
+					break
+				}
+				if anchor.Event.Kind == api.EventLifecycle {
+					anchor = record
+				}
+			}
+			invocationID, err = c.legacyExecutionID(anchor)
+			if err != nil {
+				return nil, err
+			}
+		}
 		start := &api.Start{
-			ExecutionID:   execution.id,
-			History:       events[:execution.start],
+			ExecutionID:   invocationID,
+			History:       history,
 			Inputs:        execution.inputs,
 			Config:        execution.config,
 			ResumeFromSeq: execution.resumeFromSeq,

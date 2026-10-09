@@ -1,0 +1,142 @@
+[
+  {
+    "Seq": 1,
+    "PrevHash": "",
+    "Hash": "62daf59c5c1e5062b1b0d47d5665b34aa52bf7ed0ca8a0b016af2c9827b5d8f6",
+    "Fence": 1,
+    "Event": {
+      "ExecutionID": "",
+      "Timestamp": "0001-01-01T00:00:00Z",
+      "SchemaVersion": 0,
+      "Kind": "INPUT",
+      "Message": {
+        "Role": "user",
+        "Parts": [
+          {
+            "Text": {
+              "Text": "hello"
+            },
+            "File": null,
+            "Data": null,
+            "Reasoning": null
+          }
+        ]
+      },
+      "ModelCall": null,
+      "ToolCall": null,
+      "Result": null,
+      "Approval": null,
+      "ApprovalResult": null,
+      "Usage": null,
+      "Lifecycle": null,
+      "End": null,
+      "Err": null,
+      "Actor": {
+        "Principal": "",
+        "Issuer": "",
+        "Subject": ""
+      }
+    }
+  },
+  {
+    "Seq": 2,
+    "PrevHash": "62daf59c5c1e5062b1b0d47d5665b34aa52bf7ed0ca8a0b016af2c9827b5d8f6",
+    "Hash": "699f567f01dcee2cd3bcf8a6dd4eb4c14400a4b85f5cfd0d285dbb99687dd868",
+    "Fence": 1,
+    "Event": {
+      "ExecutionID": "",
+      "Timestamp": "0001-01-01T00:00:00Z",
+      "SchemaVersion": 0,
+      "Kind": "MODEL_CALL",
+      "Message": null,
+      "ModelCall": {
+        "Model": "echo",
+        "Params": null,
+        "InputHash": "2611c24a1a665deca46265ed96d1e1efc699260c9cba9c07f22cda7939232c30",
+        "ID": "49072a2a845249ea"
+      },
+      "ToolCall": null,
+      "Result": null,
+      "Approval": null,
+      "ApprovalResult": null,
+      "Usage": null,
+      "Lifecycle": null,
+      "End": null,
+      "Err": null,
+      "Actor": {
+        "Principal": "",
+        "Issuer": "",
+        "Subject": ""
+      }
+    }
+  },
+  {
+    "Seq": 3,
+    "PrevHash": "699f567f01dcee2cd3bcf8a6dd4eb4c14400a4b85f5cfd0d285dbb99687dd868",
+    "Hash": "ac9431332cbf3d0d3c6bd24dc7c3d41be4226e5494d24eeaa603cb7a2c895ce7",
+    "Fence": 1,
+    "Event": {
+      "ExecutionID": "",
+      "Timestamp": "0001-01-01T00:00:00Z",
+      "SchemaVersion": 0,
+      "Kind": "OUTPUT",
+      "Message": {
+        "Role": "assistant",
+        "Parts": [
+          {
+            "Text": {
+              "Text": "echo:hello"
+            },
+            "File": null,
+            "Data": null,
+            "Reasoning": null
+          }
+        ]
+      },
+      "ModelCall": null,
+      "ToolCall": null,
+      "Result": null,
+      "Approval": null,
+      "ApprovalResult": null,
+      "Usage": null,
+      "Lifecycle": null,
+      "End": null,
+      "Err": null,
+      "Actor": {
+        "Principal": "",
+        "Issuer": "",
+        "Subject": ""
+      }
+    }
+  },
+  {
+    "Seq": 4,
+    "PrevHash": "ac9431332cbf3d0d3c6bd24dc7c3d41be4226e5494d24eeaa603cb7a2c895ce7",
+    "Hash": "1b0f72670340a5c139b39a2922bca9fa202e191a4d610f2211f53a501f3ab5fa",
+    "Fence": 1,
+    "Event": {
+      "ExecutionID": "",
+      "Timestamp": "0001-01-01T00:00:00Z",
+      "SchemaVersion": 0,
+      "Kind": "END",
+      "Message": null,
+      "ModelCall": null,
+      "ToolCall": null,
+      "Result": null,
+      "Approval": null,
+      "ApprovalResult": null,
+      "Usage": null,
+      "Lifecycle": null,
+      "End": {
+        "State": "COMPLETED",
+        "Error": null
+      },
+      "Err": null,
+      "Actor": {
+        "Principal": "",
+        "Issuer": "",
+        "Subject": ""
+      }
+    }
+  }
+]

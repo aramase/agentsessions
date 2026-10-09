@@ -147,8 +147,9 @@ committed before a crash permits resume even if the harness has not run yet. Com
 an incomplete trailing invocation and remains read-only. A historical fork cut before all expected
 inputs likewise cannot resume, but completed prefixes and complete invocation boundaries still work.
 
-Controller replay and interrupted-turn resume reconstruct each `Start` from its own recorded values,
-including in inherited fork prefixes. `History` is the exact prior journal prefix: it excludes the
+For ID-bearing executions, controller replay and interrupted-turn resume reconstruct each `Start`
+from its own recorded values, including in inherited fork prefixes. `History` is the exact prior
+journal prefix: it excludes the
 current execution's start marker and inputs, but retains markers from prior executions. Replay is
 read-only; recovery serves already-recorded effects rather than repeating them. The harness cursor
 is opaque and distinct from the append CAS cursor.
@@ -160,6 +161,37 @@ SQLite schema migration or rewriting of existing records is needed. Experimental
 without `input_count` fail closed when their invocation is selected for resume or is completed for
 replay: absence cannot distinguish a genuine inputless turn from lost inputs. Markerless logs retain
 their prior behavior and lack completeness information; only older writers omit the marker.
+
+Released v0.1.2 journals also lack execution IDs. Compatibility recognizes only their ID-less
+execution event kinds (`INPUT`, `MODEL_CALL`, `OUTPUT`, `TOOL_CALL`, `TOOL_RESULT`, `USAGE`,
+`END`, `ERROR`), with session-scoped lifecycle records allowed. Output deltas were ephemeral,
+not journal records. Controller Replay preserves v0.1.2's one whole-log harness invocation:
+all recorded inputs and the entire legacy journal as `History`, even for an unfinished log;
+usage is excluded from the served effect stream. Multi-turn legacy journals retain the old
+replay limitation (for example, echo can fail its model-input hash check), because inferring
+turn boundaries would change historical behavior. Controller Resume instead selects only the
+last `INPUT`, supplies its prior history, and continues an interrupted turn with ID-less records.
+Legacy harness invocations receive a `legacy-<sha256>` compatibility ID in `Start` and transport
+frames only. The digest includes the host-bound session UID, the original input record's sequence
+position, and its canonical event content (whole-log Replay uses the first input; Resume uses the
+last). If Replay has no input, it uses the first legacy record. Retrying the same turn preserves the
+ID despite later recovery/error records; identical legacy bytes in different sessions have distinct
+IDs. This namespace cannot collide with the controller's hexadecimal modern IDs. The token is
+never copied into journal event identity, including when echoed by a remote harness. Direct
+controller callers must bind a nonempty `WithSessionUID`; a selected legacy invocation without it
+returns `ErrMissingSessionUID` before running the harness or appending execution records.
+It still refuses unresolved inherited tool intents; a recorded model intent without a completion
+still fails recovery rather than repeating the model call.
+
+A completed legacy prefix can be followed by modern executions: replay reconstructs the prefix
+with legacy semantics and each completed modern execution normally, and Resume selects the last
+turn. This includes a v0.1.2 crash recovered by the upgraded controller before a new Exec. Recover
+that legacy turn before starting a modern execution: Exec rejects an unfinished legacy prefix
+before appending or running the harness. An already-mixed unfinished legacy-to-modern boundary
+also returns `ErrInvalidExecutionLog`, since there is no recorded identity linking the invocations.
+Once an `EXECUTION_START` or ID-bearing execution event appears, subsequent ID-less execution
+events are invalid, not legacy. ID-less start markers and other non-legacy kinds likewise fail
+closed. Existing records and hashes are never rewritten.
 
 **Rollback compatibility:** binaries older than this release fail chain verification for sessions
 containing `EXECUTION_START`, reporting a `content_hash` mismatch. Rollback is not supported for any

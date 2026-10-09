@@ -30,6 +30,21 @@ provide.
 
 ### Compatibility
 
+- Controller Replay and Resume accept the ID-less journals written by v0.1.2 without rewriting
+  existing records or hashes. Replay retains v0.1.2's whole-log harness invocation, including its
+  multi-turn replay limitation: inferring turn boundaries would change historical behavior.
+  Resume retains the last-INPUT rule and continues interrupted legacy turns with ID-less events;
+  original config, resume cursor and input completeness remain unavailable. Harness invocations
+  use a deterministic `legacy-<sha256>` transport-only ID derived from host-bound session UID,
+  original record position and canonical content; it is not journaled. Direct controller callers
+  must supply a nonempty `WithSessionUID` for selected legacy invocations, or receive
+  `ErrMissingSessionUID` before the harness runs. A completed legacy
+  prefix, including a legacy turn recovered after upgrading, can precede modern executions.
+  An unfinished legacy-to-modern boundary fails with `ErrInvalidExecutionLog`; Exec rejects an
+  unfinished legacy prefix before appending or running the harness. Recover it before a new Exec. Only the ID-less event kinds the released writer persisted qualify:
+  ID-less start markers and non-legacy kinds are invalid. Once a modern start marker or ID-bearing
+  execution event appears, later ID-less execution events still fail closed. Existing inherited-tool
+  safety checks and the rollback restriction for newly written start markers remain unchanged.
 - `controller.ToolFunc` now takes `controller.ToolCallContext` between `ctx` and `call`. Custom tool
   executors must update their Go signatures and scope authorization and durable deduplication to
   `ToolCallContext.SessionUID` plus the harness-chosen idempotency key. Placement binds the UID for
@@ -42,7 +57,9 @@ provide.
   prefix, and completed inherited intent/result pairs remain recoverable without invoking the
   executor, including legacy results recorded after the fork marker. `Sessions.Resume` reports
   `FAILED_PRECONDITION` for unresolved inherited intents with guidance to fork at or after the
-  `TOOL_RESULT`, or Exec a new turn. No wire or journal schema change is required.
+  `TOOL_RESULT`, or Exec a new turn for ID-bearing executions only. An ID-less legacy child must
+  instead be re-forked at or after the matching result, since an unfinished legacy prefix followed
+  by a modern turn is not recoverable. No wire or journal schema change is required.
 - Chat executions written on `main` since execution-config journaling was added in #76 with a
   non-empty `system_prompt` no longer pass deterministic controller replay or interrupted resume
   when their recorded model-input hashes exclude the prompt. Non-JSON config now fails whenever
