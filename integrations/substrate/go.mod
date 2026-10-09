@@ -1,13 +1,11 @@
 module github.com/aramase/agentsessions/integrations/substrate
 
-go 1.26.3
-
-toolchain go1.26.9
+go 1.27.0
 
 require (
-	github.com/agent-substrate/substrate v0.0.0-20260731195148-b1bd558aba3c
+	github.com/agent-substrate/substrate v0.3.0
 	github.com/aramase/agentsessions v0.0.0
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.84.0
 )
 
 require (
@@ -20,7 +18,7 @@ require (
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	modernc.org/libc v1.75.7 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
