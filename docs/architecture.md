@@ -66,8 +66,10 @@ companion determinism contract, exercised by `conformance/`):
   at most once; host-executed tools carry an idempotency key so the re-drive dedups. A model call cut
   after `MODEL_CALL`, when that call is the turn's last recorded effect, is re-invoked on `Resume`
   when the harness re-issues the same input hash, and its completion is recorded against that call.
-  Each cut costs at most one extra provider call; a recovering call that fails is itself a cut, and
-  the next `Resume` re-drives it again. This applies to journals with execution IDs; a v0.1.2 journal
+  Each cut costs at most one extra provider call within one host, where the per-session guard
+  serializes `Exec`, `Suspend` and `Resume`; the bound does not hold across hosts sharing a journal. A
+  recovering call that fails is itself a cut, and the next `Resume` re-drives it again. A fork at a
+  `MODEL_CALL` costs one provider call when the child resumes. This applies to journals with execution IDs; a v0.1.2 journal
   without them is not re-driven and `Resume` still fails with "recorded completion missing".
 - **I4 — memory-restore is not replay.** On `ResumeActor{boot:false}` the harness already holds its state
   in RAM, so `Start.History` is empty and the journal is **not** replayed into it (replaying would
