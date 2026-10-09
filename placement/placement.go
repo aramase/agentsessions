@@ -34,6 +34,11 @@ import (
 // session.Service surfaces it as codes.FailedPrecondition.
 var ErrUnplaceable = errors.New("placement: harness cannot be placed on this runtime")
 
+// ErrSessionBusy is returned when Exec, Suspend, or Resume overlaps another operation on the same
+// session through this Placer or its Registry. No compute or journal transition is attempted;
+// session.Service surfaces it as codes.Aborted, independently of any backend transport status.
+var ErrSessionBusy = errors.New("placement: another operation is in progress for this session")
+
 // ErrHarnessUnavailable is returned when the harness could not be reached to describe itself. It is
 // only ever raised by the admission check, which runs before any compute is provisioned or anything
 // is written to the log (for a LiveDescriber, whose Create provisions nothing, it also runs after
@@ -87,6 +92,9 @@ type Placer struct {
 	tool    controller.ToolFunc
 	dial    Dialer
 	logger  *slog.Logger
+
+	// Private for a standalone Placer; NewRegistry wires one shared guard before use.
+	guard *sessionGuard
 }
 
 // Dialer opens a Harness.Connect client to the harness at a runtime-specific address and returns a
@@ -170,6 +178,7 @@ func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 		model:   model,
 		dial:    defaultDial,
 		logger:  slog.New(slog.DiscardHandler),
+		guard:   new(sessionGuard),
 	}
 	for _, o := range opts {
 		o(p)
@@ -178,6 +187,12 @@ func New(backend Backend, model controller.ModelFunc, opts ...Option) *Placer {
 		p.logger = slog.New(slog.DiscardHandler)
 	}
 	return p
+}
+
+// trySessionLock serializes Exec/Suspend/Resume through their compute and journal transitions.
+// Refuse overlap rather than queueing a request whose cursor may be stale by the time it runs.
+func (p *Placer) trySessionLock(sessionUID string) (func(), error) {
+	return p.guard.tryLock(sessionUID)
 }
 
 // Exec places one turn: Create the incarnation, mint the fence from the log and stamp it on the
@@ -202,6 +217,12 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	defer func() {
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
+
+	release, err := p.trySessionLock(sessionUID)
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	defer release()
 
 	if _, err := p.admit(ctx, sessionUID); err != nil {
 		return api.Incarnation{}, err
@@ -381,13 +402,20 @@ func tcpDial(address string) (api.Harness, func() error, error) {
 	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
 }
 
-// Suspend snapshots the incarnation to external storage, records the SnapshotRef in a SUSPEND
-// lifecycle event so Resume can recover it from the tamper-evident chain (§5.1), then frees the
-// worker via Stop. Snapshot and Stop key on the session id, so a minimal incarnation suffices.
+// Suspend transitions the incarnation to cold via SnapshotExternal, then records the SnapshotRef
+// in a SUSPEND lifecycle event so Resume can recover it from the tamper-evident chain (§5.1).
+// Snapshot owns dedicated compute release and retains the handles Restore needs; Stop would
+// destructively tear them down. Snapshot keys on the session id, so a minimal incarnation suffices.
 func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID string) (ref api.SnapshotRef, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	finish := observability.StartDebug(ctx, p.logger, "placement", "suspend", "session_uid", sessionUID)
 	defer func() { finish(err, "error_kind", placementErrorKind(err)) }()
+
+	release, err := p.trySessionLock(sessionUID)
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	defer release()
 
 	inc := api.Incarnation{ID: sessionUID}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
@@ -400,9 +428,6 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 		return api.SnapshotRef{}, err
 	}
 	appendFinished(nil)
-	if err := p.backend.Stop(ctx, inc); err != nil {
-		return api.SnapshotRef{}, err
-	}
 	return ref, nil
 }
 
@@ -417,6 +442,12 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	defer func() {
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
+
+	release, err := p.trySessionLock(sessionUID)
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	// Gate before Restore, exactly as Exec does before Create: Resume re-drives an interrupted turn,
 	// so it must not reach a harness the backend cannot host.
@@ -506,7 +537,7 @@ func placementErrorKind(err error) string {
 		return "unplaceable"
 	case errors.Is(err, ErrHarnessUnavailable):
 		return "harness_unavailable"
-	case errors.Is(err, eventlog.ErrConflict):
+	case errors.Is(err, ErrSessionBusy), errors.Is(err, eventlog.ErrConflict):
 		return "conflict"
 	case errors.Is(err, eventlog.ErrFenced):
 		return "fenced"
@@ -609,8 +640,8 @@ const rollbackTimeout = 30 * time.Second
 // For a stateless harness that is just the parent's handle (nothing to clone). For a memory harness
 // it is a FRESH snapshot of the parent, recorded as a SUSPEND lifecycle event so the ref stays
 // recoverable from the tamper-evident chain — the same shape Suspend records. It deliberately calls
-// backend.Snapshot rather than Placer.Suspend, because Suspend also Stops (deletes) the actor, which
-// a fork's parent must survive.
+// backend.Snapshot rather than Placer.Suspend so the fork can fence before checkpointing and commit
+// the SUSPEND event with a CAS on the validated fork point.
 //
 // Checkpointing the parent is not undoable, so this is where a stateful fork commits: once it
 // returns, the parent is cold with a SUSPEND event on its chain whether or not the children go on to
@@ -639,9 +670,9 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 		return api.SnapshotRef{}, fmt.Errorf("%w: harness %q requires %s, which can only fork at the log head (%d), not seq %d",
 			ErrUnplaceable, desc.ID, desc.Capabilities.Resumability, head, atSeq)
 	}
-	// Past this point the fork is committing, so superseding the current writer is the intended
-	// semantic (the same one Suspend has). Fencing before the snapshot means an in-flight turn cannot
-	// advance the head underneath a checkpoint that is not undoable.
+	// Past this point the fork is committing, so superseding the current writer is intended.
+	// Unlike Suspend, Fork is not covered by the session guard. Fencing before the snapshot means
+	// an in-flight turn cannot advance the head underneath a checkpoint that is not undoable.
 	fence, err := parent.NewFence()
 	if err != nil {
 		return api.SnapshotRef{}, err
@@ -674,10 +705,10 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	return ref, nil
 }
 
-// appendLifecycle mints a fresh fence (superseding any prior writer) and records a lifecycle event at
-// the head observed after that fence. Used where the event has no sequence precondition (Suspend,
-// Resume): fencing first is what makes the head stable, so the append cannot lose a CAS to a turn
-// that was already in flight.
+// appendLifecycle mints a fresh fence and records a lifecycle event at the head observed afterward.
+// Suspend holds the session guard across snapshot and append, so it cannot interrupt an Exec or
+// Resume through the same guard. The fence still rejects stale writers outside that guard; a
+// separate Registry or host can race this append and make it fail.
 func appendLifecycle(log eventlog.Store, lc api.Lifecycle) error {
 	fence, err := log.NewFence()
 	if err != nil {

@@ -608,6 +608,9 @@ func (s *Service) Suspend(ctx context.Context, req *v1.SuspendRequest) (session 
 	}
 	log := s.store.Session(req.GetSession())
 	if _, err := placer.Suspend(ctx, log, req.GetSession()); err != nil {
+		if errors.Is(err, placement.ErrSessionBusy) {
+			return nil, status.Error(codes.Aborted, err.Error())
+		}
 		return nil, status.Errorf(codes.Internal, "suspend: %v", err)
 	}
 	// The SUSPEND append already moved the stored compute_state projection, so re-reading is
@@ -633,6 +636,8 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 	log := s.store.Session(req.GetSession())
 	if err := placer.Resume(ctx, log, req.GetSession()); err != nil {
 		switch {
+		case errors.Is(err, placement.ErrSessionBusy):
+			return nil, status.Error(codes.Aborted, err.Error())
 		case errors.Is(err, controller.ErrInheritedToolIntent):
 			return nil, status.Errorf(codes.FailedPrecondition, "resume: %v; fork at or after the TOOL_RESULT, or Exec a new turn", err)
 		case errors.Is(err, controller.ErrIncompleteInvocation):
@@ -666,6 +671,8 @@ func admissionInterruptedCode(err error) codes.Code {
 
 func execError(err error) error {
 	switch {
+	case errors.Is(err, placement.ErrSessionBusy):
+		return status.Error(codes.Aborted, err.Error())
 	case errors.Is(err, placement.ErrUnplaceable):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, placement.ErrHarnessUnavailable):

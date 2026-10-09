@@ -27,6 +27,10 @@ type Registry struct {
 // NewRegistry builds a registry over the named placers. defaultHarness names the entry used when a
 // caller does not specify one, and must itself be registered: a default that resolves to nothing
 // would turn every unqualified request into an error at call time rather than at startup.
+//
+// It wires a shared session guard into the supplied Placer pointers. Construct the Registry before
+// using any of those Placers, and do not register them in another Registry: rewiring running or
+// already-registered Placers is not supported. Separate Registries do not fence each other.
 func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, error) {
 	if len(placers) == 0 {
 		return nil, errors.New("placement: registry needs at least one harness")
@@ -46,7 +50,9 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, 
 		return nil, fmt.Errorf("placement: default harness %q is not registered", defaultHarness)
 	}
 	byName := make(map[string]*Placer, len(placers))
+	guard := new(sessionGuard)
 	for name, p := range placers {
+		p.guard = guard
 		byName[name] = p
 	}
 	return &Registry{byName: byName, defaultHarness: defaultHarness}, nil

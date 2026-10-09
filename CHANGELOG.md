@@ -7,6 +7,12 @@ provide.
 
 ## Unreleased
 
+### Fixed
+
+- Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
+  and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
+  remains destructive teardown.
+
 ### Added
 
 - The chat harness accepts a per-execution `system_prompt` in its JSON config, prepended before
@@ -29,6 +35,21 @@ provide.
   user.
 
 ### Compatibility
+
+- Overlapping `Exec`, `Suspend`, and `Resume` calls for one session across all Placers in one Registry
+  now return gRPC `ABORTED` without changing compute or the journal. Retry after the in-flight operation
+  finishes; other sessions remain independent. Direct Placer calls return `placement.ErrSessionBusy`.
+  Standalone Placers have private guards; separate Registries or hosts are not fenced by this guard.
+  Construct the Registry before using its Placers; registering already-used Placers or sharing them
+  between Registries is unsupported. Idle session guard entries are reclaimed.
+
+- `Runtime.Snapshot(..., SnapshotExternal)` owns the cold transition: capture state, release dedicated
+  compute where applicable, and retain any handle needed by `Restore`. Out-of-tree runtimes that only
+  capture state must implement that transition themselves; the Placer no longer calls `Stop` afterward.
+  Suspended actors and fork-child snapshot pins are retained indefinitely: `DeleteSession` is
+  unimplemented and no session teardown calls `Stop`. Operators must reclaim them directly in Substrate.
+  No signatures or wire formats change, and restoring a snapshot after destructive `Stop` is not
+  guaranteed.
 
 - `controller.ToolFunc` now takes `controller.ToolCallContext` between `ctx` and `call`. Custom tool
   executors must update their Go signatures and scope authorization and durable deduplication to

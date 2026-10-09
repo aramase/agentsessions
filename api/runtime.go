@@ -15,8 +15,11 @@ type Runtime interface {
 	Create(ctx context.Context, s *SessionSpec) (Incarnation, error)
 
 	// Snapshot captures the incarnation's state. SnapshotLocal (warm/pause) keeps it
-	// node-resident; SnapshotExternal (cold/suspend) writes to object storage. A backend
-	// without memory snapshot returns a filesystem-only SnapshotRef.
+	// node-resident. SnapshotExternal owns the cold transition: it captures required state,
+	// releases dedicated per-incarnation compute where applicable, and preserves the state
+	// and any backend handles Restore needs. A backend without memory snapshots may return
+	// a filesystem/journal handle; without dedicated per-session compute, its shared harness
+	// server may remain running.
 	Snapshot(ctx context.Context, in Incarnation, kind SnapshotKind) (SnapshotRef, error)
 
 	// Restore brings an incarnation back from a snapshot. Sub-second on memory-capable
@@ -30,7 +33,8 @@ type Runtime interface {
 	// partially-provisioned child: on any failure after the child exists, tear it down before returning.
 	Fork(ctx context.Context, ref SnapshotRef, opts ForkOpts) (Incarnation, error)
 
-	// Stop destroys the incarnation and frees the worker.
+	// Stop is destructive teardown: it destroys the incarnation and frees its dedicated compute.
+	// Callers must not assume a captured SnapshotRef remains restorable after Stop.
 	Stop(ctx context.Context, in Incarnation) error
 
 	// Status reports the incarnation's compute-lifecycle state.
@@ -44,7 +48,9 @@ type Runtime interface {
 type SnapshotKind string
 
 const (
-	SnapshotLocal    SnapshotKind = "LOCAL"
+	// SnapshotLocal keeps the captured state warm and node-resident.
+	SnapshotLocal SnapshotKind = "LOCAL"
+	// SnapshotExternal transitions to cold, releasing dedicated compute while retaining restore state.
 	SnapshotExternal SnapshotKind = "EXTERNAL"
 )
 

@@ -43,6 +43,13 @@ This is how a session with automatic failover still has exactly one writer. If a
 incarnation wakes up and tries to write (a zombie), its stale fence is refused. Fencing plus compare-and-
 swap on append is what makes "single writer" enforceable rather than a hope.
 
+## Can Exec, Suspend, and Resume overlap?
+
+Across all Placers in one Registry, overlapping calls for one session return gRPC `ABORTED` without
+changing compute or the journal. Suspend will not interrupt a running turn. Retry after the active call
+finishes, using the current cursor for Exec. Other sessions remain independent. A standalone Placer
+has its own guard; separate Registries or hosts are not fenced by this local guard.
+
 ## Is the provenance chain Go-specific?
 
 No. The `content_hash` is RFC 8785 JCS (JSON Canonicalization Scheme) computed over the proto3-JSON form
@@ -145,10 +152,11 @@ It is a working reference implementation (Go 1.26), not yet a productized servic
 single-writer event-sourced controller, the durable hash-chained log, bring-your-own-harness over
 `Harness.Connect`, the `Runtime` SPI with local and substrate backends, the replay-conformance suite, and
 real-substrate conformance across both capability tiers all run today. Session-level suspend and resume
-run through the `Placer` for stateless-replay harnesses, while a memory-snapshot harness still suspends
-through the raw `Runtime` SPI. There is no authentication, authorization, or transport security, and no
-managed control plane, enterprise identity and provenance, or confidential and GPU snapshots. See the
-Status section of the root README.
+use the `Placer` for both resumability tiers. See the
+[Substrate verification boundary](substrate-conformance.md#verification-boundary) for live-test coverage
+and limitations. There is no authentication, authorization, or transport security, and no managed
+control plane, enterprise identity and provenance, or confidential and GPU snapshots. See the Status
+section of the root README.
 
 ## Where is the wire format?
 
