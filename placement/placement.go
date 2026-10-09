@@ -39,12 +39,11 @@ var ErrUnplaceable = errors.New("placement: harness cannot be placed on this run
 // session.Service surfaces it as codes.Aborted, independently of any backend transport status.
 var ErrSessionBusy = errors.New("placement: another operation is in progress for this session")
 
-// ErrHarnessUnavailable is returned when the harness could not be reached to describe itself. It is
-// only ever raised by the admission check, which runs before any compute is provisioned or anything
-// is written to the log (for a LiveDescriber, whose Create provisions nothing, it also runs after
-// Create), so retrying is safe; session.Service surfaces it as codes.Unavailable. It is
-// not raised when the caller's own deadline or cancellation ended the check: that is
-// ErrAdmissionInterrupted, because resending the same expired call cannot succeed.
+// ErrHarnessUnavailable is returned when the harness could not be reached to describe itself during
+// admission or the controller's connected-harness identity check. Neither check runs the harness or
+// appends journal records; the connected check may follow compute allocation and fence minting.
+// session.Service surfaces it as codes.Unavailable. If the caller's own deadline or cancellation
+// ended the check, it is ErrAdmissionInterrupted instead: the same expired call cannot succeed.
 var ErrHarnessUnavailable = errors.New("placement: harness unavailable")
 
 // describeTimeout bounds how long admission waits for a harness to describe itself. Describe is a
@@ -52,11 +51,11 @@ var ErrHarnessUnavailable = errors.New("placement: harness unavailable")
 // answered in this long is treated as unavailable rather than left to hold the call.
 var describeTimeout = 10 * time.Second
 
-// ErrAdmissionInterrupted is returned when the caller's own deadline or cancellation ended the
-// admission check before the harness answered. It also wraps the context's error, so errors.Is
+// ErrAdmissionInterrupted is returned when the caller's own deadline or cancellation ended a
+// Describe check before the harness answered. It also wraps the context's error, so errors.Is
 // reports context.DeadlineExceeded or context.Canceled. Like ErrHarnessUnavailable it is only raised
-// before any compute is provisioned or anything is written to the log; session.Service surfaces it as
-// codes.DeadlineExceeded or codes.Canceled. A turn interrupted after admission does not wrap it.
+// before the harness runs or journal records are appended; session.Service surfaces it as
+// codes.DeadlineExceeded or codes.Canceled. An interruption during Run does not wrap it.
 var ErrAdmissionInterrupted = errors.New("placement: admission interrupted")
 
 // Backend is the compute Runtime the Placer drives. It exposes the harness DESCRIPTOR so the Placer
@@ -114,10 +113,31 @@ func WithDialer(d Dialer) Option { return func(p *Placer) { p.dial = d } }
 type ExecOption func(*execConfig)
 
 type execConfig struct {
+	harness       string
 	observer      controller.Observer
 	config        []byte
 	resumeFromSeq int64
 	deadline      time.Time
+}
+
+// WithHarness records the resolved registry name for this execution. Without a name, the
+// controller uses the connected harness's descriptor ID. Names are per-call so registry aliases
+// can share a Placer without changing one another's identity.
+func WithHarness(name string) ExecOption {
+	return func(c *execConfig) { c.harness = name }
+}
+
+// ResumeOption configures one recovery attempt.
+type ResumeOption func(*resumeConfig)
+
+type resumeConfig struct {
+	harness string
+}
+
+// WithResumeHarness identifies the registry entry selected for this recovery attempt. The
+// controller checks it against the pending invocation before running the harness.
+func WithResumeHarness(name string) ResumeOption {
+	return func(c *resumeConfig) { c.harness = name }
 }
 
 // WithObserver relays a turn's records and streaming chunks as they happen, instead of leaving the
@@ -262,13 +282,14 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	fenceFinished(nil)
 	inc.FenceToken = fence // Placer-owned: the incarnation carries the token Suspend/Resume will need
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer),
-		controller.WithStart(cfg.config, cfg.resumeFromSeq))
+		controller.WithStart(cfg.config, cfg.resumeFromSeq),
+		controller.WithHarness(cfg.harness))
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return inc, err
 	}
 	if err := c.Exec(ctx, har, inputs, expectedLastSeq); err != nil {
-		return inc, err
+		return inc, controllerError(ctx, err)
 	}
 	return inc, nil
 }
@@ -317,22 +338,7 @@ func (p *Placer) gate(ctx context.Context, sessionUID, op string, describe func(
 	defer cancel()
 	desc, err = describe(dctx)
 	if err != nil {
-		switch c := status.Code(err); {
-		case ctx.Err() != nil:
-			// The caller's deadline or cancellation ended the check, not the harness: gRPC reports
-			// that as DeadlineExceeded or Canceled too, so the context decides. Keep the caller's
-			// cause so the service answers DEADLINE_EXCEEDED or CANCELLED rather than an outage.
-			// The backend's error is formatted with %v so that only the caller's cause is in the
-			// chain: a backend error wrapping its own context error must not change the code.
-			err = fmt.Errorf("%w: describe harness: %w: %v", ErrAdmissionInterrupted, ctx.Err(), err)
-		case dctx.Err() != nil || c == codes.Unavailable || c == codes.DeadlineExceeded:
-			// A refused or reset connection is Unavailable. A harness that did not answer within
-			// describeTimeout, including a peer that accepts the connection but never completes the
-			// handshake, is the harness's fault while the caller's context is still live, and so is
-			// a DeadlineExceeded the peer reports itself. Nothing has been provisioned or journaled,
-			// so all of them are a retryable outage.
-			err = fmt.Errorf("%w: %w", ErrHarnessUnavailable, err)
-		}
+		err = describeError(ctx, err, dctx.Err() != nil)
 		resolveFinished(err, "error_kind", "describe_harness_failed")
 		return api.Descriptor{}, err
 	}
@@ -355,6 +361,30 @@ func (p *Placer) gate(ctx context.Context, sessionUID, op string, describe func(
 		"runtime_memory_snapshot", p.backend.Capabilities().MemorySnapshot,
 	)
 	return desc, nil
+}
+
+// controllerError maps only the controller's Describe boundary. Run, model and runtime errors
+// with identical transport codes must keep their existing classification.
+func controllerError(ctx context.Context, err error) error {
+	if !errors.Is(err, controller.ErrHarnessDescribeFailed) {
+		return err
+	}
+	return describeError(ctx, err, errors.Is(err, context.DeadlineExceeded))
+}
+
+// describeError is shared by admission and connected-harness identity checks.
+func describeError(ctx context.Context, err error, timedOut bool) error {
+	switch c := status.Code(err); {
+	case ctx.Err() != nil:
+		// The caller's cause wins over a peer timeout. Format the Describe error with %v so its
+		// context error cannot change the service's cancellation/deadline classification.
+		return fmt.Errorf("%w: describe harness: %w: %v", ErrAdmissionInterrupted, ctx.Err(), err)
+	case timedOut || c == codes.Unavailable || c == codes.DeadlineExceeded:
+		// A refused connection or a harness timeout while the caller is live is a retryable outage.
+		return fmt.Errorf("%w: %w", ErrHarnessUnavailable, err)
+	default:
+		return err
+	}
 }
 
 // defaultDial reaches a harnesswire server by address form: runtime/local passes a unix-socket
@@ -435,19 +465,27 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 // any zombie writer), binds a controller to it, re-drives any interrupted turn (replay for a
 // filesystem-only backend), and records a RESUME marker. A session with no prior SUSPEND (crash mid
 // turn) falls back to re-provisioning from the session handle.
-func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID string) (err error) {
+func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID string, opts ...ResumeOption) error {
+	var cfg resumeConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	release, err := p.trySessionLock(sessionUID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return p.resume(ctx, log, sessionUID, cfg)
+}
+
+// resume runs the recovery transition with the session guard already held by Placer or Registry.
+func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID string, cfg resumeConfig) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var inc api.Incarnation
 	finish := observability.StartDebug(ctx, p.logger, "placement", "resume", "session_uid", sessionUID)
 	defer func() {
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
-
-	release, err := p.trySessionLock(sessionUID)
-	if err != nil {
-		return err
-	}
-	defer release()
 
 	// Gate before Restore, exactly as Exec does before Create: Resume re-drives an interrupted turn,
 	// so it must not reach a harness the backend cannot host.
@@ -489,12 +527,13 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	fenceFinished(nil)
 	inc.FenceToken = fence
-	c, err := controller.New(log, p.model, p.controllerOpts(fence, sessionUID, controller.Observer{})...)
+	copts := append(p.controllerOpts(fence, sessionUID, controller.Observer{}), controller.WithHarness(cfg.harness))
+	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return err
 	}
 	if _, err := c.Resume(ctx, har); err != nil {
-		return err
+		return controllerError(ctx, err)
 	}
 	head, err := log.Head()
 	if err != nil {

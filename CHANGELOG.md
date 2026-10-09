@@ -36,6 +36,18 @@ provide.
 
 ### Compatibility
 
+- New `EXECUTION_START` records include the resolved registry harness name and optional advertised
+  harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
+  registry entry, not the session default; an unserved recorded entry or known-version mismatch is
+  `FAILED_PRECONDITION`. Session metadata and later default Exec selection are unchanged, as are
+  completed Resume and Suspend/Fork routing. Older markers without a name fall back to session
+  metadata; missing/empty recorded versions keep existing unversioned behavior. New Exec still
+  accepts unversioned harnesses. Nonempty recorded versions must exactly match the served version,
+  including rejection of served empty. Controller Replay preflights all completed invocations
+  before running its single supplied harness; raw `Sessions.Replay` is unchanged. Remote checks
+  remain Describe-based, not bound to the Connect stream. The reference harnesses advertise `"1"`,
+  independent of host build/release versions. No journal rewrite or SQLite migration is required;
+  binaries missing these new fields cannot verify hashes of records where they are populated.
 - Overlapping `Exec`, `Suspend`, and `Resume` calls for one session across all Placers in one Registry
   now return gRPC `ABORTED` without changing compute or the journal. Retry after the in-flight operation
   finishes; other sessions remain independent. Direct Placer calls return `placement.ErrSessionBusy`.

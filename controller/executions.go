@@ -11,16 +11,18 @@ import (
 // exact History boundary; every execution-scoped event carries id, so no content-based inference
 // is needed.
 type recordedExecution struct {
-	id            string
-	start         int
-	inputs        []api.Message
-	stream        []api.Event
-	completed     bool
-	config        []byte
-	resumeFromSeq int64
-	hasStart      bool
-	inputCount    *int64
-	inputRecords  int
+	id             string
+	start          int
+	inputs         []api.Message
+	stream         []api.Event
+	completed      bool
+	config         []byte
+	resumeFromSeq  int64
+	hasStart       bool
+	inputCount     *int64
+	inputRecords   int
+	harness        string
+	harnessVersion string
 }
 
 // recordedExecutions groups execution-scoped events by ID in first-seen journal order. Lifecycle
@@ -58,6 +60,8 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 			execution.resumeFromSeq = event.ExecutionStart.ResumeFromSeq
 			execution.hasStart = true
 			execution.inputCount = event.ExecutionStart.InputCount
+			execution.harness = event.ExecutionStart.Harness
+			execution.harnessVersion = event.ExecutionStart.HarnessVersion
 		case api.EventInput:
 			execution.inputRecords++
 			if event.Message != nil {
@@ -80,6 +84,34 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 		}
 	}
 	return executions, nil
+}
+
+// pendingExecution selects the same trailing turn for routing queries and Resume. Journal order
+// is first-seen execution order, not the execution ID on the final record.
+func pendingExecution(executions []recordedExecution) (*recordedExecution, error) {
+	if len(executions) == 0 || executions[len(executions)-1].completed {
+		return nil, nil
+	}
+	execution := &executions[len(executions)-1]
+	if err := execution.validateInputs(); err != nil {
+		return nil, err
+	}
+	return execution, nil
+}
+
+func (e recordedExecution) invocation() *api.ExecutionStart {
+	if !e.hasStart {
+		return nil
+	}
+	var count *int64
+	if e.inputCount != nil {
+		value := *e.inputCount
+		count = &value
+	}
+	return &api.ExecutionStart{
+		Config: bytes.Clone(e.config), ResumeFromSeq: e.resumeFromSeq, InputCount: count,
+		Harness: e.harness, HarnessVersion: e.harnessVersion,
+	}
 }
 
 func (e recordedExecution) validateInputs() error {

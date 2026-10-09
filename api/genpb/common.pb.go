@@ -1582,9 +1582,17 @@ type ExecutionStart struct {
 	// different committed INPUT count before running the harness. An incomplete trailing invocation
 	// is skipped by completed replay. Count-less experimental start markers fail closed; truly
 	// markerless legacy executions retain their existing reconstruction behavior.
-	InputCount    *int64 `protobuf:"varint,3,opt,name=input_count,json=inputCount,proto3,oneof" json:"input_count,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	InputCount *int64 `protobuf:"varint,3,opt,name=input_count,json=inputCount,proto3,oneof" json:"input_count,omitempty"`
+	// Host-resolved registry name used for this execution, not necessarily HarnessDescriptor.id.
+	// Interrupted Resume resolves this exact name; absent legacy names use the session harness.
+	Harness string `protobuf:"bytes,4,opt,name=harness,proto3" json:"harness,omitempty"`
+	// Advertised, opaque harness replay-compatibility version. Empty means unknown/unversioned.
+	// When nonempty, controller replay and interrupted resume require an exact served-version
+	// match (including rejection of an empty served version) before running the harness.
+	// Empty recorded versions retain existing behavior; this field is opt-in, not required.
+	HarnessVersion string `protobuf:"bytes,5,opt,name=harness_version,json=harnessVersion,proto3" json:"harness_version,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ExecutionStart) Reset() {
@@ -1636,6 +1644,20 @@ func (x *ExecutionStart) GetInputCount() int64 {
 		return *x.InputCount
 	}
 	return 0
+}
+
+func (x *ExecutionStart) GetHarness() string {
+	if x != nil {
+		return x.Harness
+	}
+	return ""
+}
+
+func (x *ExecutionStart) GetHarnessVersion() string {
+	if x != nil {
+		return x.HarnessVersion
+	}
+	return ""
 }
 
 // Event is the shared journal/stream content unit; EXECUTION_START is emitted only by the host.
@@ -2109,12 +2131,14 @@ const file_common_proto_rawDesc = "" +
 	"\x10LIFECYCLE_RESUME\x10\x02\x12\x12\n" +
 	"\x0eLIFECYCLE_FORK\x10\x03\x12\x16\n" +
 	"\x12LIFECYCLE_BASELINE\x10\x04\x12\x14\n" +
-	"\x10LIFECYCLE_CANCEL\x10\x05\"\x86\x01\n" +
+	"\x10LIFECYCLE_CANCEL\x10\x05\"\xc9\x01\n" +
 	"\x0eExecutionStart\x12\x16\n" +
 	"\x06config\x18\x01 \x01(\fR\x06config\x12&\n" +
 	"\x0fresume_from_seq\x18\x02 \x01(\x03R\rresumeFromSeq\x12$\n" +
 	"\vinput_count\x18\x03 \x01(\x03H\x00R\n" +
-	"inputCount\x88\x01\x01B\x0e\n" +
+	"inputCount\x88\x01\x01\x12\x18\n" +
+	"\aharness\x18\x04 \x01(\tR\aharness\x12'\n" +
+	"\x0fharness_version\x18\x05 \x01(\tR\x0eharnessVersionB\x0e\n" +
 	"\f_input_count\"\xff\x06\n" +
 	"\x05Event\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12*\n" +

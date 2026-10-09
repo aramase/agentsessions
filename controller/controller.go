@@ -38,6 +38,17 @@ var ErrReplayDiverged = errors.New("controller: replay diverged from the journal
 // before running the harness.
 var ErrInvalidExecutionLog = errors.New("controller: invalid execution log")
 
+// ErrHarnessDescribeFailed identifies failure to Describe the supplied harness before execution.
+// The original cause is retained for callers to distinguish cancellation from endpoint failure.
+var ErrHarnessDescribeFailed = errors.New("controller: describe harness failed")
+
+// ErrHarnessMismatch rejects replay/recovery with a different resolved harness name.
+var ErrHarnessMismatch = errors.New("controller: harness does not match recorded invocation")
+
+// ErrHarnessVersionMismatch rejects replay/recovery when a nonempty recorded harness version
+// differs from the supplied harness's advertised version, including an empty advertised version.
+var ErrHarnessVersionMismatch = errors.New("controller: harness version does not match recorded invocation")
+
 // ErrInheritedToolIntent rejects recovery of a forked execution whose copied prefix contains an
 // unresolved tool intent. Re-driving it under the child's UID could repeat the parent's effect.
 var ErrInheritedToolIntent = fmt.Errorf("%w: inherited tool intent cannot be resumed", ErrInvalidExecutionLog)
@@ -140,6 +151,12 @@ func WithStart(config []byte, resumeFromSeq int64) Option {
 	}
 }
 
+// WithHarness records and checks the resolved registry name independently of Descriptor.ID.
+// Standalone callers that omit it use the supplied harness's descriptor ID instead.
+func WithHarness(name string) Option {
+	return func(c *Controller) { c.harnessName = name }
+}
+
 // WithSessionUID binds the session identity passed to tool executors and controller logs.
 // Direct controller users must set it to scope host authorization and durable tool deduplication.
 func WithSessionUID(sessionUID string) Option {
@@ -163,6 +180,7 @@ type Controller struct {
 	liveToolCalls      int
 	logger             *slog.Logger
 	sessionUID         string
+	harnessName        string
 }
 
 // New starts an incarnation over log. Unless the caller supplies a fence via WithFence, it advances
@@ -230,6 +248,13 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		history = append(history, r.Event)
 	}
 
+	// Capture the actual supplied harness's advertised contract, not caller-provided version data.
+	// Failure leaves no invocation or inputs to recover.
+	desc, err := describeHarness(ctx, har)
+	if err != nil {
+		return err
+	}
+
 	// Record every invocation before inputs so recovery can detect partially committed turns.
 	config := bytes.Clone(c.startConfig)
 	last := expectedLastSeq
@@ -240,6 +265,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		ExecutionStart: &api.ExecutionStart{
 			// Keep journaled bytes separate from Start.Config, which harness code can mutate.
 			Config: bytes.Clone(config), ResumeFromSeq: c.startResumeFromSeq, InputCount: &inputCount,
+			Harness: c.resolvedHarnessName(desc), HarnessVersion: desc.Version,
 		},
 	})
 	if err != nil {
@@ -317,11 +343,20 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 		return nil, err
 	}
 
-	before := c.liveModelCalls
+	// Check every completed turn before the first Run. A later incompatible version must not
+	// allow even the compatible prefix to execute against the supplied harness.
+	completed := make([]recordedExecution, 0, len(executions))
 	for _, execution := range executions {
-		if !execution.completed {
-			continue
+		if execution.completed {
+			completed = append(completed, execution)
 		}
+	}
+	if err := c.checkHarness(ctx, har, completed); err != nil {
+		return nil, err
+	}
+
+	before := c.liveModelCalls
+	for _, execution := range completed {
 		effectCount += len(execution.stream)
 		sink := &replaySink{stream: execution.stream}
 		start := &api.Start{
@@ -487,6 +522,10 @@ func controllerErrorKind(err error) string {
 		return "replay_diverged"
 	case errors.Is(err, ErrInvalidExecutionLog):
 		return "invalid_execution_log"
+	case errors.Is(err, ErrHarnessMismatch):
+		return "harness_mismatch"
+	case errors.Is(err, ErrHarnessVersionMismatch):
+		return "harness_version_mismatch"
 	case errors.Is(err, ErrMissingIdempotencyKey):
 		return "missing_idempotency_key"
 	case errors.Is(err, ErrUnmediatedToolCall):

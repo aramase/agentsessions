@@ -30,11 +30,27 @@ gives you the inputs and (on the stateless path) the history, and records everyt
 ```go
 type Descriptor struct {
     ID           string
+    Version      string     // optional, opaque replay-compatibility version
     Models       []string   // supported/required model ids (model-agnostic)
     Tools        []ToolSpec
     Capabilities Capabilities
 }
 ```
+
+`Version` is an optional, stable token owned by the harness author. Change it when deterministic
+execution or config interpretation changes, not for an unrelated host release. Hosts record the
+advertised value, including empty, in `EXECUTION_START`. Known recorded versions must match exactly
+on controller replay/interrupted recovery; served empty is a mismatch for a known version.
+Unversioned harnesses remain supported, and older markers without a version have no version guard.
+The reference echo, chat and counter harnesses advertise `"1"`. This is not a configuration digest
+or authentication: it is what the harness advertises. Remote `Describe` is not bound to `Connect`,
+so the existing operator-controlled endpoint/replica limitation still applies.
+
+The recorded executing name is the host's resolved registry name, not necessarily `Descriptor.ID`.
+A per-turn override is resumed through that same registry entry (backend/model/executor); removing
+it or serving a different known version yields `FAILED_PRECONDITION`. Missing legacy names fall
+back to session metadata. Completed Resume and other lifecycle routing are unchanged. Raw
+`Sessions.Replay` remains readable even when the recorded implementation is not served.
 
 `Capabilities` is the important part, because the host uses it to place your harness on a compatible
 runtime (see [Capability matching](#capability-matching)):
@@ -266,8 +282,9 @@ type Harness struct{}
 
 func (Harness) Describe(ctx context.Context) (api.Descriptor, error) {
     return api.Descriptor{
-        ID:     "echo",
-        Models: []string{"echo"},
+        ID:      "echo",
+        Version: "1",
+        Models:  []string{"echo"},
         Capabilities: api.Capabilities{
             Resumability: api.ResumabilityStatelessReplay,
             ForkSafe:     true,
@@ -464,7 +481,8 @@ type Harness struct {
 
 func (h *Harness) Describe(ctx context.Context) (api.Descriptor, error) {
     return api.Descriptor{
-        ID: "counter",
+        ID:      "counter",
+        Version: "1",
         Capabilities: api.Capabilities{
             Resumability: api.ResumabilityRequiresMemorySnapshot,
             ForkSafe:     false,
@@ -570,9 +588,11 @@ Consequences of the host not owning your process:
   cannot succeed. If your harness goes away after admission, in the middle of a turn, the call fails
   with `INTERNAL` and the session is left with an interrupted turn: call `Resume` once the harness
   is back to re-drive it from the journal.
-- Registration is read at startup. A session records the harness name, not the address, so
-  restarting the host with `mine` pointed somewhere else moves existing sessions there, and
-  restarting it without `mine` makes them fail with `INVALID_ARGUMENT`.
+- Registration is read at startup. Sessions record a name, not an address, so new Exec and
+  completed-lifecycle routing use wherever that name currently points; an unknown requested or
+  stored-default name returns `INVALID_ARGUMENT`. Interrupted Resume requires its recorded entry
+  and, when known, the exact recorded version: removing that entry or repointing it to a different
+  advertised version returns `FAILED_PRECONDITION`. Empty recorded versions remain unguarded.
 
 ## Capability matching
 
@@ -585,6 +605,8 @@ actually honor it, and what makes the system degrade honestly instead of silentl
 ## Checklist
 
 - [ ] `Describe` returns a stable `ID` and accurate `Capabilities`.
+- [ ] If `Version` is advertised, keep it stable for replay-compatible behavior and change it when
+      deterministic execution/config interpretation changes; an empty version is supported.
 - [ ] Every model call goes through `sink.Model`, never a provider SDK directly.
 - [ ] You do not re-emit the mediated completion through `sink.Output`.
 - [ ] Resumability matches reality: replayable state is `STATELESS_REPLAY`; genuine in-RAM state is

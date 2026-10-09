@@ -125,9 +125,11 @@ type Event struct {
 // A nil count cannot establish completeness and is rejected when reconstructing this invocation.
 // Executions without this event reconstruct with empty config and a zero cursor (legacy defaults).
 type ExecutionStart struct {
-	Config        []byte
-	ResumeFromSeq int64
-	InputCount    *int64
+	Config         []byte
+	ResumeFromSeq  int64
+	InputCount     *int64
+	Harness        string // resolved registry name; empty legacy values use the session harness
+	HarnessVersion string // advertised opaque version; empty is unknown and retains legacy behavior
 }
 
 // Lifecycle marks a compute/session transition in the log (§7). Baseline is a replay /

@@ -212,6 +212,14 @@ message ExecutionStart {
   // is skipped by completed replay. Count-less experimental start markers fail closed; truly
   // markerless legacy executions retain their existing reconstruction behavior.
   optional int64 input_count = 3;
+  // Host-resolved registry name used for this execution, not necessarily HarnessDescriptor.id.
+  // Interrupted Resume resolves this exact name; absent legacy names use the session harness.
+  string harness = 4;
+  // Advertised, opaque harness replay-compatibility version. Empty means unknown/unversioned.
+  // When nonempty, controller replay and interrupted resume require an exact served-version
+  // match (including rejection of an empty served version) before running the harness.
+  // Empty recorded versions retain existing behavior; this field is opt-in, not required.
+  string harness_version = 5;
 }
 
 // ---- Event ----

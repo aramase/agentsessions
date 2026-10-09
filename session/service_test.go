@@ -160,8 +160,9 @@ func TestRequestFlowLogsAreCorrelated(t *testing.T) {
 	if len(requestIDs) != 1 {
 		t.Fatalf("request flow used %d request IDs, want 1: %v", len(requestIDs), requestIDs)
 	}
-	if infoRecords != 6 {
-		t.Fatalf("request flow emitted %d INFO records, want 6", infoRecords)
+	// Sessions.Exec, session.exec, Harness.Describe and Harness.Connect each log start/finish.
+	if infoRecords != 8 {
+		t.Fatalf("request flow emitted %d INFO records, want 8", infoRecords)
 	}
 
 	output.Reset()
@@ -917,10 +918,9 @@ func TestResumeAndForkAdmissionSeparatesCallerContextFromOutage(t *testing.T) {
 	}
 }
 
-// Only admission maps the caller's deadline to DEADLINE_EXCEEDED. A turn that the request's
-// deadline_unix interrupts after admission journals an ERROR and keeps the code it had before
-// admission was split out (INTERNAL), even though the model call's error wraps
-// context.DeadlineExceeded. Changing the mid-turn code is a separate compatibility change.
+// Describe checks map the caller's deadline to DEADLINE_EXCEEDED. A turn whose model call is
+// interrupted by deadline_unix journals an ERROR and keeps its existing INTERNAL code, even though
+// the model call's error wraps context.DeadlineExceeded. Mid-turn classification is unchanged.
 func TestExecMidTurnDeadlineKeepsItsCode(t *testing.T) {
 	blockingModel := func(ctx context.Context, _ api.ModelRequest) (api.ModelResponse, error) {
 		<-ctx.Done()

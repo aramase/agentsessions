@@ -218,11 +218,16 @@ func (x *ToolSpec) GetMediation() Mediation {
 }
 
 type HarnessDescriptor struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Models        []string               `protobuf:"bytes,2,rep,name=models,proto3" json:"models,omitempty"` // model-agnostic: supported/required model ids
-	Tools         []*ToolSpec            `protobuf:"bytes,3,rep,name=tools,proto3" json:"tools,omitempty"`
-	Capabilities  *Capabilities          `protobuf:"bytes,4,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Id           string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Models       []string               `protobuf:"bytes,2,rep,name=models,proto3" json:"models,omitempty"` // model-agnostic: supported/required model ids
+	Tools        []*ToolSpec            `protobuf:"bytes,3,rep,name=tools,proto3" json:"tools,omitempty"`
+	Capabilities *Capabilities          `protobuf:"bytes,4,opt,name=capabilities,proto3" json:"capabilities,omitempty"`
+	// Stable, opaque implementation replay-compatibility version, owned by the harness author.
+	// Change it when deterministic execution or config interpretation changes. Hosts record it
+	// in ExecutionStart and compare known recorded versions exactly on replay/recovery.
+	// Empty is supported for older/unversioned harnesses and records an unknown version.
+	Version       string `protobuf:"bytes,5,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -283,6 +288,13 @@ func (x *HarnessDescriptor) GetCapabilities() *Capabilities {
 		return x.Capabilities
 	}
 	return nil
+}
+
+func (x *HarnessDescriptor) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
 }
 
 type DescribeRequest struct {
@@ -722,12 +734,13 @@ const file_harness_proto_rawDesc = "" +
 	"\bToolSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x129\n" +
-	"\tmediation\x18\x03 \x01(\x0e2\x1b.agentsessions.v1.MediationR\tmediation\"\xb1\x01\n" +
+	"\tmediation\x18\x03 \x01(\x0e2\x1b.agentsessions.v1.MediationR\tmediation\"\xcb\x01\n" +
 	"\x11HarnessDescriptor\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
 	"\x06models\x18\x02 \x03(\tR\x06models\x120\n" +
 	"\x05tools\x18\x03 \x03(\v2\x1a.agentsessions.v1.ToolSpecR\x05tools\x12B\n" +
-	"\fcapabilities\x18\x04 \x01(\v2\x1e.agentsessions.v1.CapabilitiesR\fcapabilities\"\x11\n" +
+	"\fcapabilities\x18\x04 \x01(\v2\x1e.agentsessions.v1.CapabilitiesR\fcapabilities\x12\x18\n" +
+	"\aversion\x18\x05 \x01(\tR\aversion\"\x11\n" +
 	"\x0fDescribeRequest\"v\n" +
 	"\x0fIdentityContext\x12;\n" +
 	"\tprincipal\x18\x01 \x01(\v2\x1d.agentsessions.v1.IdentityRefR\tprincipal\x12&\n" +

@@ -112,7 +112,7 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 
 | Kind | Meaning |
 |---|---|
-| `EXECUTION_START` | Host-owned opaque execution config, harness resume cursor, and expected input count, recorded before inputs for every new execution. |
+| `EXECUTION_START` | Host-owned execution config, cursor, input count, resolved harness name and advertised version, recorded before inputs for every new execution. |
 | `INPUT` | A user or producer input message. |
 | `MODEL_CALL` | A call to a model was made (records the model, params, and an input hash for the replay check). |
 | `OUTPUT` | Assistant output (a delta or a full message). |
@@ -136,6 +136,35 @@ including binary data and whitespace, and records the harness cursor and expecte
 the same boundary. A direct `Controller.Exec` with no inputs records an explicit zero count.
 The caller's `expected_last_seq` guards this first committed record; if that append fails, neither
 the harness nor the model runs.
+
+The marker also records the executing **registry name**, which may differ from the harness's
+`Descriptor.ID`, and its advertised `Descriptor.Version`. Standalone controller/Placer calls use
+the descriptor ID as the name unless an explicit host harness option supplies an alias. The
+reference harnesses advertise replay version `"1"`; this is an author-owned implementation token,
+not the host binary's release/build version.
+
+Versioning is opt-in. Exec accepts an unversioned harness and records an empty version. Controller
+Replay checks all completed invocations against its single supplied harness before the first `Run`;
+interrupted Resume checks its selected turn before `Run`. A nonempty recorded version must match
+exactly, including rejection of an empty served version. No trimming or semantic-version ordering
+is applied. An empty recorded version retains existing behavior without a version check. Mismatches
+return `ErrHarnessMismatch` or `ErrHarnessVersionMismatch` without harness/model/tool calls or new
+execution records; placement can already have allocated/restored compute and advanced its fence.
+Controller Replay is not a multi-harness dispatcher: callers supply a matching harness/name or it
+fails closed. `Sessions.Replay` still streams stored records without running or checking a harness.
+
+`Sessions.Resume` routes an interrupted turn to its recorded registry entry, including that entry's
+backend, model and tool executor. An unserved recorded name or mismatched version is
+`FAILED_PRECONDITION`, never fallback to another harness. Restore the recorded entry/version before
+retrying. A new Exec can supersede an interrupted turn and records its own invocation identity.
+An override is still per-turn: session metadata is unchanged and a later Exec with no override uses
+the stored default. Completed Resume, Suspend and Fork retain their existing session-default routing.
+
+Older start markers without a name fall back to the session's stored harness; those without a
+version retain unversioned behavior. These rules apply independently if only one field is missing,
+and do not relax input-count validation. Remote checks use `Describe`, not negotiation on the
+`Connect` stream; an endpoint/replica changing between those calls remains the documented
+[operator-controlled address limitation](security.md).
 
 The marker and inputs are separate appends. If an input append fails, or the process dies before all
 inputs commit, the marker's count prevents recovery from running a different invocation. Before any
