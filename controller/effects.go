@@ -72,8 +72,8 @@ func (s *liveSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResul
 	return s.execTool(ctx, call)
 }
 
-// toolMediationError is the live pre-intent rejection. Replay may reproduce it only when no
-// TOOL_CALL is next; recorded call evidence must still pass the identity check.
+// toolMediationError is the live pre-intent rejection. Replay may reproduce it when no TOOL_CALL
+// is next or the next call has a different ID; same-ID evidence must still pass the identity check.
 func toolMediationError(mediation api.Mediation) error {
 	switch mediation {
 	case api.MediationControllerMediated:
@@ -195,6 +195,15 @@ func (s *replaySink) ToolCall(_ context.Context, tc api.ToolCall) (api.ToolResul
 	// while reproducing that handleable rejection.
 	if tc.Mediation == api.MediationControllerMediated && tc.IdempotencyKey == "" {
 		return api.ToolResult{}, ErrMissingIdempotencyKey
+	}
+	// A rejected pre-intent call must not consume a distinct fallback's recorded intent.
+	if s.i < len(s.stream) {
+		next := s.stream[s.i]
+		if next.Kind == api.EventToolCall && next.ToolCall != nil && next.ToolCall.ID != tc.ID {
+			if err := toolMediationError(tc.Mediation); err != nil {
+				return api.ToolResult{}, err
+			}
+		}
 	}
 	call, ok := s.nextOf(api.EventToolCall)
 	if !ok {

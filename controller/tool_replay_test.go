@@ -266,7 +266,10 @@ func TestRecoveryRejectsInvalidRecordedToolIntent(t *testing.T) {
 	}
 }
 
-type handledToolErrorHarness struct{ call api.ToolCall }
+type handledToolErrorHarness struct {
+	call       api.ToolCall
+	sinkErrors *[]error
+}
 
 func (handledToolErrorHarness) Describe(context.Context) (api.Descriptor, error) {
 	return api.Descriptor{ID: "handles-errors"}, nil
@@ -275,14 +278,17 @@ func (handledToolErrorHarness) Describe(context.Context) (api.Descriptor, error)
 func (h handledToolErrorHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
 	// A harness may handle a tool error, but cannot turn a rejected recorded prefix into a new
 	// live turn or a verified replay by swallowing the controller's fidelity error.
-	_, _ = sink.ToolCall(ctx, h.call)
+	_, callErr := sink.ToolCall(ctx, h.call)
 	fresh := recordedToolCall()
 	fresh.ID, fresh.IdempotencyKey = "new-call", "new-key"
-	_, _ = sink.ToolCall(ctx, fresh)
-	_, _ = sink.Model(ctx, api.ModelRequest{Model: "test"})
-	_ = sink.Output(ctx, "masked")
-	_ = sink.Report(ctx, api.ToolResult{ID: "reported"})
-	_ = sink.Usage(ctx, api.Usage{})
+	_, freshErr := sink.ToolCall(ctx, fresh)
+	_, modelErr := sink.Model(ctx, api.ModelRequest{Model: "test"})
+	outputErr := sink.Output(ctx, "masked")
+	reportErr := sink.Report(ctx, api.ToolResult{ID: "reported"})
+	usageErr := sink.Usage(ctx, api.Usage{})
+	if h.sinkErrors != nil {
+		*h.sinkErrors = []error{callErr, freshErr, modelErr, outputErr, reportErr, usageErr}
+	}
 	return nil
 }
 
@@ -290,9 +296,17 @@ func TestHandledToolDivergenceCannotActivateLiveEffectsOrVerify(t *testing.T) {
 	for _, test := range []struct {
 		name                           string
 		badKey, badResult, wrongResult bool
+		sameID, missingCall            bool
+		mediation                      api.Mediation
 	}{
 		{name: "changed call"}, {name: "invalid terminal key", badKey: true},
 		{name: "missing result payload", badResult: true}, {name: "wrong result correlation", wrongResult: true},
+		{name: "same ID approval", sameID: true, mediation: api.MediationRequiresApproval},
+		{name: "same ID in-harness", sameID: true, mediation: api.MediationInHarnessReported},
+		{name: "same ID unspecified", sameID: true},
+		{name: "nil call approval", missingCall: true, mediation: api.MediationRequiresApproval},
+		{name: "nil call in-harness", missingCall: true, mediation: api.MediationInHarnessReported},
+		{name: "nil call unspecified", missingCall: true},
 	} {
 		for _, replay := range []bool{false, true} {
 			if replay && test.badKey {
@@ -312,9 +326,14 @@ func TestHandledToolDivergenceCannotActivateLiveEffectsOrVerify(t *testing.T) {
 				} else if replay {
 					events = append(events, api.Event{Kind: api.EventToolResult, Result: &api.ToolResult{ID: call.ID}})
 				}
+				if test.missingCall {
+					events[0].ToolCall = nil
+				}
 				appendToolEvidence(t, log, events, replay)
 				if test.badKey {
 					call.IdempotencyKey = "key-1"
+				} else if test.sameID || test.missingCall {
+					call.Mediation = test.mediation
 				} else if !test.badResult && !test.wrongResult {
 					call.ID = "different"
 				}
@@ -333,13 +352,20 @@ func TestHandledToolDivergenceCannotActivateLiveEffectsOrVerify(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				var sinkErrors []error
+				h := handledToolErrorHarness{call: call, sinkErrors: &sinkErrors}
 				if replay {
-					_, err = c.Replay(t.Context(), handledToolErrorHarness{call: call})
+					_, err = c.Replay(t.Context(), h)
 				} else {
-					_, err = c.Resume(t.Context(), handledToolErrorHarness{call: call})
+					_, err = c.Resume(t.Context(), h)
 				}
 				if !errors.Is(err, controller.ErrReplayDiverged) || tools != 0 || models != 0 {
 					t.Fatalf("handled divergence escaped: tools=%d models=%d err=%v", tools, models, err)
+				}
+				for i, sinkErr := range sinkErrors {
+					if sinkErr != err {
+						t.Fatalf("sink method %d did not preserve fatal failure: %v != %v", i, sinkErr, err)
+					}
 				}
 				recs, err := log.Read(before + 1)
 				if err != nil {
@@ -675,10 +701,11 @@ func TestForkCutAtToolCallRejectsInheritedIntentBeforeIdentityChecks(t *testing.
 // This harness handles the first tool error, then emits further effects. Recovery must return an
 // error without consuming those effects or stealing the later call's receipt.
 type continuesAfterToolFailureHarness struct {
-	calls     []api.ToolCall
-	interrupt bool
-	toolError error
-	results   []api.ToolResult
+	calls      []api.ToolCall
+	interrupt  bool
+	toolError  error
+	toolResult api.ToolResult
+	results    []api.ToolResult
 }
 
 func (*continuesAfterToolFailureHarness) Describe(ctx context.Context) (api.Descriptor, error) {
@@ -686,7 +713,7 @@ func (*continuesAfterToolFailureHarness) Describe(ctx context.Context) (api.Desc
 }
 
 func (h *continuesAfterToolFailureHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
-	_, h.toolError = sink.ToolCall(ctx, h.calls[0])
+	h.toolResult, h.toolError = sink.ToolCall(ctx, h.calls[0])
 	for _, call := range h.calls[1:] {
 		result, err := sink.ToolCall(ctx, call)
 		if err != nil {
@@ -979,6 +1006,254 @@ func assertMediationRejection(t *testing.T, err error, mediation api.Mediation) 
 	// Approval has no live sentinel; preserve that generic rejection without matching its text.
 	if mediation != api.MediationRequiresApproval && !errors.Is(err, controller.ErrUnmediatedToolCall) {
 		t.Fatalf("want unmediated tool rejection, got %v", err)
+	}
+}
+
+// A rejected call has no durable intent. Its distinct-ID fallback owns the next recorded
+// TOOL_CALL, including when that fallback failed and the harness continued without a receipt.
+type mediationFallbackHarness struct {
+	continuesAfterToolFailureHarness
+	rejected       api.ToolCall
+	rejectionError error
+}
+
+func (h *mediationFallbackHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {
+	_, h.rejectionError = sink.ToolCall(ctx, h.rejected)
+	return h.continuesAfterToolFailureHarness.Run(ctx, start, sink)
+}
+
+func TestHandledMediationFallbackPreservesRecordedCall(t *testing.T) {
+	for _, mediation := range []api.Mediation{
+		api.MediationRequiresApproval, api.MediationInHarnessReported, "",
+	} {
+		for _, recovery := range []bool{false, true} {
+			for _, failed := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/resume=%v/executor-error=%v", mediation, recovery, failed), func(t *testing.T) {
+					log := memStore(t)
+					rejected, fallback := recordedToolCall(), recordedToolCall()
+					rejected.Mediation = mediation
+					fallback.ID, fallback.IdempotencyKey = "call-2", "key-2"
+					newHarness := func() *mediationFallbackHarness {
+						return &mediationFallbackHarness{
+							rejected:                         rejected,
+							continuesAfterToolFailureHarness: continuesAfterToolFailureHarness{calls: []api.ToolCall{fallback}},
+						}
+					}
+					tools, models := 0, 0
+					executorErr := errors.New("test: fallback executor failed")
+					model := func(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+						models++
+						return echoModel(ctx, req)
+					}
+					original, err := controller.New(log, model, controller.WithSessionUID("s"), controller.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
+						tools++
+						if scope.SessionUID != "s" || !reflect.DeepEqual(got, fallback) {
+							t.Fatalf("rejected call executed or fallback identity changed: scope=%+v call=%+v", scope, got)
+						}
+						if failed {
+							return api.ToolResult{}, executorErr
+						}
+						return api.ToolResult{Output: map[string]any{"receipt": "second"}}, nil
+					}))
+					if err != nil {
+						t.Fatal(err)
+					}
+					live := newHarness()
+					live.interrupt = recovery
+					err = original.Exec(t.Context(), live, []api.Message{msg("read")}, 0)
+					if recovery && !errors.Is(err, errToolInterrupted) || !recovery && err != nil {
+						t.Fatalf("live fixture: %v", err)
+					}
+					assertMediationRejection(t, live.rejectionError, mediation)
+					if failed && !errors.Is(live.toolError, executorErr) || !failed && live.toolError != nil {
+						t.Fatalf("live fallback error: %v", live.toolError)
+					}
+					before, err := log.Read(1)
+					if err != nil {
+						t.Fatal(err)
+					}
+					calls, results := 0, 0
+					for _, rec := range before {
+						switch rec.Event.Kind {
+						case api.EventToolCall:
+							calls++
+							if call := rec.Event.ToolCall; call == nil || call.ID != "call-2" || call.IdempotencyKey != "key-2" || call.Mediation != api.MediationControllerMediated {
+								t.Fatalf("wrong durable fallback intent: %+v", call)
+							}
+						case api.EventToolResult:
+							results++
+							if result := rec.Event.Result; result == nil || result.ID != "call-2" || result.Output["receipt"] != "second" {
+								t.Fatalf("wrong fallback receipt: %+v", result)
+							}
+						}
+					}
+					wantResults := 1
+					if failed {
+						wantResults = 0
+					}
+					if tools != 1 || models != 1 || calls != 1 || results != wantResults {
+						t.Fatalf("wrong live evidence/effects: tools=%d models=%d calls=%d results=%d", tools, models, calls, results)
+					}
+					fresh, err := controller.New(log, model, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+						tools++
+						t.Error("recorded fallback repeated executor")
+						return api.ToolResult{}, nil
+					}))
+					if err != nil {
+						t.Fatal(err)
+					}
+					h := newHarness()
+					if recovery {
+						if resumed, err := fresh.Resume(t.Context(), h); !resumed || err != nil {
+							t.Fatalf("handled rejection consumed fallback evidence: resumed=%v err=%v", resumed, err)
+						}
+					} else if outputs, err := fresh.Replay(t.Context(), h); err != nil || !reflect.DeepEqual(outputs, []string{"handled tool failure", "echo:"}) {
+						t.Fatalf("handled rejection consumed fallback evidence: outputs=%v err=%v", outputs, err)
+					}
+					assertMediationRejection(t, h.rejectionError, mediation)
+					if failed {
+						assertRecordedToolFailure(t, h.toolError, false)
+						if !reflect.DeepEqual(h.toolResult, api.ToolResult{}) {
+							t.Fatalf("failed fallback fabricated a result: %+v", h.toolResult)
+						}
+					} else if h.toolError != nil || h.toolResult.ID != "call-2" || h.toolResult.Output["receipt"] != "second" {
+						t.Fatalf("fallback receipt not served: result=%+v err=%v", h.toolResult, h.toolError)
+					}
+					after, err := log.Read(1)
+					if err != nil || len(after) < len(before) || !reflect.DeepEqual(before, after[:len(before)]) {
+						t.Fatalf("recovery changed recorded prefix: %v", err)
+					}
+					if recovery {
+						if len(after) != len(before)+1 || after[len(before)].Event.Kind != api.EventEnd {
+							t.Fatalf("prefix recovery should append only END: %+v", after[len(before):])
+						}
+						if resumed, err := fresh.Resume(t.Context(), newHarness()); resumed || err != nil {
+							t.Fatalf("completed fallback resumed again: resumed=%v err=%v", resumed, err)
+						}
+					} else if !reflect.DeepEqual(before, after) {
+						t.Fatal("replay changed journal")
+					}
+					if outputs, err := fresh.Replay(t.Context(), newHarness()); err != nil || !reflect.DeepEqual(outputs, []string{"handled tool failure", "echo:"}) {
+						t.Fatalf("completed fallback did not replay: outputs=%v err=%v", outputs, err)
+					}
+					if tools != 1 || models != 1 || fresh.ModelInvocations() != 0 || fresh.ToolInvocations() != 0 {
+						t.Fatalf("recorded fallback repeated live effects: tools=%d models=%d", tools, models)
+					}
+					if err := log.Verify(); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestHandledMediationFallbackTerminalIntentRedrivesRecordedCall(t *testing.T) {
+	for _, mediation := range []api.Mediation{
+		api.MediationRequiresApproval, api.MediationInHarnessReported, "",
+	} {
+		for _, failed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/executor-error=%v", mediation, failed), func(t *testing.T) {
+				rejected, fallback := recordedToolCall(), recordedToolCall()
+				rejected.Mediation = mediation
+				fallback.ID, fallback.IdempotencyKey = "call-2", "key-2"
+				newHarness := func() *mediationFallbackHarness {
+					return &mediationFallbackHarness{
+						rejected:                         rejected,
+						continuesAfterToolFailureHarness: continuesAfterToolFailureHarness{calls: []api.ToolCall{fallback}},
+					}
+				}
+				// Cut a live-written journal at B's intent, not a synthetic recovery protocol.
+				source := memStore(t)
+				original, err := controller.New(source, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					return api.ToolResult{Output: map[string]any{"receipt": "second"}}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := original.Exec(t.Context(), newHarness(), []api.Message{msg("read")}, 0); err != nil {
+					t.Fatal(err)
+				}
+				recs, err := source.Read(1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				log := memStore(t)
+				fence, err := log.NewFence()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var intent *api.ToolCall
+				var seq int64
+				for _, rec := range recs {
+					written, err := log.Append(seq, fence, rec.Event)
+					if err != nil {
+						t.Fatal(err)
+					}
+					seq = written.Seq
+					if rec.Event.Kind == api.EventToolCall {
+						intent = rec.Event.ToolCall
+						break
+					}
+				}
+				if intent == nil || intent.ID != "call-2" || intent.IdempotencyKey != "key-2" {
+					t.Fatalf("missing live-written fallback intent: %+v", intent)
+				}
+				attempts := 0
+				executorErr := errors.New("test: fallback redrive failed")
+				fresh, err := controller.New(log, echoModel, controller.WithSessionUID("s"), controller.WithToolExecutor(func(_ context.Context, scope controller.ToolCallContext, got api.ToolCall) (api.ToolResult, error) {
+					attempts++
+					if scope.SessionUID != "s" || !reflect.DeepEqual(got, *intent) {
+						t.Fatalf("redrive did not use original recorded scope/call: scope=%+v call=%+v", scope, got)
+					}
+					if failed {
+						return api.ToolResult{}, executorErr
+					}
+					return api.ToolResult{Output: map[string]any{"receipt": "second"}}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				h := newHarness()
+				if resumed, err := fresh.Resume(t.Context(), h); !resumed || err != nil {
+					t.Fatalf("rejection prevented terminal fallback recovery: resumed=%v err=%v", resumed, err)
+				}
+				assertMediationRejection(t, h.rejectionError, mediation)
+				if failed && !errors.Is(h.toolError, executorErr) || !failed && (h.toolError != nil || h.toolResult.ID != "call-2") {
+					t.Fatalf("wrong redrive outcome: result=%+v err=%v", h.toolResult, h.toolError)
+				}
+				tail, err := log.Read(seq + 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantTail := []api.EventKind{api.EventOutput, api.EventUsage, api.EventModelCall, api.EventOutput, api.EventEnd}
+				if !failed {
+					wantTail = append([]api.EventKind{api.EventToolResult}, wantTail...)
+				}
+				if len(tail) != len(wantTail) {
+					t.Fatalf("unexpected redrive tail: %+v", tail)
+				}
+				for i, kind := range wantTail {
+					if tail[i].Event.Kind != kind {
+						t.Fatalf("redrive tail %d = %s, want %s", i, tail[i].Event.Kind, kind)
+					}
+				}
+				replayed := newHarness()
+				if outputs, err := fresh.Replay(t.Context(), replayed); err != nil || !reflect.DeepEqual(outputs, []string{"handled tool failure", "echo:"}) {
+					t.Fatalf("redriven fallback did not replay: outputs=%v err=%v", outputs, err)
+				}
+				assertMediationRejection(t, replayed.rejectionError, mediation)
+				if failed {
+					assertRecordedToolFailure(t, replayed.toolError, false)
+				}
+				if attempts != 1 || fresh.ModelInvocations() != 1 {
+					t.Fatalf("fallback redrive repeated effects: tools=%d models=%d", attempts, fresh.ModelInvocations())
+				}
+				if err := log.Verify(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
 	}
 }
 

@@ -262,8 +262,14 @@ fractional values must tolerate float64 rounding. These are author obligations f
 protobuf representation, not a guarantee of strict argument validation. Non-nil arguments that
 cannot be represented by the journal conversion are rejected as replay divergence.
 
-On a direct controller sink, a handled `ToolCall` error replays as an error. A different identity
-for a recorded call is fatal. Over `Harness.Connect`, a tool-call error ends the turn.
+On a direct controller sink, a handled `ToolCall` error replays as an error. Unsupported mediation
+is rejected before recording intent. If the next recorded `TOOL_CALL` has a different ID, replay
+and recorded-prefix recovery reproduce that rejection without consuming the next call, so a
+handled rejection can fall back to a distinct-ID `CONTROLLER_MEDIATED` call. Same-ID mismatches
+and malformed recorded evidence remain fatal; identity checks on the actual fallback are unchanged.
+An executor Go error still leaves no failure receipt, so an immediately following reported result
+remains ambiguous under the existing correlation rules. Over `Harness.Connect`, a tool-call error
+ends the turn; this direct-sink fallback does not add a handle-and-continue wire protocol.
 
 ### Rule 5: pass reasoning parts back verbatim
 

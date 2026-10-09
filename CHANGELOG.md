@@ -85,8 +85,10 @@ provide.
   executor failures without re-executing nonterminal intents that have no result; Harness.Connect
   still ends the turn on a sink tool-call error. An immediately following in-harness TOOL_RESULT
   remains ambiguous without a failure receipt and is rejected if its ID differs from the preceding
-  call. Handled pre-intent mediation rejections remain recoverable when no recorded tool call is next,
-  without relaxing mediation identity checks on actual recorded calls.
+  call. On direct controller sinks, handled pre-intent mediation rejections remain recoverable when
+  no recorded tool call is next, or the next call has a different ID: reject the unsupported call
+  without consuming the fallback's recorded intent. Same-ID mismatches and malformed evidence
+  remain fatal, without relaxing identity checks on actual recorded calls. No wire/schema change.
 - Chat executions written on `main` since execution-config journaling was added in #76 with a
   non-empty `system_prompt` no longer pass deterministic controller replay or interrupted resume
   when their recorded model-input hashes exclude the prompt. Non-JSON config now fails whenever
