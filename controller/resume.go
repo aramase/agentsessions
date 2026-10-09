@@ -36,13 +36,21 @@ func ResumeInvocation(log eventlog.Store) (*api.ExecutionStart, error) {
 
 // Resume re-drives an interrupted last execution (crash-recovery, I4). If the journal's last turn
 // did not complete (no END), Resume re-runs the harness with a hybrid sink that SERVES the
-// already-recorded effects — never re-invoking a recorded model/tool call (at-most-once, I3) — and
-// switches to LIVE (invoke + record) for anything past the crash point, then appends END. If the
-// last turn is complete or the log is empty, it is a no-op (returns false); legacy ERROR also
-// finishes a turn. A start marker with
+// already-recorded effects — never re-invoking a model/tool call whose result is recorded
+// (at-most-once, I3) — and switches to LIVE (invoke + record) for anything past the crash point,
+// then appends END. A MODEL_CALL that is the last recorded effect, with no OUTPUT, is the crash
+// point: when the harness re-issues it with the same input hash, the model is invoked once and its
+// completion recorded against that call (see the model re-drive in resumeSink.Model). A legacy
+// ID-less (v0.1.2) journal cut at that point is not re-driven: Resume fails with "recorded
+// completion missing" and does not call the model. If the last turn is complete or the log is
+// empty, it is a no-op (returns false); legacy ERROR also finishes a turn. A start marker with
 // missing or inconsistent input completeness information is rejected before the harness runs.
 // An unresolved tool intent inherited across a fork returns ErrInheritedToolIntent before running
 // the harness or appending events: the child's dedup namespace cannot recover the parent's effect.
+//
+// Outside a legacy ID-less prefix, ERROR events, including those left by earlier failed Resume
+// attempts, are not effects: they stay in the journal as an audit trail, are skipped when the
+// effect stream is rebuilt, and do not end the execution, so a later Resume still recovers it.
 func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, recordedEffectCount int
@@ -153,7 +161,8 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 
 // resumeSink serves already-recorded effects (in order) and, once they are exhausted, delegates to
 // a liveSink to invoke-and-record the remainder. Serving never invokes the underlying op, so a
-// recorded effect is executed at most once across a crash (I3).
+// completed effect is served without invocation; an unanswered trailing model intent (a MODEL_CALL
+// with no recorded completion) may be re-invoked once per Resume (I3).
 type resumeSink struct {
 	live    liveSink
 	stream  []api.Event
@@ -182,11 +191,24 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 			return api.ModelResponse{}, errors.New("resume: recorded stream diverged (expected model call)")
 		}
 		if mc.ModelCall.InputHash != hashModelInput(req) {
-			return api.ModelResponse{}, errors.New("resume: model input hash mismatch (I0)")
+			return api.ModelResponse{}, fmt.Errorf("%w: resume: model input hash mismatch (I0)", ErrReplayDiverged)
 		}
 		out, ok := s.recordedNext(api.EventOutput)
 		if !ok {
-			return api.ModelResponse{}, errors.New("resume: recorded completion missing")
+			if s.i != len(s.stream) {
+				return api.ModelResponse{}, errors.New("resume: recorded completion missing")
+			}
+			// The journal's last effect is this MODEL_CALL with no completion: the cut fell
+			// between recording the call and recording its OUTPUT, so whether the provider ran is
+			// unknown. The input hash matched above, so invoke live and record the completion
+			// after the existing MODEL_CALL rather than recording a second call. If the provider
+			// fails again, the call stays unanswered exactly as a failed live call would.
+			if s.live.legacyRecovery {
+				// A v0.1.2 ID-less journal keeps the contract of rejecting a missing completion
+				// without calling the model; only journals with execution IDs are re-driven.
+				return api.ModelResponse{}, errors.New("resume: recorded completion missing")
+			}
+			return s.live.completeModel(ctx, req)
 		}
 		var msg api.Message
 		if out.Message != nil {

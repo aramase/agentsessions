@@ -178,6 +178,35 @@ Never call an LLM provider SDK directly. Route every completion through `sink.Mo
 provider directly, that call is invisible to the log, so replay cannot reproduce it and will either
 diverge or re-spend the call. This single rule is why replay never invokes the model (I1).
 
+The host records `MODEL_CALL` (with the request's input hash) before it invokes the provider and records
+the completion as `OUTPUT` after. A process death or provider error between the two leaves a turn whose
+last effect is a `MODEL_CALL` with no completion. On `Resume`, when your harness re-issues that request,
+the host serves everything recorded before it, checks the re-issued request's input hash against the
+recorded one, then invokes the provider live and records the completion after that same `MODEL_CALL`. It
+never records a second `MODEL_CALL` or a second `OUTPUT` for it. This applies to journals with
+execution IDs; a v0.1.2 journal without them is not re-driven, and `Resume` fails with "recorded
+completion missing" without calling the provider. A different input hash fails as
+divergence (I0) without calling the provider. The cost: whether the original provider call ran is
+unknown, so a cut during a model call costs at most one extra provider call. That bound holds within
+one host, where the placement layer's per-session guard serializes `Exec`, `Suspend` and `Resume`; it
+does not hold across hosts that share a journal, where overlapping `Resume`s are not serialized by
+that guard. A fork whose fork point is a `MODEL_CALL` copies the call without any completion the
+parent recorded later, so `Resume` on the child re-calls the provider once: each such fork costs one
+provider call.
+
+If the recovering call fails and your harness returns the error, that `MODEL_CALL` is still the turn's
+last effect and the next `Resume` re-drives it again. Do not retry a failed `sink.Model` call inside
+the run. Over the harness wire a `sink.Model` error ends the bridge, so a remote harness never sees it
+and cannot retry. An in-process harness that retries only some errors can leave `MODEL_CALL`, `ERROR`,
+`MODEL_CALL`, `OUTPUT`, `END`, which `Replay` rejects when the harness does not reproduce the same
+retry. A harness that retries every error replays that journal, but returning the error and letting
+`Resume` re-drive the call is the supported path.
+
+In journals with execution IDs, `ERROR` events written by failed turns and failed `Resume` attempts
+stay in the journal as an audit trail; they are not effects, so they are skipped on replay and do not
+block a later `Resume`. Replay itself never calls the provider: it skips turns without `END`, and a
+recovered turn replays from its recorded `OUTPUT`.
+
 ### Rule 2: do not double-record the model completion as output
 
 The completion returned by `sink.Model` is recorded as the turn's output by the host. Do not also send

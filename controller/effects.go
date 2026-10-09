@@ -31,6 +31,14 @@ func (s *liveSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelRe
 	}); err != nil {
 		return api.ModelResponse{}, err
 	}
+	return s.completeModel(ctx, req)
+}
+
+// completeModel invokes the model for a MODEL_CALL that is already recorded and appends the
+// completion as the OUTPUT that answers it: OUTPUT carries no call ID, so its position directly
+// after the MODEL_CALL in the execution's effect stream is the correlation. It is reused verbatim
+// when Resume re-drives a call cut before its completion was recorded.
+func (s *liveSink) completeModel(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
 	resp, err := s.c.invokeModel(ctx, s.executionID, req)
 	if err != nil {
 		return api.ModelResponse{}, err

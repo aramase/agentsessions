@@ -12,6 +12,18 @@ provide.
 - Session-level suspend no longer destroys the Substrate actor needed by resume. Both replay-based
   and memory-snapshot sessions retain their restore handle after `Placer.Suspend`; explicit `Stop`
   remains destructive teardown.
+- `Resume` recovers a turn cut between `MODEL_CALL` and its recorded completion, whether by a
+  provider error or a process death. Previously every attempt failed with "recorded completion
+  missing" and appended another `ERROR`, so the session could never resume. When the harness
+  re-issues a request with the recorded input hash, the host invokes the provider once and records
+  the completion after the existing `MODEL_CALL`; a different hash still fails as divergence. Each
+  cut during a model call costs at most one extra provider call within one host, where the
+  per-session guard serializes `Exec` and `Resume`; the bound does not hold across hosts sharing a
+  journal. A fork at a `MODEL_CALL` costs one provider call when the child resumes. A recovering
+  call that fails is itself a cut, and the next `Resume` re-drives it again. Journals with
+  execution IDs that are in this state recover on the next `Resume`; their earlier `ERROR` events
+  remain as audit records. A v0.1.2 journal without execution IDs is not re-driven and still fails
+  with "recorded completion missing". No journal or wire schema change.
 
 ### Added
 
@@ -91,6 +103,10 @@ provide.
   executor, including legacy results recorded after the fork marker. `Sessions.Resume` reports
   `FAILED_PRECONDITION` for unresolved inherited intents with guidance to fork at or after the
   `TOOL_RESULT`, or Exec a new turn. No wire or journal schema change is required.
+- `Resume` can now spend a provider call where it previously failed: a turn whose last effect is a
+  `MODEL_CALL` with no recorded completion is re-driven with one provider call instead of failing
+  with "recorded completion missing". This includes the child of a fork taken at a `MODEL_CALL`. No
+  wire or journal schema change.
 - Replay and interrupted-turn resume now reject tool-call identity and result-correlation mismatches
   that v0.1.0–v0.1.2 previously accepted. Resume also rejects harnesses that leave recorded effects
   unconsumed instead of marking the turn complete. Direct controller sinks can recover handled tool
