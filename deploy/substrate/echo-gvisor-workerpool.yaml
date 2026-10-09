@@ -1,0 +1,38 @@
+# Stateless-tier WorkerPool on gVisor, for hosts without KVM (for example an arm64 Mac running kind).
+#
+# Run the suite with ECHO_SANDBOX_CLASS=gvisor to point the echo template at this pool instead of the
+# micro-VM one (echo-microvm-workerpool.yaml). CI runs the micro-VM pool, so both tiers exercise the
+# same isolation class.
+#
+# workerImage is a ko:// import path that the WorkerPool controller passes to its Pods unchanged:
+# build ateom-gvisor with ko and substitute its digest before applying (see the no-KVM recipe in
+# docs/substrate-conformance.md).
+#
+# The `workload` label is repo-scoped on purpose: worker eligibility ignores namespaces and matches
+# labels across every pool in the cluster, so a label shared with a substrate demo pool would let the
+# scheduler place our actor there.
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: echo-gvisor
+  namespace: ate-agentsessions
+  labels:
+    workload: agentsessions-echo-gvisor
+spec:
+  # One worker for the template's golden-snapshot build and one per concurrently running actor.
+  replicas: 3
+  sandboxClass: gvisor
+  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  template:
+    # The ate-api scheduler books an ActorTemplate's spec.resources against the capacity a worker
+    # advertises. The suite's templates set only container limits, so nothing is booked and only the
+    # actor slot is checked; these limits just bound the worker pod. Requests stay low so the pool
+    # fits on a single kind node next to ate-system.
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 100m
+        memory: 256Mi

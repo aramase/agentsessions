@@ -990,9 +990,15 @@ func (x *SuspendRequest) GetSession() string {
 }
 
 type ResumeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Session       string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
-	Boot          bool                   `protobuf:"varint,2,opt,name=boot,proto3" json:"boot,omitempty"` // true = cold-boot + replay instead of snapshot restore
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Session string                 `protobuf:"bytes,1,opt,name=session,proto3" json:"session,omitempty"`
+	// Ignored. The service never reads it; the Runtime backend decides how a resumed session comes
+	// back. On substrate that is the actor's own snapshot, else the template's golden snapshot, else a
+	// cold boot, and substrate has no per-resume boot flag to forward it to. The field stays so
+	// existing clients keep encoding; do not reuse its number.
+	//
+	// Deprecated: Marked as deprecated in session.proto.
+	Boot          bool `protobuf:"varint,2,opt,name=boot,proto3" json:"boot,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1034,6 +1040,7 @@ func (x *ResumeRequest) GetSession() string {
 	return ""
 }
 
+// Deprecated: Marked as deprecated in session.proto.
 func (x *ResumeRequest) GetBoot() bool {
 	if x != nil {
 		return x.Boot
@@ -1504,10 +1511,10 @@ const file_session_proto_rawDesc = "" +
 	"\bfrom_seq\x18\x02 \x01(\x03R\afromSeq\x12\x15\n" +
 	"\x06to_seq\x18\x03 \x01(\x03R\x05toSeq\"*\n" +
 	"\x0eSuspendRequest\x12\x18\n" +
-	"\asession\x18\x01 \x01(\tR\asession\"=\n" +
+	"\asession\x18\x01 \x01(\tR\asession\"A\n" +
 	"\rResumeRequest\x12\x18\n" +
-	"\asession\x18\x01 \x01(\tR\asession\x12\x12\n" +
-	"\x04boot\x18\x02 \x01(\bR\x04boot\"\xae\x02\n" +
+	"\asession\x18\x01 \x01(\tR\asession\x12\x16\n" +
+	"\x04boot\x18\x02 \x01(\bB\x02\x18\x01R\x04boot\"\xae\x02\n" +
 	"\vForkRequest\x12\x18\n" +
 	"\asession\x18\x01 \x01(\tR\asession\x12\x15\n" +
 	"\x06at_seq\x18\x02 \x01(\x03R\x05atSeq\x12\x14\n" +

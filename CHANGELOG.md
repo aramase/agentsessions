@@ -100,6 +100,61 @@ provide.
   harness lost mid-turn is still `INTERNAL` and leaves an interrupted turn to `Resume`. Forking a
   `REQUIRES_MEMORY_SNAPSHOT` harness on a backend without memory snapshots is refused before the
   parent is checkpointed, so it no longer leaves a `SUSPEND` event on the parent.
+- `ResumeRequest.boot` is deprecated. The service never read it, and substrate no longer has a
+  per-resume boot flag; the backend decides how a resumed session comes back. The field keeps its
+  number, so existing clients still encode. `client.Client.Resume` keeps its `boot` parameter but
+  ignores it and no longer sends the field.
+- The substrate backend now targets current agent-substrate (`fc0e3586`) instead of the `b1bd558a`
+  pin, and the two are not wire-compatible: the old client decodes a current `Actor` without an
+  error but with the wrong state and garbage for the worker address. Upgrade the backend and the
+  substrate cluster together. `integrations/substrate` now requires Go 1.27, following substrate.
+- The substrate backend reaches the harness through `atenet-router` (h2c, `ate-target-actor`
+  metadata) instead of dialing the worker pod's IP on port 80, which current substrate no longer
+  serves. The host must be able to reach `atenet-router.ate-system.svc:80`
+  (`substrate.WithRouter` overrides it). The router does not authenticate callers; see
+  [docs/security.md](docs/security.md) before running it outside a fully trusted cluster.
+- `api.Incarnation` gains `CallMetadata`, which the host attaches to every harness call.
+  `placement.Dialer` now takes the `api.Incarnation` instead of its address, so custom dialers
+  passed to `placement.WithDialer` must change signature; `placement.DefaultDial` is the stock one.
+- A stateful `Placer.Fork` now fences the parent's log and closes its open harness streams before
+  checkpointing it, and refuses new turns on the parent until the checkpoint is recorded, so
+  nothing holds the checkpoint up; on kind, a checkpoint under an idle stream took 5m30s. This holds
+  across every Placer of a `placement.Registry`, so a turn that `ExecRequest.harness` routed to
+  another harness is covered: `placement.NewRegistry` gives its Placers one shared per-session
+  state and session guard, and now fails if a Placer already belongs to another registry or has
+  an operation in progress. Three behavior changes follow:
+  - Before it snapshots, the fork waits until every turn whose stream it closed has minted its
+    fence or returned, bounded by the caller's context. If the context ends first, the fork fails
+    before snapshotting and records nothing.
+  - A fork that reaches its checkpoint supersedes the parent's in-flight turn even if the checkpoint
+    then fails. The turn stops as an incomplete execution (no `ERROR` event), the parent stays live,
+    and the caller runs the next turn or retries the fork at the new head.
+  - A turn superseded by a fork's checkpoint, or started while one runs, returns an error wrapping
+    the new `placement.ErrCheckpointing` (the superseded turn also wraps `eventlog.ErrFenced`).
+    `Exec` and `Resume` report it as `ABORTED`, which callers retry.
+- The substrate conformance suite (`integrations/substrate/e2e`) runs both tiers on the micro-VM
+  sandbox class by default; the stateless tier used gVisor before. A host without KVM opts each
+  tier back into gVisor with `ECHO_SANDBOX_CLASS=gvisor` and `COUNTER_SANDBOX_CLASS=gvisor`, after
+  applying `deploy/substrate/namespace.yaml`, `echo-gvisor-workerpool.yaml` (formerly
+  `echo-workerpool.yaml`, which also created the Namespace) and `counter-gvisor-workerpool.yaml`
+  with the worker image resolved, as `docs/substrate-conformance.md` shows.
+  `TestStatelessReplayOnGVisor` is now `TestStatelessReplay`, and `TestSessionSuspendResumeOnGVisor`
+  is now `TestSessionSuspendResume`.
+- Through `atenet-router`, a harness stream that stays idle for about 5m30s (the router's default
+  5m route timeout plus 30s) is reset with `RST_STREAM` (gRPC `Internal`; measured on kind at
+  substrate `fc0e3586` with the stream held idle for 6m30s), so a turn parked on a slower model
+  call fails. Raise the router's `--route-timeout` if turns can run that long.
+- `runtime/substrate.ControlClient.ResumeActor` drops its `boot` argument (substrate removed
+  `ResumeActorRequest.boot`); a new actor starts from its template's golden snapshot, or cold-boots
+  if none is built. `SnapshotCloner` follows substrate's Tag API (`TagActor`,
+  `CreateActorFromTag`, `DeleteTag`); `TagActor` must report a name already taken as the new
+  `ErrTagExists`, so a fork whose tag create fails deletes only a tag it reserved.
+  `ObjectRef.Namespace` is now `ObjectRef.Atespace`, and
+  `ActorInfo` reports `Worker` and `Snapshot` instead of `PodIP` and `MeshDNS`.
+  `integrations/substrate`'s `New` and `FromClient` drop their `dnsSuffix` argument, since nothing
+  dials an actor's mesh DNS name any more. A stateful fork now
+  checks the parent still holds the checkpoint it took around the tag, and fails with
+  `ErrSnapshotSuperseded` if the parent was resumed and suspended in between.
 
 ## v0.1.2
 

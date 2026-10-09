@@ -147,7 +147,7 @@ func TestPlacerPreservesIncarnationAndPairsCloseLogs(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	p := newLocalPlacer(t, echoagent.Harness{},
 		placement.WithLogger(logger),
-		placement.WithDialer(func(string) (api.Harness, func() error, error) {
+		placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 			return nil, nil, errors.New("dial failed")
 		}),
 	)
@@ -168,7 +168,7 @@ func TestPlacerPreservesIncarnationAndPairsCloseLogs(t *testing.T) {
 	output.Reset()
 	p = newLocalPlacer(t, echoagent.Harness{},
 		placement.WithLogger(logger),
-		placement.WithDialer(func(string) (api.Harness, func() error, error) {
+		placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 			return echoagent.Harness{}, func() error { return errors.New("close failed") }, nil
 		}),
 	)
@@ -267,7 +267,7 @@ type stubControl struct{}
 func (stubControl) CreateActor(context.Context, substrate.ActorRef, substrate.ObjectRef) error {
 	return nil
 }
-func (stubControl) ResumeActor(context.Context, substrate.ActorRef, bool) (substrate.ActorInfo, error) {
+func (stubControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{}, nil
 }
 func (stubControl) SuspendActor(context.Context, substrate.ActorRef) (string, error) { return "", nil }
@@ -298,7 +298,7 @@ func TestNeutralityThroughPlacer(t *testing.T) {
 	}
 
 	// substrate (MemorySnapshot=true) must ACCEPT: the gate passes (no ErrUnplaceable). The stub
-	// substrate returns no dialable address, so the drive fails afterward — that is not a placement
+	// substrate never reports a running actor, so the drive fails afterward — that is not a placement
 	// refusal, which is exactly the distinction under test.
 	store2, err := sqlitelog.Open(":memory:")
 	if err != nil {
@@ -371,7 +371,7 @@ func TestSuspendResumeRoundtripThroughSPI(t *testing.T) {
 	}
 }
 
-// cloningControl is a substrate control client that supports the ActorSnapshot clone APIs and
+// cloningControl is a substrate control client that supports the Tag clone APIs and
 // records the calls a fork makes, so the Placer's fork path can be driven without an ate-api-server.
 type cloningControl struct {
 	stubControl
@@ -417,19 +417,24 @@ func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef)
 	return c.snapshot, nil
 }
 
-func (c *cloningControl) ResumeActor(_ context.Context, a substrate.ActorRef, boot bool) (substrate.ActorInfo, error) {
-	c.calls = append(c.calls, fmt.Sprintf("resume:%s:boot=%v", a.Name, boot))
-	// Loopback so any test that drives past placement fails its dial immediately (connection
-	// refused) instead of burning a TCP timeout on an unroutable address.
-	return substrate.ActorInfo{PodIP: "127.0.0.1"}, nil
+func (c *cloningControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
+	c.calls = append(c.calls, "resume:"+a.Name)
+	return substrate.ActorInfo{Status: substrate.StatusRunning}, nil
 }
 
-func (c *cloningControl) TagSnapshot(_ context.Context, snapshot, tag substrate.SnapshotID) error {
-	c.calls = append(c.calls, "tag:"+snapshot.Name+"->"+tag.Name)
+// GetActor reports every actor SUSPENDED holding the snapshot the last suspend produced, which is
+// what a stateful fork checks the parent against around its tag. It is not recorded in calls: the
+// backend's own tests pin that bracket, and these tests are about the Placer's ordering.
+func (c *cloningControl) GetActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot}, nil
+}
+
+func (c *cloningControl) TagActor(_ context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
+	c.calls = append(c.calls, "tag:"+source.Name+"->"+tag.Name)
 	return nil
 }
 
-func (c *cloningControl) CreateActorFromSnapshot(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) error {
+func (c *cloningControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) error {
 	if c.failCloneOf == a.Name {
 		if c.onFailedClone != nil {
 			c.onFailedClone()
@@ -440,7 +445,7 @@ func (c *cloningControl) CreateActorFromSnapshot(_ context.Context, a substrate.
 	return nil
 }
 
-func (c *cloningControl) DeleteSnapshotTag(ctx context.Context, tag substrate.SnapshotID) error {
+func (c *cloningControl) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -488,7 +493,7 @@ func TestForkOfMemoryHarnessClonesParentSnapshot(t *testing.T) {
 		t.Fatalf("fork: %v", err)
 	}
 
-	want := []string{"suspend:parent", "tag:snap-parent-1->fork-child", "clone:child:from=fork-child", "resume:child:boot=false"}
+	want := []string{"suspend:parent", "tag:parent->fork-child", "clone:child:from=fork-child", "resume:child"}
 	if !reflect.DeepEqual(ctl.calls, want) {
 		t.Fatalf("fork calls=%v want %v", ctl.calls, want)
 	}
@@ -738,10 +743,10 @@ func TestResumeIgnoresInheritedParentSnapshotRef(t *testing.T) {
 	// has already run by then; the calls it recorded are the assertion.
 	ctl.calls = nil
 	_ = p.Resume(context.Background(), child, "child")
-	if slices.Contains(ctl.calls, "resume:parent:boot=false") {
+	if slices.Contains(ctl.calls, "resume:parent") {
 		t.Fatalf("resuming the child restored the PARENT's actor via an inherited ref: %v", ctl.calls)
 	}
-	if !slices.Contains(ctl.calls, "resume:child:boot=false") {
+	if !slices.Contains(ctl.calls, "resume:child") {
 		t.Fatalf("the child must restore its OWN actor, got %v", ctl.calls)
 	}
 }
@@ -1609,7 +1614,7 @@ func TestLiveBackendGatesTheHarnessTheTurnRunsOn(t *testing.T) {
 	var dials atomic.Int32
 	// The first turn runs on the stateless harness and is interrupted; every later connection reaches
 	// the memory harness.
-	dial := placement.WithDialer(func(string) (api.Harness, func() error, error) {
+	dial := placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
 		if dials.Add(1) == 1 {
 			return stateless, func() error { return nil }, nil
 		}

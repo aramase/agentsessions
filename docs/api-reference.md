@@ -1086,7 +1086,7 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | session | [string](#string) |  |  |
-| boot | [bool](#bool) |  | true = cold-boot &#43; replay instead of snapshot restore |
+| boot | [bool](#bool) |  | **Deprecated.** Ignored. The service never reads it; the Runtime backend decides how a resumed session comes back. On substrate that is the actor&#39;s own snapshot, else the template&#39;s golden snapshot, else a cold boot, and substrate has no per-resume boot flag to forward it to. The field stays so existing clients keep encoding; do not reuse its number. |
 
 
 

@@ -28,6 +28,11 @@ type mockControl struct {
 	status substrate.ActorStatus
 	info   substrate.ActorInfo
 	actors map[string]substrate.ActorStatus
+	// snapshots is each actor's current external snapshot handle, as GetActor reports it.
+	snapshots map[string]string
+	// afterGet, when set, runs after GetActor answers, so a test can move an actor's state in the
+	// window between a check and the call it guards.
+	afterGet func(name string)
 }
 
 // exists records an actor at a status, so GetActor reports it as already placed.
@@ -46,8 +51,8 @@ func (m *mockControl) CreateActor(ctx context.Context, a substrate.ActorRef, _ s
 	m.exists(a.Name, substrate.StatusRunning)
 	return nil
 }
-func (m *mockControl) ResumeActor(ctx context.Context, a substrate.ActorRef, boot bool) (substrate.ActorInfo, error) {
-	m.calls = append(m.calls, fmt.Sprintf("resume:%s:boot=%v", a.Name, boot))
+func (m *mockControl) ResumeActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
+	m.calls = append(m.calls, "resume:"+a.Name)
 	m.exists(a.Name, substrate.StatusRunning)
 	return m.info, nil
 }
@@ -57,7 +62,17 @@ func (m *mockControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (s
 	}
 	m.calls = append(m.calls, "suspend:"+a.Name)
 	m.exists(a.Name, substrate.StatusSuspended)
-	return "gcs://snap/" + a.Name, nil
+	snap := "gs://snap/" + a.Name
+	m.holds(a.Name, snap)
+	return snap, nil
+}
+
+// holds records the external snapshot an actor currently holds.
+func (m *mockControl) holds(name, snapshot string) {
+	if m.snapshots == nil {
+		m.snapshots = map[string]string{}
+	}
+	m.snapshots[name] = snapshot
 }
 func (m *mockControl) DeleteActor(ctx context.Context, a substrate.ActorRef) error {
 	if err := ctx.Err(); err != nil {
@@ -69,33 +84,42 @@ func (m *mockControl) DeleteActor(ctx context.Context, a substrate.ActorRef) err
 }
 func (m *mockControl) GetActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	m.calls = append(m.calls, "get:"+a.Name)
+	if m.afterGet != nil {
+		defer m.afterGet(a.Name)
+	}
 	if st, ok := m.actors[a.Name]; ok {
-		return substrate.ActorInfo{Status: st, PodIP: m.info.PodIP, MeshDNS: m.info.MeshDNS}, nil
+		return substrate.ActorInfo{Status: st, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name]}, nil
 	}
 	if m.status != substrate.StatusUnknown { // canned state for the suspend/restore cases
-		return substrate.ActorInfo{Status: m.status, PodIP: m.info.PodIP, MeshDNS: m.info.MeshDNS}, nil
+		return substrate.ActorInfo{Status: m.status, Worker: m.info.Worker, Snapshot: m.snapshots[a.Name]}, nil
 	}
 	return substrate.ActorInfo{}, substrate.ErrActorNotFound
 }
 
+// running is what a successful ResumeActor reports: the actor on a worker.
+func running(worker string) substrate.ActorInfo {
+	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: worker}
+}
+
 func newBackend(m *mockControl, opts ...substrate.Option) *substrate.Backend {
-	return substrate.New(m, "space", substrate.ObjectRef{Namespace: "tmpl", Name: "echo"},
+	return substrate.New(m, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "echo"},
 		api.Descriptor{ID: "echo", Capabilities: api.Capabilities{Resumability: api.ResumabilityStatelessReplay}}, opts...)
 }
 
-// mockCloner is a control client that ALSO supports substrate's ActorSnapshot clone APIs. It is a
-// separate type from mockControl so tests can cover a deployment that predates those APIs.
+// mockCloner is a control client that ALSO supports substrate's Tag clone APIs. It is a separate
+// type from mockControl so tests can cover a control client without them.
 type mockCloner struct {
 	*mockControl
 	cloneErr error
+	tagErr   error
 }
 
-func (m *mockCloner) TagSnapshot(ctx context.Context, snapshot, tag substrate.SnapshotID) error {
-	m.calls = append(m.calls, "tag:"+snapshot.Name+"->"+tag.Name)
-	return nil
+func (m *mockCloner) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
+	m.calls = append(m.calls, "tag:"+source.Name+"->"+tag.Name)
+	return m.tagErr
 }
 
-func (m *mockCloner) CreateActorFromSnapshot(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) error {
+func (m *mockCloner) CreateActorFromTag(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) error {
 	if m.cloneErr != nil {
 		return m.cloneErr
 	}
@@ -103,7 +127,7 @@ func (m *mockCloner) CreateActorFromSnapshot(ctx context.Context, a substrate.Ac
 	return nil
 }
 
-func (m *mockCloner) DeleteSnapshotTag(ctx context.Context, tag substrate.SnapshotID) error {
+func (m *mockCloner) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -114,23 +138,41 @@ func (m *mockCloner) DeleteSnapshotTag(ctx context.Context, tag substrate.Snapsh
 // newMemoryBackend builds a backend for a REQUIRES_MEMORY_SNAPSHOT harness (the counter tier), whose
 // live state exists only in RAM and therefore cannot be replay-forked.
 func newMemoryBackend(ctl substrate.ControlClient) *substrate.Backend {
-	return substrate.New(ctl, "space", substrate.ObjectRef{Namespace: "tmpl", Name: "counter"},
+	return substrate.New(ctl, "space", substrate.ObjectRef{Atespace: "tmpl", Name: "counter"},
 		api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}})
 }
 
 func TestCreateBootsActor(t *testing.T) {
-	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.5", MeshDNS: "sess-x.space.actors"}}
+	m := &mockControl{info: running("worker-a")}
 	in, err := newBackend(m).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"get:sess-x", "create:sess-x", "resume:sess-x:boot=true"}; !reflect.DeepEqual(m.calls, want) {
+	if want := []string{"get:sess-x", "create:sess-x", "resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("create calls=%v want %v", m.calls, want)
 	}
-	// Address is the direct h2c dial target (PodIP:HarnessPort), not the mesh DNS — the router cannot
-	// proxy gRPC, so an in-cluster driver dials the actor's pod IP directly.
-	if in.Worker != "10.0.0.5" || in.Address != "10.0.0.5:80" || in.Runtime != "substrate" {
-		t.Fatalf("unexpected incarnation %+v", in)
+	// Substrate's only ingress to an actor is the atenet-router: the incarnation addresses the router
+	// and names the actor in the metadata the router routes on, never a worker address.
+	want := api.Incarnation{
+		ID:           "sess-x",
+		Worker:       "worker-a",
+		Address:      substrate.DefaultRouterAddress,
+		CallMetadata: map[string]string{"ate-target-actor": "space/sess-x"},
+		Runtime:      "substrate",
+	}
+	if !reflect.DeepEqual(in, want) {
+		t.Fatalf("incarnation=%+v want %+v", in, want)
+	}
+}
+
+func TestWithRouterOverridesTheIngressAddress(t *testing.T) {
+	m := &mockControl{info: running("worker-a")}
+	in, err := newBackend(m, substrate.WithRouter("router.example:8080")).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if in.Address != "router.example:8080" || in.CallMetadata[substrate.TargetActorHeader] != "space/sess-x" {
+		t.Fatalf("incarnation=%+v want the configured router and the actor named in metadata", in)
 	}
 }
 
@@ -138,7 +180,7 @@ func TestCreateBootsActor(t *testing.T) {
 // rejects a repeat CreateActor with AlreadyExists, so the second turn must ATTACH to the running
 // actor rather than try to create it again.
 func TestCreateAttachesToARunningActor(t *testing.T) {
-	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.5", MeshDNS: "sess-x.space.actors"}}
+	m := &mockControl{info: running("worker-a")}
 	b := newBackend(m)
 	if _, err := b.Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x"}); err != nil {
 		t.Fatal(err)
@@ -151,8 +193,8 @@ func TestCreateAttachesToARunningActor(t *testing.T) {
 	if want := []string{"get:sess-x"}; !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("second Create calls=%v want a bare attach %v (a re-create is AlreadyExists; a re-boot destroys live state)", m.calls, want)
 	}
-	if in.Address != "10.0.0.5:80" {
-		t.Fatalf("attach returned %+v, want the running actor's address", in)
+	if in.CallMetadata[substrate.TargetActorHeader] != "space/sess-x" {
+		t.Fatalf("attach returned %+v, want the running actor's incarnation", in)
 	}
 }
 
@@ -160,41 +202,39 @@ func TestCreateAttachesToARunningActor(t *testing.T) {
 // handed out, so it is already RUNNING when the first Exec lands. Cold-booting it there would throw
 // away the cloned RAM the fork exists to carry.
 func TestCreateOnAForkedChildDoesNotBootOverTheClone(t *testing.T) {
-	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.9", MeshDNS: "child.space.actors"}}
+	m := &mockControl{info: running("worker-b")}
 	m.exists("child", substrate.StatusRunning)
 	in, err := newBackend(m).Create(context.Background(), &api.SessionSpec{SessionUID: "child"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if slices.Contains(m.calls, "resume:child:boot=true") {
-		t.Fatalf("calls=%v cold-booted a cloned child, discarding its restored RAM", m.calls)
-	}
 	if want := []string{"get:child"}; !reflect.DeepEqual(m.calls, want) {
-		t.Fatalf("calls=%v want a bare attach %v", m.calls, want)
+		t.Fatalf("calls=%v want a bare attach %v (a re-create would discard the restored RAM)", m.calls, want)
 	}
-	if in.Address != "10.0.0.9:80" {
-		t.Fatalf("attach returned %+v, want the clone's address", in)
+	if in.CallMetadata[substrate.TargetActorHeader] != "space/child" {
+		t.Fatalf("attach returned %+v, want the clone's incarnation", in)
 	}
 }
 
 // A session whose worker was freed by Suspend must come back through its snapshot, not a cold boot.
 func TestCreateRestoresASuspendedActor(t *testing.T) {
-	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.7", MeshDNS: "sess-x.space.actors"}}
+	m := &mockControl{info: running("worker-a")}
 	m.exists("sess-x", substrate.StatusSuspended)
 	if _, err := newBackend(m).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x"}); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"get:sess-x", "resume:sess-x:boot=false"}; !reflect.DeepEqual(m.calls, want) {
-		t.Fatalf("calls=%v want a restore %v (boot=true would discard the memory snapshot)", m.calls, want)
+	if want := []string{"get:sess-x", "resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want a restore %v (a re-create would discard the memory snapshot)", m.calls, want)
 	}
 }
 
-func TestCreateRejectsMissingPodIP(t *testing.T) {
-	// A resumed actor with no pod IP means it was not scheduled onto a worker; the backend must fail
-	// loudly rather than hand back a bogus ":80" dial target.
-	m := &mockControl{info: substrate.ActorInfo{MeshDNS: "sess-x.space.actors"}}
+func TestCreateRejectsAnActorNotRunningAfterResume(t *testing.T) {
+	// A resume that does not leave the actor RUNNING must fail loudly. Handing back an incarnation
+	// anyway would let the first harness call resume it through the router instead, hiding the
+	// failure from the backend that owns placement.
+	m := &mockControl{info: substrate.ActorInfo{Status: substrate.StatusSuspended}}
 	if _, err := newBackend(m).Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x"}); err == nil {
-		t.Fatal("expected an error when the actor has no pod IP, got nil")
+		t.Fatal("expected an error when the actor is not running after resume, got nil")
 	}
 }
 
@@ -227,7 +267,7 @@ func TestCreateValidatesSessionSpec(t *testing.T) {
 }
 
 func TestSuspendRestoreRoundtrip(t *testing.T) {
-	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.7"}}
+	m := &mockControl{info: running("worker-a")}
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	b := newBackend(m, substrate.WithLogger(logger))
@@ -235,7 +275,7 @@ func TestSuspendRestoreRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ref.Memory || ref.Local != "sess-x" || ref.ExternalURI != "gcs://snap/sess-x" {
+	if !ref.Memory || ref.Local != "sess-x" || ref.ExternalURI != "gs://snap/sess-x" {
 		t.Fatalf("unexpected snapshot ref %+v", ref)
 	}
 	if !strings.Contains(output.String(), `"operation":"suspend_actor"`) ||
@@ -245,7 +285,7 @@ func TestSuspendRestoreRoundtrip(t *testing.T) {
 	if _, err := b.Restore(context.Background(), ref); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"suspend:sess-x", "resume:sess-x:boot=false"}; !reflect.DeepEqual(m.calls, want) {
+	if want := []string{"suspend:sess-x", "resume:sess-x"}; !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("suspend/restore calls=%v want %v", m.calls, want)
 	}
 }
@@ -288,32 +328,84 @@ func TestStatusMapping(t *testing.T) {
 // A STATELESS_REPLAY harness holds nothing the journal lacks, so its fork stays a replay-fork: a
 // fresh cold child, no snapshot clone, and the parent is left running.
 func TestForkIsReplayForkForStatelessHarness(t *testing.T) {
-	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.9"}}
+	m := &mockControl{info: running("worker-b")}
 	if _, err := newBackend(m).Fork(context.Background(), api.SnapshotRef{Local: "parent"}, api.ForkOpts{ChildSessionUID: "child"}); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"get:child", "create:child", "resume:child:boot=true"}; !reflect.DeepEqual(m.calls, want) {
+	if want := []string{"get:child", "create:child", "resume:child"}; !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("fork calls=%v want a fresh cold child actor %v", m.calls, want)
 	}
 }
 
+// newClonerWithSuspendedParent is a cloning control client whose "parent" actor is SUSPENDED holding
+// snap-parent-1, the state a stateful fork finds right after it checkpoints the parent.
+func newClonerWithSuspendedParent() *mockCloner {
+	m := &mockCloner{mockControl: &mockControl{info: running("worker-c")}}
+	m.exists("parent", substrate.StatusSuspended)
+	m.holds("parent", "snap-parent-1")
+	return m
+}
+
 // A REQUIRES_MEMORY_SNAPSHOT harness's state lives only in RAM, so its fork must CLONE the parent's
-// durable snapshot: tag it, create the child from that tag, and resume with boot=false. A boot=true
-// resume here would discard exactly the state the fork exists to carry.
+// snapshot: tag the suspended parent, create the child from that tag, and resume it, which restores
+// the cloned RAM. The parent is checked on both sides of the tag, because a tag captures whatever
+// snapshot the parent holds when it runs.
 func TestForkClonesSnapshotForMemoryHarness(t *testing.T) {
-	m := &mockCloner{mockControl: &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.11"}}}
+	m := newClonerWithSuspendedParent()
 	in, err := newMemoryBackend(m).Fork(context.Background(),
 		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
 		api.ForkOpts{ChildSessionUID: "child"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"tag:snap-parent-1->fork-child", "clone:child:from=fork-child", "resume:child:boot=false"}
+	want := []string{"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child", "resume:child"}
 	if !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("fork calls=%v want a snapshot clone %v", m.calls, want)
 	}
-	if in.Address != "10.0.0.11:80" {
-		t.Fatalf("cloned child address=%q want the child's own pod IP", in.Address)
+	if in.CallMetadata[substrate.TargetActorHeader] != "space/child" {
+		t.Fatalf("cloned child incarnation=%+v want it to target the child actor", in)
+	}
+}
+
+// The router resumes an actor on any request addressed to it, so the parent can be woken and
+// suspended again between the fork's checkpoint and its tag. The tag would then copy a newer snapshot
+// than the journal prefix the children inherit. Such a fork must be refused before it tags anything.
+func TestForkRefusesAParentThatMovedPastItsCheckpoint(t *testing.T) {
+	m := newClonerWithSuspendedParent()
+	m.holds("parent", "snap-parent-2") // suspended again after the fork's checkpoint
+	_, err := newMemoryBackend(m).Fork(context.Background(),
+		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+		api.ForkOpts{ChildSessionUID: "child"})
+	if !errors.Is(err, substrate.ErrSnapshotSuperseded) {
+		t.Fatalf("err=%v want ErrSnapshotSuperseded", err)
+	}
+	if want := []string{"get:parent"}; !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want the fork refused before tagging %v", m.calls, want)
+	}
+}
+
+// The same race inside the window between the first check and the tag: the tag may have copied the
+// newer snapshot, so it must be deleted and the fork refused.
+func TestForkDeletesATagTakenAfterTheParentMoved(t *testing.T) {
+	m := newClonerWithSuspendedParent()
+	gets := 0
+	m.afterGet = func(name string) {
+		if name != "parent" {
+			return
+		}
+		if gets++; gets == 1 {
+			m.holds("parent", "snap-parent-2") // woken and suspended again right after the check
+		}
+	}
+	_, err := newMemoryBackend(m).Fork(context.Background(),
+		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+		api.ForkOpts{ChildSessionUID: "child"})
+	if !errors.Is(err, substrate.ErrSnapshotSuperseded) {
+		t.Fatalf("err=%v want ErrSnapshotSuperseded", err)
+	}
+	want := []string{"get:parent", "tag:parent->fork-child", "get:parent", "untag:fork-child"}
+	if !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want the stale tag deleted and no child created %v", m.calls, want)
 	}
 }
 
@@ -321,7 +413,7 @@ func TestForkClonesSnapshotForMemoryHarness(t *testing.T) {
 // would hand back a child whose RAM is empty while its copied journal prefix says otherwise — a
 // silently divergent branch, since such a harness never rebuilds state from History (I4).
 func TestForkMemoryHarnessWithoutSnapshotIsRefused(t *testing.T) {
-	m := &mockCloner{mockControl: &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.11"}}}
+	m := newClonerWithSuspendedParent()
 	_, err := newMemoryBackend(m).Fork(context.Background(),
 		api.SnapshotRef{Local: "parent"}, api.ForkOpts{ChildSessionUID: "child"})
 	if !errors.Is(err, substrate.ErrNoSnapshotToClone) {
@@ -332,10 +424,10 @@ func TestForkMemoryHarnessWithoutSnapshotIsRefused(t *testing.T) {
 	}
 }
 
-// A deployment predating substrate's ActorSnapshot APIs cannot clone. It must refuse a stateful fork
-// rather than silently degrading to a replay-fork that loses the in-RAM state.
+// A control client without the Tag APIs cannot clone. It must refuse a stateful fork rather than
+// silently degrading to a replay-fork that loses the in-RAM state.
 func TestForkMemoryHarnessWithoutClonerIsRefused(t *testing.T) {
-	m := &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.11"}}
+	m := &mockControl{info: running("worker-c")}
 	_, err := newMemoryBackend(m).Fork(context.Background(),
 		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
 		api.ForkOpts{ChildSessionUID: "child"})
@@ -377,38 +469,69 @@ func TestTwoBackendNeutrality(t *testing.T) {
 	}
 }
 
-// A tag is a retention pin, so a fork that fails after tagging must release it. Otherwise every
-// failed fork attempt permanently pins one more snapshot, and upstream snapshot GC is still deferred.
+// A tag owns a full copy of the parent's snapshot, so a fork that fails after tagging must delete
+// it. Otherwise every failed fork attempt strands one more snapshot copy in object storage.
 func TestFailedCloneReleasesItsTag(t *testing.T) {
-	m := &mockCloner{
-		mockControl: &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.11"}},
-		cloneErr:    errors.New("template mismatch"),
-	}
+	m := newClonerWithSuspendedParent()
+	m.cloneErr = errors.New("template mismatch")
 	_, err := newMemoryBackend(m).Fork(context.Background(),
 		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
 		api.ForkOpts{ChildSessionUID: "child"})
 	if err == nil {
 		t.Fatal("expected the clone to fail")
 	}
-	want := []string{"tag:snap-parent-1->fork-child", "untag:fork-child"}
+	want := []string{"get:parent", "tag:parent->fork-child", "get:parent", "untag:fork-child"}
 	if !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("calls=%v want the tag to be released %v", m.calls, want)
 	}
 }
 
-// A clone that is created and placed on a worker but reports no dialable address still holds that
-// worker. Fork returns no handle in that case, so the child UID is discarded upstream and this is the
-// last moment the actor can be named: it must be torn down here, not left running forever.
-func TestForkTearsDownAClonePlacedWithoutAnAddress(t *testing.T) {
-	m := &mockCloner{mockControl: &mockControl{info: substrate.ActorInfo{}}} // resumed, but no pod IP
+// Substrate reserves a tag before copying the snapshot into it, so a tag whose copy failed is left
+// pending, holding partial data, and blocks deleting the atespace. The fork must release it.
+func TestFailedTagReleasesTheReservedTag(t *testing.T) {
+	m := newClonerWithSuspendedParent()
+	m.tagErr = errors.New("while copying the external snapshot: object store unavailable")
 	_, err := newMemoryBackend(m).Fork(context.Background(),
 		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
 		api.ForkOpts{ChildSessionUID: "child"})
 	if err == nil {
-		t.Fatal("a clone with no address must not be returned as a usable incarnation")
+		t.Fatal("expected the tag to fail")
+	}
+	want := []string{"get:parent", "tag:parent->fork-child", "untag:fork-child"}
+	if !reflect.DeepEqual(m.calls, want) {
+		t.Fatalf("calls=%v want the reserved tag released %v", m.calls, want)
+	}
+}
+
+// A tag that already existed was not reserved by this attempt, so the fork must leave it alone.
+func TestTagThatAlreadyExistsIsNotDeleted(t *testing.T) {
+	m := newClonerWithSuspendedParent()
+	m.tagErr = fmt.Errorf("%w: space/fork-child", substrate.ErrTagExists)
+	_, err := newMemoryBackend(m).Fork(context.Background(),
+		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+		api.ForkOpts{ChildSessionUID: "child"})
+	if !errors.Is(err, substrate.ErrTagExists) {
+		t.Fatalf("err=%v want ErrTagExists", err)
+	}
+	if slices.Contains(m.calls, "untag:fork-child") {
+		t.Fatalf("calls=%v deleted a tag this fork did not create", m.calls)
+	}
+}
+
+// A clone that was created and resumed but is not reported RUNNING may still hold a worker. Fork
+// returns no handle in that case, so the child UID is discarded upstream and this is the last moment
+// the actor can be named: it must be torn down here, not left behind forever.
+func TestForkTearsDownACloneThatIsNotRunning(t *testing.T) {
+	m := newClonerWithSuspendedParent()
+	m.info = substrate.ActorInfo{Status: substrate.StatusUnknown} // resumed, but not reported running
+	_, err := newMemoryBackend(m).Fork(context.Background(),
+		api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+		api.ForkOpts{ChildSessionUID: "child"})
+	if err == nil {
+		t.Fatal("a clone that is not running must not be returned as a usable incarnation")
 	}
 	want := []string{
-		"tag:snap-parent-1->fork-child", "clone:child:from=fork-child", "resume:child:boot=false",
+		"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child", "resume:child",
 		"suspend:child", "delete:child", "untag:fork-child",
 	}
 	if !reflect.DeepEqual(m.calls, want) {
@@ -419,10 +542,8 @@ func TestForkTearsDownAClonePlacedWithoutAnAddress(t *testing.T) {
 // The likeliest reason a fork fails partway is that the caller's deadline expired or it went away.
 // Cleanup bound to that same context would do nothing in exactly that case, so it must be detached.
 func TestForkCleanupSurvivesACancelledCaller(t *testing.T) {
-	m := &mockCloner{
-		mockControl: &mockControl{info: substrate.ActorInfo{PodIP: "10.0.0.11"}},
-		cloneErr:    errors.New("deadline exceeded"),
-	}
+	m := newClonerWithSuspendedParent()
+	m.cloneErr = errors.New("deadline exceeded")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := newMemoryBackend(m).Fork(ctx,

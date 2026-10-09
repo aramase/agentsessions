@@ -29,7 +29,7 @@ func TestForkFanOutFromMemorySnapshot(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	backend := f.backend(counterTemplate, counterDescriptor)
+	backend := f.backend(t, counterTemplateSpec, counterDescriptor)
 	store := journal(t)
 	parent := uniqueUID("fork-parent")
 	parentLog := store.Session(parent)
@@ -38,10 +38,10 @@ func TestForkFanOutFromMemorySnapshot(t *testing.T) {
 
 	const (
 		turns = 3 // N: the count that exists only in the parent's RAM
-		// The fan-out width. The parent stays live across the fork, so this needs
-		// children+1 free micro-VM workers; deploy/substrate/counter-microvm-actortemplate.yaml
-		// sizes its pool for this number. Raising it without raising replicas there fails
-		// the fork with "no free workers available".
+		// The fan-out width. Every child runs at once, so this needs that many free workers
+		// in the counter pool; deploy/substrate/counter-*-workerpool.yaml size their pools
+		// for this number. Raising it without raising replicas there fails the fork with
+		// "no free workers available".
 		children = 3
 	)
 
@@ -130,7 +130,7 @@ func TestForkOfMemoryHarnessAtHistoricalSeqIsRefused(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
-	backend := f.backend(counterTemplate, counterDescriptor)
+	backend := f.backend(t, counterTemplateSpec, counterDescriptor)
 	store := journal(t)
 	parent := uniqueUID("fork-historical")
 	parentLog := store.Session(parent)

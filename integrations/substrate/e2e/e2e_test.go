@@ -2,9 +2,10 @@
 // ate-system: no fakes, no doubles, no canned control-plane replies.
 //
 // It is an ordinary Go test package, compiled into a test binary and executed as a Kubernetes Job
-// inside the cluster. In-cluster is not a preference: the atenet mesh is HTTP/1.1-only to actors, so
-// a harness is reached by a direct gRPC dial to the actor's PodIP:HarnessPort, which only routes from
-// inside. Control is reached over the ate-api-server ClusterIP with a mounted ServiceAccount token.
+// inside the cluster. The harness is reached the way a production host reaches it: harnesswire over
+// h2c to the atenet-router Service, with the ate-target-actor metadata naming the actor. Control is
+// reached over the ate-api-server Service with a mounted ServiceAccount token. Running in-cluster
+// keeps both on their Service DNS names without port-forwards.
 //
 // Tests SKIP unless AGENTSESSIONS_E2E=1, so `go test ./...` on a laptop or in the fast PR job still
 // compiles every line here — a driver that no longer builds fails the cheap gate, not the 17-minute
@@ -23,23 +24,21 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/aramase/agentsessions/api"
-	v1 "github.com/aramase/agentsessions/api/genpb"
 	"github.com/aramase/agentsessions/eventlog"
-	"github.com/aramase/agentsessions/harnesswire"
 	ateadapter "github.com/aramase/agentsessions/integrations/substrate"
+	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/substrate"
 	"github.com/aramase/agentsessions/sqlitelog"
 )
 
-// Template names installed by the workflow before the suite runs.
+// Template names the suite creates in the template atespace (see templates_test.go).
 const (
-	echoTemplate    = "echo-harness"    // STATELESS_REPLAY, gVisor
-	counterTemplate = "counter-microvm" // REQUIRES_MEMORY_SNAPSHOT, micro-VM
+	echoTemplate    = "echo-harness" // STATELESS_REPLAY, micro-VM (or gVisor, see sandboxFor)
+	counterTemplate = "counter"      // REQUIRES_MEMORY_SNAPSHOT, micro-VM (or gVisor, see sandboxFor)
 )
 
 func env(key, def string) string {
@@ -57,11 +56,13 @@ func requireCluster(t *testing.T) {
 	}
 }
 
-// fixture is one test's connection to the cluster: a Control channel and a private atespace.
+// fixture is one test's connection to the cluster: a Control channel, a private atespace for its
+// actors, and the shared atespace the templates live in.
 type fixture struct {
-	conn     *grpc.ClientConn
-	atespace string
-	tmplNS   string
+	conn         *grpc.ClientConn
+	atespace     string
+	tmplAtespace string
+	router       string
 }
 
 // newFixture dials Control and ensures the test's atespace exists. Each test gets its own atespace
@@ -84,7 +85,12 @@ func newFixture(t *testing.T, atespace string) *fixture {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	f := &fixture{conn: conn, atespace: atespace, tmplNS: env("ACTORTEMPLATE_NS", "ate-agentsessions")}
+	f := &fixture{
+		conn:         conn,
+		atespace:     atespace,
+		tmplAtespace: env("ACTORTEMPLATE_ATESPACE", "agentsessions-templates"),
+		router:       env("ATENET_ROUTER_ADDR", substrate.DefaultRouterAddress),
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, err = atepb.NewControlClient(conn).CreateAtespace(ctx, &atepb.CreateAtespaceRequest{
@@ -97,10 +103,14 @@ func newFixture(t *testing.T, atespace string) *fixture {
 	return f
 }
 
-// backend builds the substrate Runtime for a harness template in this fixture's atespace.
-func (f *fixture) backend(template string, desc api.Descriptor) *substrate.Backend {
-	return substrate.New(ateadapter.New(f.conn, ""), f.atespace,
-		substrate.ObjectRef{Namespace: f.tmplNS, Name: template}, desc)
+// backend builds the substrate Runtime for a harness template, creating the template on first use.
+// Actors land in this fixture's atespace and reference the template in the shared one.
+func (f *fixture) backend(t *testing.T, spec func(*testing.T, string) *atepb.ActorTemplate, desc api.Descriptor) *substrate.Backend {
+	t.Helper()
+	name := f.ensureTemplate(t, spec)
+	return substrate.New(ateadapter.New(f.conn), f.atespace,
+		substrate.ObjectRef{Atespace: f.tmplAtespace, Name: name}, desc,
+		substrate.WithRouter(f.router))
 }
 
 // journal opens an in-memory hash-chained log store for the test. The log is the session's source of
@@ -132,14 +142,10 @@ func stopQuietly(t *testing.T, b *substrate.Backend, uid string) {
 	}
 }
 
-// dialActor opens a harnesswire client straight to the actor's harness at PodIP:HarnessPort — the
-// same direct dial the Placer performs, reused where a test needs a second connection of its own.
-func dialActor(address string) (api.Harness, func() error, error) {
-	conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, nil, err
-	}
-	return harnesswire.NewClientHarness(v1.NewHarnessClient(conn)), conn.Close, nil
+// dialActor opens a harnesswire client to an incarnation's harness through the router, with the same
+// dialer and call metadata the Placer uses, for a test that needs a connection of its own.
+func dialActor(inc api.Incarnation) (api.Harness, func() error, error) {
+	return placement.DefaultDial(inc)
 }
 
 func outputsOf(recs []eventlog.Record) []string {

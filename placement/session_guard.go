@@ -47,3 +47,11 @@ func (g *sessionGuard) unref(uid string, entry *sessionGuardEntry) {
 		delete(g.entries, uid)
 	}
 }
+
+// busy reports whether any session holds the guard or is trying to. Entries are deleted when their
+// last reference is released, so an idle guard is empty.
+func (g *sessionGuard) busy() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.entries) > 0
+}

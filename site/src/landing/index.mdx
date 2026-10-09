@@ -116,7 +116,7 @@ harness stream, so what is journaled is exactly what the harness emitted.
 Three runtimes ship. **`runtime/local`** is filesystem-only and refuses a memory-snapshot harness
 rather than resuming it wrongly. **`runtime/remote`** attaches to a harness you are already running,
 so your agent is registered by address rather than compiled into the server. **`runtime/substrate`**
-runs both capability tiers against a real cluster on every pull request, on gVisor and on a micro-VM.
+runs both capability tiers against a real cluster on every pull request, both on a micro-VM.
 Kata, Cloud Hypervisor, and plain pods fit the same SPI. No provider SDK appears anywhere, and CI
 asserts the core links no backend vendor.
 
@@ -143,7 +143,7 @@ Signed archives and container images are on the
   <LinkCard title="Architecture" href="/agentsessions/architecture/"
     description="The host, the log, placement, and how the pieces fit." />
   <LinkCard title="Running on agent-substrate" href="/agentsessions/substrate-conformance/"
-    description="Both tiers on a real cluster, on gVisor and a micro-VM." />
+    description="Both tiers on a real cluster, on a micro-VM." />
   <LinkCard title="Observability" href="/agentsessions/observability/"
     description="Structured logs, request correlation, and what to watch." />
   <LinkCard title="Security posture" href="/agentsessions/security/"

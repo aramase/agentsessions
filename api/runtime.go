@@ -71,9 +71,14 @@ type SnapshotRef struct {
 type Incarnation struct {
 	ID         string
 	Worker     string // pod/worker id
-	Address    string // where the harness server listens
+	Address    string // where the harness server listens, or the ingress that routes to it
 	Runtime    string // "pod" | "kata" | "clh" | "substrate"
 	FenceToken int64  // monotonic; the log rejects appends from a superseded incarnation
+	// CallMetadata is request metadata the host must attach to every call it makes to the harness at
+	// Address. A backend whose harness sits behind a shared ingress uses it to name the target
+	// sandbox (substrate: ate-target-actor); a backend that hands out a direct address leaves it
+	// empty. It is routing, not authentication: nothing here proves the caller's identity.
+	CallMetadata map[string]string
 }
 
 // SessionSpec is what a Runtime needs to create an incarnation.

@@ -28,9 +28,20 @@ type Registry struct {
 // caller does not specify one, and must itself be registered: a default that resolves to nothing
 // would turn every unqualified request into an error at call time rather than at startup.
 //
-// It wires a shared session guard into the supplied Placer pointers. Construct the Registry before
-// using any of those Placers, and do not register them in another Registry: rewiring running or
-// already-registered Placers is not supported. Separate Registries do not fence each other.
+// The placers are switched to one shared session guard and one shared set of per-session
+// connections and checkpoint marks. session.Service routes a turn by ExecRequest.harness but a
+// Suspend or Fork by the session's recorded harness, so the two can land on different Placers;
+// sharing them is what lets Suspend refuse a turn (ErrSessionBusy), and a stateful fork end and
+// refuse one, whichever Placer runs it. Separate Registries do not fence each other.
+//
+// NewRegistry rejects a Placer that already belongs to a registry, and one with an operation in
+// progress: an Exec, Suspend or Resume holding the session guard, an open harness connection, or a
+// checkpoint mark. Replacing its guard and set would orphan them, so a later Suspend would not be
+// refused by that operation and a later checkpoint would neither end nor refuse its turn. A Placer
+// that has run operations and is now idle holds nothing and is accepted. The check cannot see an
+// operation that starts while NewRegistry runs, and the guard and set are replaced without
+// synchronization, so NewRegistry must not run concurrently with any method of the placers it is
+// given: build the registry before serving.
 func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, error) {
 	if len(placers) == 0 {
 		return nil, errors.New("placement: registry needs at least one harness")
@@ -49,11 +60,21 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer) (*Registry, 
 	if _, ok := placers[defaultHarness]; !ok {
 		return nil, fmt.Errorf("placement: default harness %q is not registered", defaultHarness)
 	}
+	shared := &sessionSet{shared: true}
 	byName := make(map[string]*Placer, len(placers))
 	guard := new(sessionGuard)
 	for name, p := range placers {
-		p.guard = guard
+		if p.sessions.shared {
+			return nil, fmt.Errorf("placement: harness %q: placer already belongs to another registry", name)
+		}
+		if p.sessions.busy() || p.guard.busy() {
+			return nil, fmt.Errorf("placement: harness %q: placer has an operation in progress", name)
+		}
 		byName[name] = p
+	}
+	for _, p := range byName {
+		p.guard = guard
+		p.sessions = shared
 	}
 	return &Registry{byName: byName, defaultHarness: defaultHarness}, nil
 }

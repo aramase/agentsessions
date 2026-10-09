@@ -15,14 +15,15 @@ import (
 )
 
 // Keep the real Substrate backend's error wrapping; only the external control plane is replaced.
-// An existing suspended actor makes Exec use ResumeActor(boot=false), just as Resume does.
+// An existing suspended actor makes Exec resume it (ResumeActor restores its snapshot), just as
+// Resume does.
 type conflictControl struct{}
 
 func (conflictControl) CreateActor(context.Context, substrate.ActorRef, substrate.ObjectRef) error {
 	return nil
 }
 
-func (conflictControl) ResumeActor(context.Context, substrate.ActorRef, bool) (substrate.ActorInfo, error) {
+func (conflictControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{}, status.Error(codes.Aborted, "concurrent update conflict")
 }
 

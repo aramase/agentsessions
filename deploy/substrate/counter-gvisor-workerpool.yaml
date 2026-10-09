@@ -1,0 +1,31 @@
+# Stateful-tier WorkerPool on gVisor, for hosts without KVM (for example an arm64 Mac running kind).
+#
+# A gVisor FULL checkpoint captures guest memory too, so the counter's in-RAM state survives suspend
+# and fork on it. Run the suite with COUNTER_SANDBOX_CLASS=gvisor to point the counter template at
+# this pool instead of the micro-VM one. CI keeps the micro-VM pool, which is the class the stateful
+# claim is made for.
+#
+# workerImage is a ko:// import path that the WorkerPool controller passes to its Pods unchanged:
+# build ateom-gvisor with ko and substitute its digest before applying (see the no-KVM recipe in
+# docs/substrate-conformance.md).
+
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: counter-gvisor
+  namespace: ate-agentsessions
+  labels:
+    workload: agentsessions-counter-gvisor
+spec:
+  # Golden build plus a 3-way fork fan-out.
+  replicas: 4
+  sandboxClass: gvisor
+  workerImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+  template:
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 100m
+        memory: 256Mi

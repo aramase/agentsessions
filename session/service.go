@@ -648,6 +648,9 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 			return nil, status.Errorf(codes.Unavailable, "resume: %v", err)
 		case errors.Is(err, placement.ErrAdmissionInterrupted):
 			return nil, status.Errorf(admissionInterruptedCode(err), "resume: %v", err)
+		case errors.Is(err, placement.ErrCheckpointing):
+			// A stateful Fork of this session superseded this Resume's turn; retry once it completes.
+			return nil, status.Errorf(codes.Aborted, "resume: %v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "resume: %v", err)
 	}
@@ -679,7 +682,7 @@ func execError(err error) error {
 		return status.Error(codes.Unavailable, err.Error())
 	case errors.Is(err, placement.ErrAdmissionInterrupted):
 		return status.Error(admissionInterruptedCode(err), err.Error())
-	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced):
+	case errors.Is(err, eventlog.ErrConflict), errors.Is(err, eventlog.ErrFenced), errors.Is(err, placement.ErrCheckpointing):
 		return status.Error(codes.Aborted, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())

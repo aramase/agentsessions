@@ -105,3 +105,24 @@ func TestRegistryNamesAreSorted(t *testing.T) {
 		}
 	}
 }
+
+// A registry shares one set of per-session checkpoint state across its placers. A placer moved into
+// a second registry would split that set, so a checkpoint through one registry would miss turns run
+// through the other; NewRegistry refuses it instead.
+func TestNewRegistryRejectsAPlacerAlreadyInAnotherRegistry(t *testing.T) {
+	echo := newPlacer(t)
+	if _, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": echo}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": echo}); err == nil {
+		t.Fatal("NewRegistry accepted a placer that already belongs to another registry")
+	}
+}
+
+// The same placer under two names is one placer, so it shares the set with itself.
+func TestNewRegistryAcceptsOnePlacerUnderTwoNames(t *testing.T) {
+	p := newPlacer(t)
+	if _, err := placement.NewRegistry("a", map[string]*placement.Placer{"a": p, "b": p}); err != nil {
+		t.Fatal(err)
+	}
+}
