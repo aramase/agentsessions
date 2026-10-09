@@ -61,10 +61,11 @@ func TestLegacyResumeFailurePersistsIDlessErrorAndOriginalCause(t *testing.T) {
 			log, original := v012Log(t, "crashed-output")
 			var har api.Harness = failingLegacyHarness{failure: injected}
 			want := injected
-			if path == "unconsumed effects" {
+			switch path {
+			case "unconsumed effects":
 				har = &callHarness{}
 				want = controller.ErrReplayDiverged
-			} else if path == "fatal tool evidence" {
+			case "fatal tool evidence":
 				har = handledToolErrorHarness{call: recordedToolCall()}
 				want = controller.ErrReplayDiverged
 			}

@@ -13,7 +13,8 @@ import (
 // did not complete (no END), Resume re-runs the harness with a hybrid sink that SERVES the
 // already-recorded effects — never re-invoking a recorded model/tool call (at-most-once, I3) — and
 // switches to LIVE (invoke + record) for anything past the crash point, then appends END. If the
-// last turn is complete or the log is empty, it is a no-op (returns false). A start marker with
+// last turn is complete or the log is empty, it is a no-op (returns false); legacy ERROR also
+// finishes a turn. A start marker with
 // missing or inconsistent input completeness information is rejected before the harness runs.
 // An unresolved tool intent inherited across a fork returns ErrInheritedToolIntent before running
 // the harness or appending events: the child's dedup namespace cannot recover the parent's effect.
@@ -98,7 +99,7 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	}
 	invocationID := execution.id
 	if legacy {
-		// Select the original last INPUT, so retries retain identity even after ERROR/live appends.
+		// Select the original last INPUT, so retries retain identity while recovery remains pending.
 		invocationID, err = c.legacyExecutionID(recs[execution.start])
 		if err != nil {
 			return false, err
