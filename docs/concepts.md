@@ -148,7 +148,7 @@ Replay checks all completed invocations against its single supplied harness befo
 interrupted Resume checks its selected turn before `Run`. A nonempty recorded version must match
 exactly, including rejection of an empty served version. No trimming or semantic-version ordering
 is applied. An empty recorded version retains existing behavior without a version check. Mismatches
-return `ErrHarnessMismatch` or `ErrHarnessVersionMismatch` without harness/model/tool calls or new
+return `ErrHarnessMismatch` or `ErrHarnessVersionMismatch` without harness `Run`, model, or tool calls or new
 execution records; placement can already have allocated/restored compute and advanced its fence.
 Controller Replay is not a multi-harness dispatcher: callers supply a matching harness/name or it
 fails closed. `Sessions.Replay` still streams stored records without running or checking a harness.
