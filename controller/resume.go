@@ -191,7 +191,7 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 			return api.ModelResponse{}, errors.New("resume: recorded stream diverged (expected model call)")
 		}
 		if mc.ModelCall.InputHash != hashModelInput(req) {
-			return api.ModelResponse{}, errors.New("resume: model input hash mismatch (I0)")
+			return api.ModelResponse{}, fmt.Errorf("%w: resume: model input hash mismatch (I0)", ErrReplayDiverged)
 		}
 		out, ok := s.recordedNext(api.EventOutput)
 		if !ok {

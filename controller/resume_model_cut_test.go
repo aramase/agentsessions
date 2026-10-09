@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
+	"github.com/aramase/agentsessions/sqlitelog"
 )
 
 var (
@@ -271,8 +271,8 @@ func TestResumeAtModelCallInputHashMismatch(t *testing.T) {
 
 	model := &scriptedModel{}
 	err := resumeOnce(t, log, &echoHarness{flaky: true}, model)
-	if err == nil || !strings.Contains(err.Error(), "model input hash mismatch") {
-		t.Fatalf("want model input hash mismatch, got %v", err)
+	if !errors.Is(err, controller.ErrReplayDiverged) {
+		t.Fatalf("want ErrReplayDiverged for a model input hash mismatch, got %v", err)
 	}
 	if model.calls != 0 {
 		t.Fatalf("divergent resume invoked the provider %d times", model.calls)
@@ -286,6 +286,47 @@ func TestResumeAtModelCallInputHashMismatch(t *testing.T) {
 		t.Fatalf("provider saw %d calls, want 1", model.calls)
 	}
 	assertRecovered(t, log)
+}
+
+// Forking at a MODEL_CALL copies a call whose completion the parent did record (or may have
+// recorded after the fork point). The child cannot see that, so its Resume treats the call as cut
+// and invokes the provider once. This is intended: each such fork costs one provider call.
+func TestForkAtModelCallResumeRedrivesOnce(t *testing.T) {
+	s, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	parent, child := s.Session("parent"), s.Session("child")
+
+	parentModel := &scriptedModel{}
+	pc, err := controller.New(parent, parentModel.call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pc.Exec(t.Context(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+		t.Fatalf("parent exec: %v", err)
+	}
+	assertKinds(t, parent, api.EventExecutionStart, api.EventInput, api.EventModelCall, api.EventOutput, api.EventEnd)
+	const modelCallSeq = 3
+	if err := controller.Fork(parent, child, modelCallSeq); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	assertKinds(t, child, api.EventExecutionStart, api.EventInput, api.EventModelCall, api.EventLifecycle)
+
+	childModel := &scriptedModel{}
+	if err := resumeOnce(t, child, &echoHarness{}, childModel); err != nil {
+		t.Fatalf("child resume: %v", err)
+	}
+	if childModel.calls != 1 {
+		t.Fatalf("child resume invoked the provider %d times, want 1", childModel.calls)
+	}
+	if parentModel.calls != 1 {
+		t.Fatalf("parent provider calls = %d, want 1 (the child must not touch the parent)", parentModel.calls)
+	}
+	assertKinds(t, child, api.EventExecutionStart, api.EventInput, api.EventModelCall, api.EventLifecycle,
+		api.EventOutput, api.EventEnd)
+	assertRecovered(t, child)
 }
 
 // usageAfterFailedModelHarness handles a model failure, reports usage, then the process dies
