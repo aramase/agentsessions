@@ -32,12 +32,15 @@ Source of truth: api/*.proto. Edit the proto comments, not this file.
     - [ResourceMetadata](#agentsessions-v1-ResourceMetadata)
     - [TextPart](#agentsessions-v1-TextPart)
     - [ToolCall](#agentsessions-v1-ToolCall)
+    - [ToolChoice](#agentsessions-v1-ToolChoice)
+    - [ToolDefinition](#agentsessions-v1-ToolDefinition)
     - [ToolResult](#agentsessions-v1-ToolResult)
     - [Usage](#agentsessions-v1-Usage)
   
     - [EventKind](#agentsessions-v1-EventKind)
     - [Lifecycle.Kind](#agentsessions-v1-Lifecycle-Kind)
     - [Mediation](#agentsessions-v1-Mediation)
+    - [ToolChoice.Mode](#agentsessions-v1-ToolChoice-Mode)
   
 - [harness.proto](#harness-proto)
     - [Cancel](#agentsessions-v1-Cancel)
@@ -341,8 +344,8 @@ Message is a role-tagged sequence of content parts (A2A Message = role &#43; Par
 ### ModelCall
 ModelCall is a model REQUEST emitted by the harness (EVENT_MODEL_CALL). The host records
 it with input_hash and answers via ControllerFrame.ModelResult (correlated by id). The
-completion (text &#43; reasoning parts) is recorded separately as an EVENT_OUTPUT message.
-Under STATELESS_REPLAY the harness never calls a provider directly.
+completion (text, reasoning, and tool_call parts) is recorded separately as an EVENT_OUTPUT
+message. Under STATELESS_REPLAY the harness never calls a provider directly.
 
 
 | Field | Type | Label | Description |
@@ -352,6 +355,8 @@ Under STATELESS_REPLAY the harness never calls a provider directly.
 | input_hash | [string](#string) |  | §7/§9.1: required for STATELESS_REPLAY so the I0 check can run |
 | id | [string](#string) |  | correlation id for the served ModelResult |
 | messages | [Message](#agentsessions-v1-Message) | repeated | messages is the request context the host needs to INVOKE the model on the live path. It is wire-only: the host records the call with input_hash alone (messages stripped), since the recorded form only needs the hash to re-check I0 on replay. |
+| tools | [ToolDefinition](#agentsessions-v1-ToolDefinition) | repeated | tools are the definitions offered to the model on this call. Wire-only like messages: the recorded form keeps input_hash, which covers them. |
+| tool_choice | [ToolChoice](#agentsessions-v1-ToolChoice) |  | tool_choice constrains whether and which tool the model calls. Wire-only like messages and covered by input_hash. Unset means the provider default. |
 
 
 
@@ -422,6 +427,8 @@ opaque reasoning block. Large payloads are externalized by URI, never inlined (�
 | file | [FilePart](#agentsessions-v1-FilePart) |  |  |
 | data | [DataPart](#agentsessions-v1-DataPart) |  |  |
 | reasoning | [ReasoningPart](#agentsessions-v1-ReasoningPart) |  |  |
+| tool_call | [ToolCall](#agentsessions-v1-ToolCall) |  | tool_call is a model&#39;s request to call a tool, carried in an assistant message. It reuses ToolCall so one id runs from the model output through EVENT_TOOL_CALL / EVENT_TOOL_RESULT to the next model input. On a model output, mediation and idempotency_key are unset; to execute the call, the harness sets them on a copy and never changes the recorded output&#39;s ToolCall. |
+| tool_result | [ToolResult](#agentsessions-v1-ToolResult) |  | tool_result is a tool&#39;s result fed back to the model, carried in a message with role &#34;tool&#34;. ToolResult.id is the id of the ToolCall it answers. |
 
 
 
@@ -509,6 +516,41 @@ ToolCall aligns with an MCP tool call (name &#43; structured args).
 
 
 
+<a name="agentsessions-v1-ToolChoice"></a>
+
+### ToolChoice
+ToolChoice constrains whether and which tool the model calls.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| mode | [ToolChoice.Mode](#agentsessions-v1-ToolChoice-Mode) |  |  |
+| name | [string](#string) |  | name forces one specific tool. It is meaningful only with MODE_REQUIRED. |
+
+
+
+
+
+
+<a name="agentsessions-v1-ToolDefinition"></a>
+
+### ToolDefinition
+ToolDefinition is a tool offered to a model on one call. It aligns with an MCP Tool (name,
+description, inputSchema). It differs from the harness&#39;s ToolSpec, which declares a tool and its
+default mediation to the host; ToolDefinition is what the model sees.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  |  |
+| description | [string](#string) |  |  |
+| input_schema | [google.protobuf.Struct](https://protobuf.dev/reference/protobuf/google.protobuf/#struct) |  | JSON Schema object describing the tool&#39;s arguments |
+
+
+
+
+
+
 <a name="agentsessions-v1-ToolResult"></a>
 
 ### ToolResult
@@ -523,6 +565,7 @@ ToolCall aligns with an MCP tool call (name &#43; structured args).
 | output_digest | [string](#string) |  | content digest of output_uri target (chain covers externalized bytes) |
 | is_error | [bool](#bool) |  |  |
 | error | [string](#string) |  |  |
+| content | [Part](#agentsessions-v1-Part) | repeated | content is the model-facing result (MCP CallToolResult.content: text, file, structured data). A harness records on EVENT_TOOL_RESULT the same ToolResult it feeds back as a tool_result part, so history rebuilt from the journal can give the model what it saw live. |
 
 
 
@@ -599,6 +642,20 @@ Mediation controls how a tool call is executed / who enforces record-before-effe
 | MEDIATION_IN_HARNESS_REPORTED | 1 | harness runs it, reports for audit (cooperative WAL) |
 | MEDIATION_CONTROLLER_MEDIATED | 2 | host/gateway executes (host-enforced WAL; trustless) |
 | MEDIATION_REQUIRES_APPROVAL | 3 | pause for human/policy approval |
+
+
+
+<a name="agentsessions-v1-ToolChoice-Mode"></a>
+
+### ToolChoice.Mode
+
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| MODE_UNSPECIFIED | 0 | provider default |
+| MODE_AUTO | 1 | the model decides whether to call a tool |
+| MODE_NONE | 2 | the model must not call a tool |
+| MODE_REQUIRED | 3 | the model must call at least one tool |
 
 
  
@@ -726,7 +783,7 @@ scoped, delegated tokens (Transaction Tokens) via the host for tool calls.
 
 ### ModelResult
 ModelResult is a model completion served to the harness (live invocation or replay).
-The Message carries text &#43; opaque reasoning parts, recorded verbatim for continuity.
+The Message carries text, opaque reasoning, and tool_call parts, recorded verbatim for continuity.
 
 
 | Field | Type | Label | Description |

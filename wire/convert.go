@@ -14,6 +14,7 @@ package wire
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -180,6 +181,10 @@ func partToProto(p api.Part) *v1.Part {
 		out.Part = &v1.Part_Data{Data: &v1.DataPart{Data: toStruct(p.Data)}}
 	case p.Reasoning != nil:
 		out.Part = &v1.Part_Reasoning{Reasoning: reasoningToProto(p.Reasoning)}
+	case p.ToolCall != nil:
+		out.Part = &v1.Part_ToolCall{ToolCall: toolCallToProto(p.ToolCall)}
+	case p.ToolResult != nil:
+		out.Part = &v1.Part_ToolResult{ToolResult: toolResultToProto(p.ToolResult)}
 	}
 	return out
 }
@@ -198,6 +203,32 @@ func partFromProto(p *v1.Part) api.Part {
 		out.Data = fromStruct(b.Data.GetData())
 	case *v1.Part_Reasoning:
 		out.Reasoning = reasoningFromProto(b.Reasoning)
+	case *v1.Part_ToolCall:
+		out.ToolCall = toolCallFromProto(b.ToolCall)
+	case *v1.Part_ToolResult:
+		out.ToolResult = toolResultFromProto(b.ToolResult)
+	}
+	return out
+}
+
+func partsToProto(ps []api.Part) []*v1.Part {
+	if len(ps) == 0 {
+		return nil
+	}
+	out := make([]*v1.Part, len(ps))
+	for i := range ps {
+		out[i] = partToProto(ps[i])
+	}
+	return out
+}
+
+func partsFromProto(ps []*v1.Part) []api.Part {
+	if len(ps) == 0 {
+		return nil
+	}
+	out := make([]api.Part, len(ps))
+	for i, p := range ps {
+		out[i] = partFromProto(p)
 	}
 	return out
 }
@@ -335,6 +366,7 @@ func toolResultToProto(t *api.ToolResult) *v1.ToolResult {
 		OutputDigest: t.OutputDigest,
 		IsError:      t.IsError,
 		Error:        t.Error,
+		Content:      partsToProto(t.Content),
 	}
 }
 
@@ -349,7 +381,76 @@ func toolResultFromProto(t *v1.ToolResult) *api.ToolResult {
 		OutputDigest: t.GetOutputDigest(),
 		IsError:      t.GetIsError(),
 		Error:        t.GetError(),
+		Content:      partsFromProto(t.GetContent()),
 	}
+}
+
+// ToolDefinitionsToProto converts the tools offered on a model call. They ride ModelCall on the
+// harness stream only; the recorded MODEL_CALL keeps the input hash that covers them.
+func ToolDefinitionsToProto(ts []api.ToolDefinition) []*v1.ToolDefinition {
+	if len(ts) == 0 {
+		return nil
+	}
+	out := make([]*v1.ToolDefinition, len(ts))
+	for i, t := range ts {
+		out[i] = &v1.ToolDefinition{Name: t.Name, Description: t.Description, InputSchema: toStruct(t.InputSchema)}
+	}
+	return out
+}
+
+// ToolDefinitionsFromProto is the inverse of ToolDefinitionsToProto.
+func ToolDefinitionsFromProto(ps []*v1.ToolDefinition) []api.ToolDefinition {
+	if len(ps) == 0 {
+		return nil
+	}
+	out := make([]api.ToolDefinition, len(ps))
+	for i, p := range ps {
+		out[i] = api.ToolDefinition{Name: p.GetName(), Description: p.GetDescription(), InputSchema: fromStruct(p.GetInputSchema())}
+	}
+	return out
+}
+
+// ToolChoiceToProto converts a tool choice. An unknown mode is an error rather than the provider
+// default: a choice that silently loosened would let the model do what the harness ruled out.
+func ToolChoiceToProto(c *api.ToolChoice) (*v1.ToolChoice, error) {
+	if c == nil {
+		return nil, nil
+	}
+	var mode v1.ToolChoice_Mode
+	switch c.Mode {
+	case "":
+		mode = v1.ToolChoice_MODE_UNSPECIFIED
+	case api.ToolChoiceAuto:
+		mode = v1.ToolChoice_MODE_AUTO
+	case api.ToolChoiceNone:
+		mode = v1.ToolChoice_MODE_NONE
+	case api.ToolChoiceRequired:
+		mode = v1.ToolChoice_MODE_REQUIRED
+	default:
+		return nil, fmt.Errorf("wire: unknown tool choice mode %q", c.Mode)
+	}
+	return &v1.ToolChoice{Mode: mode, Name: c.Name}, nil
+}
+
+// ToolChoiceFromProto is the inverse of ToolChoiceToProto. Proto3 enums are open, so a mode this
+// build does not know (a newer peer's value) is an error rather than the provider default.
+func ToolChoiceFromProto(p *v1.ToolChoice) (*api.ToolChoice, error) {
+	if p == nil {
+		return nil, nil
+	}
+	out := &api.ToolChoice{Name: p.GetName()}
+	switch p.GetMode() {
+	case v1.ToolChoice_MODE_UNSPECIFIED:
+	case v1.ToolChoice_MODE_AUTO:
+		out.Mode = api.ToolChoiceAuto
+	case v1.ToolChoice_MODE_NONE:
+		out.Mode = api.ToolChoiceNone
+	case v1.ToolChoice_MODE_REQUIRED:
+		out.Mode = api.ToolChoiceRequired
+	default:
+		return nil, fmt.Errorf("wire: unknown tool choice mode %d", int32(p.GetMode()))
+	}
+	return out, nil
 }
 
 func approvalReqToProto(a *api.ApprovalRequest) *v1.ApprovalRequest {

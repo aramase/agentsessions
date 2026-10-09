@@ -33,8 +33,9 @@ var ErrReplayInvokedModel = errors.New("controller: replay invoked the model (I1
 // harness leaves recorded effects unconsumed.
 var ErrReplayDiverged = errors.New("controller: replay diverged from the journal")
 
-// ErrInvalidExecutionLog is returned when execution-scoped events lack valid execution identity
-// or a start marker cannot establish a complete invocation. Replay and resume reject such turns
+// ErrInvalidExecutionLog is returned when modern execution-scoped events lack execution identity,
+// a legacy-to-modern boundary is ambiguous, or a start marker cannot establish a complete
+// invocation. Replay and resume reject such turns
 // before running the harness.
 var ErrInvalidExecutionLog = errors.New("controller: invalid execution log")
 
@@ -53,8 +54,9 @@ var ErrHarnessVersionMismatch = errors.New("controller: harness version does not
 // unresolved tool intent. Re-driving it under the child's UID could repeat the parent's effect.
 var ErrInheritedToolIntent = fmt.Errorf("%w: inherited tool intent cannot be resumed", ErrInvalidExecutionLog)
 
-// ErrMissingSessionUID rejects a tool executor without a session-scoped authorization/dedup identity.
-var ErrMissingSessionUID = errors.New("controller: tool executor requires a session UID")
+// ErrMissingSessionUID rejects an unscoped tool executor or a selected legacy harness invocation
+// whose compatibility identity cannot be scoped to a session.
+var ErrMissingSessionUID = errors.New("controller: a session UID is required")
 
 // ErrIncompleteInvocation identifies an unfinished trailing turn whose inputs were only partly
 // committed. It wraps ErrInvalidExecutionLog; the caller can retry with Exec and all inputs.
@@ -248,6 +250,12 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		history = append(history, r.Event)
 	}
 
+	// Reject an already-ambiguous legacy/modern boundary. The start marker below explicitly
+	// supersedes an unfinished pure legacy tail, just as the old writer allowed a new Exec.
+	if _, err := legacyPrefix(history); err != nil {
+		return err
+	}
+
 	// Capture the actual supplied harness's advertised contract, not caller-provided version data.
 	// Failure leaves no invocation or inputs to recover.
 	desc, err := describeHarness(ctx, har)
@@ -313,9 +321,10 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 	return err
 }
 
-// Replay reconstructs the session by re-executing each completed execution with its recorded
-// effects. It asserts the model is never invoked (I1) and that each recorded model-input hash
-// matches (I0), returning the reconstructed outputs for an equivalence check. It is read-only.
+// Replay reconstructs the session by re-executing each completed modern execution with recorded
+// effects. Pure legacy logs use v0.1.2's whole-log Run, even if unfinished. A modern boundary
+// abandons the legacy tail after its last END for replay only; modern history retains it. Replay asserts
+// the model is never invoked (I1) and each recorded model-input hash matches (I0). It is read-only.
 func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []string, err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	var recordCount, effectCount int
@@ -343,25 +352,48 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 		return nil, err
 	}
 
-	// Check every completed turn before the first Run. A later incompatible version must not
-	// allow even the compatible prefix to execute against the supplied harness.
-	completed := make([]recordedExecution, 0, len(executions))
+	// Check every selected turn before the first Run. A later incompatible version must not
+	// allow even the compatible prefix to execute against the supplied harness. Legacy replay
+	// projections intentionally lack a completed flag and retain whole-log replay semantics.
+	selected := make([]recordedExecution, 0, len(executions))
 	for _, execution := range executions {
-		if execution.completed {
-			completed = append(completed, execution)
+		if execution.completed || execution.legacyEnd > 0 {
+			selected = append(selected, execution)
 		}
 	}
-	if err := c.checkHarness(ctx, har, completed); err != nil {
+	if err := c.checkHarness(ctx, har, selected); err != nil {
 		return nil, err
 	}
 
 	before := c.liveModelCalls
-	for _, execution := range completed {
+	for _, execution := range selected {
+		legacy := execution.legacyEnd > 0
 		effectCount += len(execution.stream)
-		sink := &replaySink{stream: execution.stream}
+		sink := &replaySink{stream: execution.stream, legacy: legacy}
+		history := events[:execution.start]
+		invocationID := execution.id
+		if legacy {
+			history = events[:execution.legacyEnd]
+			// Whole-log legacy Replay has one invocation. Its first INPUT is a stable anchor;
+			// inputless legacy logs fall back to the first execution-scoped legacy record.
+			anchor := recs[0]
+			for _, record := range recs[:execution.legacyEnd] {
+				if record.Event.Kind == api.EventInput {
+					anchor = record
+					break
+				}
+				if anchor.Event.Kind == api.EventLifecycle {
+					anchor = record
+				}
+			}
+			invocationID, err = c.legacyExecutionID(anchor)
+			if err != nil {
+				return nil, err
+			}
+		}
 		start := &api.Start{
-			ExecutionID:   execution.id,
-			History:       events[:execution.start],
+			ExecutionID:   invocationID,
+			History:       history,
 			Inputs:        execution.inputs,
 			Config:        execution.config,
 			ResumeFromSeq: execution.resumeFromSeq,

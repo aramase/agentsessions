@@ -7,9 +7,9 @@ import (
 	"github.com/aramase/agentsessions/api"
 )
 
-// recordedExecution is the replay projection of one Harness.Run. Its first event establishes the
-// exact History boundary; every execution-scoped event carries id, so no content-based inference
-// is needed.
+// recordedExecution is the replay projection of one modern Harness.Run, or the whole legacy
+// prefix. Modern identities establish exact turn boundaries; legacyEnd retains the old whole-log
+// boundary without inventing an identity or inferring multiple invocations.
 type recordedExecution struct {
 	id             string
 	start          int
@@ -23,15 +23,39 @@ type recordedExecution struct {
 	inputRecords   int
 	harness        string
 	harnessVersion string
+	legacyEnd      int
 }
 
-// recordedExecutions groups execution-scoped events by ID in first-seen journal order. Lifecycle
-// events are session-scoped and carry no ID.
+// recordedExecutions validates identities and completed modern invocations before any harness
+// runs. It preserves an ID-less legacy prefix, then groups modern events by ID in first-seen order.
+// Lifecycle is session-scoped.
 func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
+	prefixEnd, err := legacyPrefix(events)
+	if err != nil {
+		return nil, err
+	}
 	var executions []recordedExecution
+	if prefixEnd > 0 {
+		replayEnd := prefixEnd
+		if prefixEnd < len(events) {
+			// A new modern turn abandons an incomplete/failed legacy tail. Replay only the
+			// last successful whole-log prefix; never infer separate legacy invocations.
+			// Modern Start.History still uses the original, untrimmed events.
+			replayEnd = 0
+			for i, event := range events[:prefixEnd] {
+				if event.Kind == api.EventEnd {
+					replayEnd = i + 1
+				}
+			}
+		}
+		if replayEnd > 0 {
+			executions = append(executions, legacyReplayExecution(events[:replayEnd]))
+		}
+	}
 	byID := make(map[string]int)
 
-	for i, event := range events {
+	for i := prefixEnd; i < len(events); i++ {
+		event := events[i]
 		if event.Kind == api.EventLifecycle {
 			continue
 		}
@@ -86,8 +110,8 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 	return executions, nil
 }
 
-// pendingExecution selects the same trailing turn for routing queries and Resume. Journal order
-// is first-seen execution order, not the execution ID on the final record.
+// pendingExecution selects the trailing replay projection. Journal order is first-seen
+// execution order, not the execution ID on the final record.
 func pendingExecution(executions []recordedExecution) (*recordedExecution, error) {
 	if len(executions) == 0 || executions[len(executions)-1].completed {
 		return nil, nil
@@ -95,6 +119,24 @@ func pendingExecution(executions []recordedExecution) (*recordedExecution, error
 	execution := &executions[len(executions)-1]
 	if err := execution.validateInputs(); err != nil {
 		return nil, err
+	}
+	return execution, nil
+}
+
+// pendingResumeExecution is shared by routing and recovery: a whole-log legacy replay
+// projection must be replaced by v0.1.2's last-INPUT recovery projection before either selects
+// an invocation. Legacy END/ERROR may make that replacement a completed no-op.
+func pendingResumeExecution(events []api.Event, executions []recordedExecution) (*recordedExecution, error) {
+	execution, err := pendingExecution(executions)
+	if err != nil || execution == nil {
+		return nil, err
+	}
+	if execution.legacyEnd > 0 {
+		legacy := legacyResumeExecution(events[:execution.legacyEnd])
+		if legacy.completed {
+			return nil, nil
+		}
+		execution = &legacy
 	}
 	return execution, nil
 }

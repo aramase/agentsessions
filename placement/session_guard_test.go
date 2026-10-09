@@ -109,7 +109,7 @@ func TestRegistryResumeGuardDrainsAfterRoutingErrors(t *testing.T) {
 		{"incomplete invocation", &api.Event{Kind: api.EventExecutionStart, ExecutionID: "pending", ExecutionStart: &api.ExecutionStart{InputCount: &one}}, "default", controller.ErrIncompleteInvocation},
 		{"unserved recorded name", &api.Event{Kind: api.EventExecutionStart, ExecutionID: "pending", ExecutionStart: &api.ExecutionStart{InputCount: &zero, Harness: "unserved"}}, "default", ErrRecordedHarnessNotServed},
 		{"unknown stored default", nil, "unserved", ErrUnknownHarness},
-		{"invalid journal", &api.Event{Kind: api.EventInput, Message: api.TextMessage("user", "missing identity")}, "default", controller.ErrInvalidExecutionLog},
+		{"invalid journal", &api.Event{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: &zero}}, "default", controller.ErrInvalidExecutionLog},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := New(nil, nil)

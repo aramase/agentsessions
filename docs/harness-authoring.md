@@ -107,8 +107,23 @@ legacy behavior. Placement/runtime restoration can still precede controller vali
 
 Executions without a start marker use empty config and a zero cursor. This includes legacy logs:
 older discarded non-empty config/cursors are irrecoverable, so those executions may fail deterministic
-reconstruction if their original behavior depended on the missing values. See
-[durable execution invocation](concepts.md#durable-execution-invocation) for the journal layout.
+reconstruction if their original behavior depended on the missing values. Released v0.1.2
+journals also omit execution IDs. Their controller Replay retains the old single invocation with
+all legacy inputs and the entire legacy journal as `History`; it does not infer per-turn boundaries,
+so multi-turn legacy replay retains its historical limitations. Legacy Resume selects only the
+last `INPUT` and continues the invocation without adding an execution ID to journal records.
+`Start.ExecutionID` instead carries a stable `legacy-<sha256>` compatibility token, derived from
+session UID, original record position and canonical content; the wire uses it for correlation.
+Retries of the same legacy turn reuse it, but different sessions do not. It is never journaled as
+an event ID. Direct legacy replay/recovery callers must supply a nonempty `WithSessionUID`;
+otherwise the selected invocation returns `ErrMissingSessionUID` before running the harness.
+A legacy END or ERROR finishes the turn, making Resume a no-op. A new Exec may also supersede an
+unfinished legacy tail without rewriting it: EXECUTION_START establishes the modern boundary.
+Mixed Replay skips that abandoned tail while retaining whole-log replay of the complete legacy
+prefix; modern History still contains the full original legacy events. Modern turns still require
+execution IDs, and ID-bearing events without a start marker need a finished legacy boundary. See
+[durable execution invocation](concepts.md#durable-execution-invocation) for detection rules and
+the journal layout.
 Do not put credentials in config: it is durable journal content, not a secret channel.
 
 ## The event sink
@@ -155,7 +170,7 @@ replay path**, and replay is exact for free.
 
 ## The rules that keep replay exact
 
-Five rules. Follow them and every determinism guarantee holds across process death, resume, and fork.
+Six rules. Follow them and every determinism guarantee holds across process death, resume, and fork.
 
 ### Rule 1: all model calls go through `sink.Model`
 
@@ -240,7 +255,8 @@ Fork still copies the requested prefix, but Resume returns `controller.ErrInheri
 before running the harness or appending any event if the unfinished execution has inherited tool
 intents still unresolved at the journal head. This includes legacy turns without `EXECUTION_START`.
 `Sessions.Resume` reports `FAILED_PRECONDITION`: fork at or after the matching `TOOL_RESULT`, or
-Exec a new turn. Completed inherited pairs are served from the journal without invoking the executor,
+Exec a new turn. A new modern start marker can supersede an unfinished legacy prefix without
+re-driving its inherited intent. Completed inherited pairs are served from the journal without invoking the executor,
 including legacy results recorded after the fork marker. An intent first written by the child after
 the fork is not inherited and can be re-driven under the child's UID.
 
@@ -271,6 +287,27 @@ If your provider returns opaque reasoning parts, return them inside `ModelRespon
 set `Capabilities.ReasoningReplay`. The host records them verbatim and replays them, so reasoning
 continuity survives resume and fork (I2) without a memory snapshot. `agentsessions` never interprets the
 opaque bytes; provider specifics stay inside them.
+
+### Rule 6: carry the tool loop in the model request
+
+Offer tools on `ModelRequest.Tools`, and constrain them with `ModelRequest.ToolChoice` if you need to.
+A completion that asks for tools returns them as `ToolCall` parts in `ModelResponse.Message`. Feed each
+result back to the model as a `ToolResult` part, in a message with role `tool`, whose `ID` is the call's
+`ID`. Arguments are a structured object of JSON values, not a JSON string.
+
+Running the call is still Rule 4: copy the part's `ToolCall` (`tc := *p.ToolCall`), set `Mediation` and
+`IdempotencyKey` on the copy, and pass the copy to `sink.ToolCall`; or run it yourself and `sink.Report`
+the result. Never change the `ToolCall` (or its `Args`) in the returned message in place: the message
+can share memory with the completion the host already recorded, so an in-place change alters a recorded
+event after it was hashed, and the in-memory log then fails `Verify`. A tool your harness runs itself
+runs again when the turn is replayed; use `CONTROLLER_MEDIATED` for a tool that must not.
+
+The input hash (I0) covers the tools, the tool choice, and every tool part, so on replay build the next
+request from the recorded completion exactly as you did live. A changed definition, choice, or argument
+fails the I0 check.
+
+The bundled OpenAI-compatible adapter (`model/openai`) does not map tools yet. It refuses a request that
+carries tools, a tool choice, or a tool part instead of sending less than the log records.
 
 ## Reference harness 1: stateless replay (`harness/echoagent`)
 
@@ -613,3 +650,6 @@ actually honor it, and what makes the system degrade honestly instead of silentl
       `REQUIRES_MEMORY_SNAPSHOT` and never rebuilt from `History`.
 - [ ] Side-effecting tools set an `IdempotencyKey` and use the right mediation tier.
 - [ ] Opaque reasoning parts are returned verbatim, with `ReasoningReplay` set.
+- [ ] Tools ride `ModelRequest.Tools`, and tool calls and results ride as parts rebuilt from the
+      recorded completion.
+- [ ] A returned `ToolCall` part is copied before `Mediation` and `IdempotencyKey` are set on it.

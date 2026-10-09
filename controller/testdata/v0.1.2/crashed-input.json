@@ -1,0 +1,41 @@
+[
+  {
+    "Seq": 1,
+    "PrevHash": "",
+    "Hash": "62daf59c5c1e5062b1b0d47d5665b34aa52bf7ed0ca8a0b016af2c9827b5d8f6",
+    "Fence": 1,
+    "Event": {
+      "ExecutionID": "",
+      "Timestamp": "0001-01-01T00:00:00Z",
+      "SchemaVersion": 0,
+      "Kind": "INPUT",
+      "Message": {
+        "Role": "user",
+        "Parts": [
+          {
+            "Text": {
+              "Text": "hello"
+            },
+            "File": null,
+            "Data": null,
+            "Reasoning": null
+          }
+        ]
+      },
+      "ModelCall": null,
+      "ToolCall": null,
+      "Result": null,
+      "Approval": null,
+      "ApprovalResult": null,
+      "Usage": null,
+      "Lifecycle": null,
+      "End": null,
+      "Err": null,
+      "Actor": {
+        "Principal": "",
+        "Issuer": "",
+        "Subject": ""
+      }
+    }
+  }
+]

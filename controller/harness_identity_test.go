@@ -83,6 +83,21 @@ func TestResumeInvocationSelectsLastFirstSeenExecution(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatalf("query changed journal: %v", err)
 	}
+	c, err := controller.New(log, nil, controller.WithHarness("alias"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := 0
+	har := identityHarness{desc: api.Descriptor{ID: "descriptor-id", Version: "build-sha"}, run: func(_ context.Context, start *api.Start, _ api.EventSink) error {
+		runs++
+		if start.ExecutionID != "pending" || !bytes.Equal(start.Config, []byte("opaque")) || start.ResumeFromSeq != 37 || !reflect.DeepEqual(messageTexts(start.Inputs), []string{"hello"}) || len(start.History) != 1 {
+			t.Fatalf("Resume selected a different invocation from the routing query: %#v", start)
+		}
+		return nil
+	}}
+	if resumed, err := c.Resume(t.Context(), har); !resumed || err != nil || runs != 1 {
+		t.Fatalf("Resume = %v, %v; runs=%d", resumed, err, runs)
+	}
 }
 
 func TestResumeInvocationNoMarkerOrNoPendingTurn(t *testing.T) {

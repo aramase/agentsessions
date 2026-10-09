@@ -63,7 +63,9 @@ type Capabilities struct {
 
 // Start is the per-execution invocation the host sends to the harness.
 type Start struct {
-	ExecutionID   string    // host-assigned identity of this Run; shared by its events and deltas
+	// ExecutionID identifies this Run on the wire. Modern runs share it with journal events;
+	// legacy runs use a session-scoped legacy- compatibility token that is never journaled.
+	ExecutionID   string
 	Config        []byte    // opaque per-execution config; journaled verbatim and restored on replay/resume
 	History       []Event   // replay context; empty if the sandbox was memory-restored
 	Inputs        []Message // invocation inputs; originals are restored on controller replay/resume
@@ -112,14 +114,49 @@ type EventSink interface {
 }
 
 // ModelRequest is a model call: the message context + model selection.
+//
+// The controller hashes the JSON encoding of ModelRequest for the I0 check, so fields added after
+// the first three carry `json:",omitempty"`: a request that does not use them hashes exactly as it
+// did before they existed, and logs recorded earlier keep replaying.
 type ModelRequest struct {
 	Model    string
 	Messages []Message // context (history + new input) sent to the model
 	Params   map[string]string
+	// Tools are the definitions offered to the model on this call. Order is significant.
+	Tools []ToolDefinition `json:",omitempty"`
+	// ToolChoice constrains whether and which tool the model calls. Nil means the provider default.
+	ToolChoice *ToolChoice `json:",omitempty"`
 }
 
-// ModelResponse is the model's completion: an assistant message (which may carry text and
-// opaque reasoning parts) plus usage.
+// ToolDefinition is a tool offered to a model on one call, aligned with an MCP Tool. ToolSpec
+// declares a tool and its default mediation to the host; ToolDefinition is what the model sees.
+type ToolDefinition struct {
+	Name        string
+	Description string
+	InputSchema map[string]any // JSON Schema object; JSON-shaped values only (see package wire)
+}
+
+// ToolChoiceMode constrains whether the model calls a tool.
+type ToolChoiceMode string
+
+const (
+	// ToolChoiceAuto: the model decides whether to call a tool.
+	ToolChoiceAuto ToolChoiceMode = "AUTO"
+	// ToolChoiceNone: the model must not call a tool.
+	ToolChoiceNone ToolChoiceMode = "NONE"
+	// ToolChoiceRequired: the model must call at least one tool.
+	ToolChoiceRequired ToolChoiceMode = "REQUIRED"
+)
+
+// ToolChoice constrains whether and which tool the model calls. An empty Mode is the provider
+// default. Name forces one specific tool and is meaningful only with ToolChoiceRequired.
+type ToolChoice struct {
+	Mode ToolChoiceMode
+	Name string
+}
+
+// ModelResponse is the model's completion: an assistant message (which may carry text, opaque
+// reasoning, and tool call parts) plus usage.
 type ModelResponse struct {
 	Message Message
 	Usage   Usage

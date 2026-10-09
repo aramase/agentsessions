@@ -52,17 +52,35 @@ START_GOLDENS = [
      "f06c25ee5b3673ee23b8f91883c7f1c6c5682d94986caf5bc067908a61b2ac4f"),
 ]
 
+# An OUTPUT whose assistant message carries a tool_call part (canon.toolCallGoldenEvent). Its
+# arguments are a google.protobuf.Struct, so this pins how numbers, booleans, nested objects and lists
+# in a Struct canonicalize: proto3-JSON writes them as plain JSON values.
+TOOL_CALL_GOLDEN = (
+    {"execution_id": "exec-tool", "schema_version": 1, "ts": "2023-11-14T22:13:20Z",
+     "kind": "EVENT_OUTPUT",
+     "message": {"role": "assistant", "parts": [
+         {"text": {"text": "checking"}},
+         {"tool_call": {"id": "call-1", "tool": "get_weather", "args": {
+             "city": "Paris", "days": 2, "detail": True, "ratio": 1.5,
+             "units": {"temp": "C"}, "tags": ["a", "b"]}}},
+     ]},
+     "actor": {"principal": "agent://a", "issuer": "entra", "subject": "sub-1"}},
+    "e8911826d1370b0b96f3d3a1efaf63bc20f3808cdc189d937b5155ac3f8d509c",
+)
+
 EVENT_TYPE = "agentsessions.v1.Event"
 
 
 def _stdlib_jcs(value):
-    # RFC 8785 JCS reduces to this for our golden value set (ASCII strings, a small int, ASCII keys):
-    # recursively sorted keys, compact separators, no ASCII escaping.
+    # RFC 8785 JCS reduces to this for our golden value set (ASCII strings, small ints, a float with
+    # an exact short decimal form, booleans, ASCII keys): recursively sorted keys, compact separators,
+    # no ASCII escaping.
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
 def golden_check():
-    for event, expected in [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS]:
+    vectors = [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS, TOOL_CALL_GOLDEN]
+    for event, expected in vectors:
         record = {"event": event, "prev_hash": "", "seq": "1"}
         digest = hashlib.sha256(_stdlib_jcs(record)).hexdigest()
         print("computed:", digest)
@@ -70,7 +88,7 @@ def golden_check():
         if digest != expected:
             print("MISMATCH: non-Go verifier did NOT reproduce the golden content_hash", file=sys.stderr)
             return 1
-    print("OK: non-Go (Python) verifier reproduced all 4 Go golden content_hash vectors (stdlib)")
+    print(f"OK: non-Go (Python) verifier reproduced all {len(vectors)} Go golden content_hash vectors (stdlib)")
     return 0
 
 

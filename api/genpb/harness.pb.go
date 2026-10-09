@@ -659,7 +659,7 @@ func (*ControllerFrame_Tool) isControllerFrame_Frame() {}
 func (*ControllerFrame_Model) isControllerFrame_Frame() {}
 
 // ModelResult is a model completion served to the harness (live invocation or replay).
-// The Message carries text + opaque reasoning parts, recorded verbatim for continuity.
+// The Message carries text, opaque reasoning, and tool_call parts, recorded verbatim for continuity.
 type ModelResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Message       *Message               `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
