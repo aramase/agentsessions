@@ -166,3 +166,47 @@ func TestChainBinding(t *testing.T) {
 		t.Fatalf("child hash not stable: %s != %s", again, child)
 	}
 }
+
+// toolCallGoldenEvent is an OUTPUT whose assistant message carries a tool_call part with structured
+// arguments. Its hash is an interop vector shared with hack/verify_chain.py: a Struct's numbers, nested
+// objects and lists must canonicalize the same way in every implementation.
+func toolCallGoldenEvent() api.Event {
+	return api.Event{
+		ExecutionID:   "exec-tool",
+		SchemaVersion: 1,
+		Timestamp:     time.Unix(1_700_000_000, 0).UTC(),
+		Kind:          api.EventOutput,
+		Message: &api.Message{Role: "assistant", Parts: []api.Part{
+			{Text: &api.TextPart{Text: "checking"}},
+			{ToolCall: &api.ToolCall{ID: "call-1", Tool: "get_weather", Args: map[string]any{
+				"city": "Paris", "days": 2, "detail": true, "ratio": 1.5,
+				"units": map[string]any{"temp": "C"}, "tags": []any{"a", "b"},
+			}}},
+		}},
+		Actor: api.IdentityRef{Principal: "agent://a", Issuer: "entra", Subject: "sub-1"},
+	}
+}
+
+func TestToolCallPartGoldenVector(t *testing.T) {
+	got, err := canon.Record("", 1, toolCallGoldenEvent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"event":{"actor":{"issuer":"entra","principal":"agent://a","subject":"sub-1"},"execution_id":"exec-tool","kind":"EVENT_OUTPUT","message":{"parts":[{"text":{"text":"checking"}},{"tool_call":{"args":{"city":"Paris","days":2,"detail":true,"ratio":1.5,"tags":["a","b"],"units":{"temp":"C"}},"id":"call-1","tool":"get_weather"}}],"role":"assistant"},"schema_version":1,"ts":"2023-11-14T22:13:20Z"},"prev_hash":"","seq":"1"}`
+	if string(got) != want {
+		t.Fatalf("canonical tool_call output = %s, want %s", got, want)
+	}
+	hash, err := canon.HashRecord("", 1, toolCallGoldenEvent())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantHash = "e8911826d1370b0b96f3d3a1efaf63bc20f3808cdc189d937b5155ac3f8d509c"
+	if hash != wantHash {
+		t.Fatalf("tool_call output hash = %s, want %s (also update hack/verify_chain.py)", hash, wantHash)
+	}
+	// The vector must survive the wire: a harness's tool_call part reaches the log through it.
+	again, err := canon.HashRecord("", 1, wire.EventFromProto(wire.EventToProto(toolCallGoldenEvent())))
+	if err != nil || again != hash {
+		t.Fatalf("hash after a wire round-trip = %s, %v; want %s", again, err, hash)
+	}
+}

@@ -48,9 +48,10 @@ const DefaultPath = "/chat/completions"
 // request into a session that can never be advanced.
 const defaultTimeout = 2 * time.Minute
 
-// ErrUnsupportedPart reports content this provider cannot represent. It is returned rather than
-// dropped: the log records the request the harness built, so silently sending less than that would
-// make the journal describe a call that never happened, and replay would reproduce the wrong thing.
+// ErrUnsupportedPart reports request content this provider cannot represent: a content part, or the
+// tools and tool choice offered to the model. It is returned rather than dropped: the log records
+// the request the harness built, so silently sending less than that would make the journal describe
+// a call that never happened, and replay would reproduce the wrong thing.
 var ErrUnsupportedPart = errors.New("openai: unsupported content part")
 
 // Client calls an OpenAI-compatible Chat Completions endpoint.
@@ -271,6 +272,11 @@ func (c *Client) buildRequest(req api.ModelRequest, stream bool) (string, []byte
 		// harnesses run against a real endpoint without every one of them hard-coding a model.
 		model = c.model
 	}
+	// Tool definitions are not mapped to this endpoint yet. Sending the call without them would
+	// let the model answer a request the harness never made while the journal hashes the tools in.
+	if len(req.Tools) > 0 || req.ToolChoice != nil {
+		return model, nil, fmt.Errorf("%w: tool definitions and tool choice are not supported yet", ErrUnsupportedPart)
+	}
 	msgs, err := toChatMessages(req.Messages)
 	if err != nil {
 		return model, nil, err
@@ -320,8 +326,9 @@ func statusError(model string, code int, raw []byte) error {
 // toChatMessages converts the neutral content model to chat messages.
 //
 // Reasoning parts are dropped on the way OUT by design: they are opaque provider state recorded for
-// replay continuity (I2), not input this endpoint accepts. File and data parts are refused instead,
-// because dropping them would change what the model saw while the journal still claims otherwise.
+// replay continuity (I2), not input this endpoint accepts. Every other part this adapter cannot map
+// (file, data, tool call, tool result, or a kind it does not know) is refused instead, because
+// dropping it would change what the model saw while the journal still claims otherwise.
 func toChatMessages(msgs []api.Message) ([]chatMessage, error) {
 	out := make([]chatMessage, 0, len(msgs))
 	for i := range msgs {
@@ -337,6 +344,12 @@ func toChatMessages(msgs []api.Message) ([]chatMessage, error) {
 				return nil, fmt.Errorf("%w: file parts are not supported yet", ErrUnsupportedPart)
 			case p.Data != nil:
 				return nil, fmt.Errorf("%w: data parts are not supported yet", ErrUnsupportedPart)
+			case p.ToolCall != nil:
+				return nil, fmt.Errorf("%w: tool call parts are not supported yet", ErrUnsupportedPart)
+			case p.ToolResult != nil:
+				return nil, fmt.Errorf("%w: tool result parts are not supported yet", ErrUnsupportedPart)
+			default:
+				return nil, fmt.Errorf("%w: part with no known content", ErrUnsupportedPart)
 			}
 		}
 		role := m.Role

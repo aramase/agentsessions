@@ -159,8 +159,12 @@ func TestModelDoesNotInventReasoning(t *testing.T) {
 // asked for while the journal records the full request, so replay would reproduce the wrong call.
 func TestModelRejectsUnsupportedParts(t *testing.T) {
 	for name, part := range map[string]api.Part{
-		"file": {File: &api.FilePart{MIME: "image/png", Bytes: []byte{1}}},
-		"data": {Data: map[string]any{"k": "v"}},
+		"file":        {File: &api.FilePart{MIME: "image/png", Bytes: []byte{1}}},
+		"data":        {Data: map[string]any{"k": "v"}},
+		"tool call":   {ToolCall: &api.ToolCall{ID: "c1", Tool: "get_weather", Args: map[string]any{"city": "Paris"}}},
+		"tool result": {ToolResult: &api.ToolResult{ID: "c1", Content: []api.Part{{Text: &api.TextPart{Text: "sunny"}}}}},
+		// A part with no known content is what a newer peer's part kind decodes to on the wire.
+		"unknown": {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var called atomic.Bool
@@ -176,6 +180,38 @@ func TestModelRejectsUnsupportedParts(t *testing.T) {
 			}
 			if called.Load() {
 				t.Fatal("sent a request despite unsupported content")
+			}
+		})
+	}
+}
+
+// Tools offered to the model are refused until this adapter maps them. Sending the call without them
+// would let the model answer a request the harness never made while the I0 hash covers the tools.
+func TestModelRejectsTools(t *testing.T) {
+	for name, req := range map[string]api.ModelRequest{
+		"tools":       {Tools: []api.ToolDefinition{{Name: "get_weather", InputSchema: map[string]any{"type": "object"}}}},
+		"tool choice": {ToolChoice: &api.ToolChoice{Mode: api.ToolChoiceNone}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var called atomic.Bool
+			c := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				called.Store(true)
+				_, _ = io.WriteString(w, completion("x"))
+			})
+			req.Messages = []api.Message{*api.TextMessage("user", "weather?")}
+			for _, stream := range []bool{false, true} {
+				var err error
+				if stream {
+					_, err = c.StreamModel(t.Context(), req, func(string) {})
+				} else {
+					_, err = c.Model(t.Context(), req)
+				}
+				if !errors.Is(err, openai.ErrUnsupportedPart) || !strings.Contains(err.Error(), "tool") {
+					t.Fatalf("stream=%v: err = %v, want ErrUnsupportedPart naming tools", stream, err)
+				}
+			}
+			if called.Load() {
+				t.Fatal("sent a request despite tools it cannot represent")
 			}
 		})
 	}

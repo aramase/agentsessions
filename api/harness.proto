@@ -82,7 +82,7 @@ message ControllerFrame {
 }
 
 // ModelResult is a model completion served to the harness (live invocation or replay).
-// The Message carries text + opaque reasoning parts, recorded verbatim for continuity.
+// The Message carries text, opaque reasoning, and tool_call parts, recorded verbatim for continuity.
 message ModelResult {
   Message message = 1;
   Usage usage = 2;
