@@ -69,8 +69,8 @@ type HarnessRegistry struct {
 // reserves the registry's static and reserved names in the store, as ReserveStaticHarnessNames does,
 // rather than letting one name mean two harnesses.
 //
-// Registrations are loaded once, here. A registration another process makes in a shared database
-// is served by this one after it restarts.
+// Registrations are loaded at startup. A registration another process makes in a shared database
+// is served after this host restarts, or if RegisterHarness loads its identical compatible spec.
 func NewHarnessRegistry(store *sqlitelog.Store, registry *placement.Registry, factory PlacerFactory) (*HarnessRegistry, error) {
 	if store == nil || registry == nil || factory == nil {
 		return nil, errors.New("session: NewHarnessRegistry needs a store, a registry and a factory")
@@ -558,7 +558,7 @@ func (h *HarnessRegistry) registrationProto(rec sqlitelog.HarnessRecord) *v1.Har
 		if errors.Is(err, placement.ErrHarnessUnservable) {
 			out.UnservableReason = err.Error()
 		} else {
-			out.UnservableReason = "registration is not loaded on this host; restart this host to serve it"
+			out.UnservableReason = "registration is not loaded on this host; restart this host or register the identical compatible spec locally to serve it"
 		}
 	}
 	return out

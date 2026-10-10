@@ -95,12 +95,16 @@ message HarnessRegistration {
   HarnessDescriptor observed = 8;
   // Set only when GetHarnessRequest.observe is true and Describe failed: why.
   string observe_error = 9;
-  // Nonempty if this host cannot serve a registered harness (including a row added by another
-  // host after startup, which requires a restart here). The registration remains visible and its
-  // name reserved, ACTIVE or RETIRED; Sessions operations needing it fail FAILED_PRECONDITION.
-  // Strict decoding refuses unsupported stored fields and enum values, rather than accepting a
-  // partial spec. This is a host-local status, never stored: another compatible host may serve the
-  // same registration. Do not match on this human-readable explanation.
+  // Nonempty if this host cannot serve a stored registration. The row remains visible and its
+  // name reserved in the journal, ACTIVE or RETIRED. A registration isolated during this host's
+  // startup load remains known locally; Sessions operations needing it fail FAILED_PRECONDITION.
+  // A row added by another host after startup is visible here but unknown to this host's Sessions
+  // routing until restart or a local RegisterHarness with the identical compatible spec; selecting
+  // it for Create or auto-create Exec fails INVALID_ARGUMENT until loaded. A pending recorded
+  // Resume can still fail FAILED_PRECONDITION under the existing recovery rule. Strict decoding
+  // refuses unsupported stored fields and enum values, rather than accepting a partial spec.
+  // This is a host-local status, never stored: another compatible host may serve the same row.
+  // Do not match on this human-readable explanation.
   string unservable_reason = 10;
 }
 
@@ -108,7 +112,8 @@ enum RegisterOutcome {
   REGISTER_OUTCOME_UNSPECIFIED = 0;
   // The name was free; the registration is new and ACTIVE.
   REGISTER_OUTCOME_CREATED = 1;
-  // The name already held this spec and was ACTIVE. Nothing changed.
+  // The name already held this spec and was ACTIVE. Stored registration unchanged; a host that
+  // had not loaded a row added since startup may now serve it locally.
   REGISTER_OUTCOME_UNCHANGED = 2;
   // The name already held this spec and was RETIRED. It is ACTIVE again.
   REGISTER_OUTCOME_REACTIVATED = 3;
@@ -162,8 +167,9 @@ message RetireHarnessRequest {
 service HarnessRegistry {
   // Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec,
   // or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve
-  // a new placement. An identical repeat on a locally unservable stored registration can return
+  // a new placement. An identical repeat of a registration isolated during startup returns
   // UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it.
+  // An identical compatible repeat of a row added since startup can load it locally without restart.
   rpc RegisterHarness(RegisterHarnessRequest) returns (RegisterHarnessResponse);
   // NOT_FOUND for a name that is neither STATIC nor registered.
   rpc GetHarness(GetHarnessRequest) returns (HarnessRegistration);

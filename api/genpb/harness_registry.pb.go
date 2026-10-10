@@ -142,7 +142,8 @@ const (
 	RegisterOutcome_REGISTER_OUTCOME_UNSPECIFIED RegisterOutcome = 0
 	// The name was free; the registration is new and ACTIVE.
 	RegisterOutcome_REGISTER_OUTCOME_CREATED RegisterOutcome = 1
-	// The name already held this spec and was ACTIVE. Nothing changed.
+	// The name already held this spec and was ACTIVE. Stored registration unchanged; a host that
+	// had not loaded a row added since startup may now serve it locally.
 	RegisterOutcome_REGISTER_OUTCOME_UNCHANGED RegisterOutcome = 2
 	// The name already held this spec and was RETIRED. It is ACTIVE again.
 	RegisterOutcome_REGISTER_OUTCOME_REACTIVATED RegisterOutcome = 3
@@ -429,12 +430,16 @@ type HarnessRegistration struct {
 	Observed *HarnessDescriptor `protobuf:"bytes,8,opt,name=observed,proto3" json:"observed,omitempty"`
 	// Set only when GetHarnessRequest.observe is true and Describe failed: why.
 	ObserveError string `protobuf:"bytes,9,opt,name=observe_error,json=observeError,proto3" json:"observe_error,omitempty"`
-	// Nonempty if this host cannot serve a registered harness (including a row added by another
-	// host after startup, which requires a restart here). The registration remains visible and its
-	// name reserved, ACTIVE or RETIRED; Sessions operations needing it fail FAILED_PRECONDITION.
-	// Strict decoding refuses unsupported stored fields and enum values, rather than accepting a
-	// partial spec. This is a host-local status, never stored: another compatible host may serve the
-	// same registration. Do not match on this human-readable explanation.
+	// Nonempty if this host cannot serve a stored registration. The row remains visible and its
+	// name reserved in the journal, ACTIVE or RETIRED. A registration isolated during this host's
+	// startup load remains known locally; Sessions operations needing it fail FAILED_PRECONDITION.
+	// A row added by another host after startup is visible here but unknown to this host's Sessions
+	// routing until restart or a local RegisterHarness with the identical compatible spec; selecting
+	// it for Create or auto-create Exec fails INVALID_ARGUMENT until loaded. A pending recorded
+	// Resume can still fail FAILED_PRECONDITION under the existing recovery rule. Strict decoding
+	// refuses unsupported stored fields and enum values, rather than accepting a partial spec.
+	// This is a host-local status, never stored: another compatible host may serve the same row.
+	// Do not match on this human-readable explanation.
 	UnservableReason string `protobuf:"bytes,10,opt,name=unservable_reason,json=unservableReason,proto3" json:"unservable_reason,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache

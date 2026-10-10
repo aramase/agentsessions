@@ -2,6 +2,8 @@ package session_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/canon"
 	"github.com/aramase/agentsessions/harness/echoagent"
 	"github.com/aramase/agentsessions/placement"
 	"github.com/aramase/agentsessions/runtime/local"
@@ -246,17 +249,45 @@ func TestStoredHarnessFactoryFailuresAreIsolated(t *testing.T) {
 	}
 }
 
-// A valid registration made on another host since startup is visible, but a host that has not
-// loaded it must not claim it can serve it or attempt to observe it.
+// A valid registration made on another host since startup is visible but not locally loaded.
+// The Sessions service treats the name as unknown until an identical compatible registration
+// loads it locally; that call need not restart the host or alter the immutable stored row.
 func TestStoredHarnessAddedSinceStartupIsNotLoaded(t *testing.T) {
+	ctx := context.Background()
 	h := startRegistryHost(t, filepath.Join(t.TempDir(), "journal.db"))
+	spec := remoteSpec("a:1")
+	canonical, err := canon.Proto(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(canonical))
 	if _, _, err := h.store.RegisterHarness(sqlitelog.HarnessRecord{
-		Name: "later", UID: "uid-later", Spec: `{"remote":{"address":"a:1"},"capabilities":{"resumability":"RESUMABILITY_STATELESS_REPLAY"}}`, SpecDigest: "later-digest",
+		Name: "later", UID: "uid-later", Spec: string(canonical), SpecDigest: digest,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := h.harnesses.GetHarness(context.Background(), &v1.GetHarnessRequest{Name: "later", Observe: true})
-	if err != nil || got.GetSpec() == nil || got.GetSpecDigest() != "later-digest" || !strings.Contains(got.GetUnservableReason(), "restart") || got.GetObserved() != nil || got.GetObserveError() == "" {
+	got, err := h.harnesses.GetHarness(ctx, &v1.GetHarnessRequest{Name: "later", Observe: true})
+	if err != nil || got.GetSpec() == nil || got.GetSpecDigest() != digest || !strings.Contains(got.GetUnservableReason(), "restart") || !strings.Contains(got.GetUnservableReason(), "register the identical compatible spec") || got.GetObserved() != nil || got.GetObserveError() == "" {
 		t.Fatalf("newly registered row projected as loaded: %v, %v", got, err)
+	}
+	if _, err := createOn(ctx, h.sessions, "later"); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Create on not-loaded row = %v, want InvalidArgument", err)
+	}
+	if err := execOn(ctx, h.sessions, "", "later"); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("auto Exec on not-loaded row = %v, want InvalidArgument", err)
+	}
+	if n := countSessionsOn(t, h.svc, "later"); n != 0 {
+		t.Fatalf("refused calls stored %d sessions on not-loaded row", n)
+	}
+	repeat := registerHarness(t, h, "later", spec)
+	if repeat.GetOutcome() != v1.RegisterOutcome_REGISTER_OUTCOME_UNCHANGED || repeat.GetHarness().GetMetadata().GetUid() != "uid-later" || repeat.GetHarness().GetSpecDigest() != digest || repeat.GetHarness().GetUnservableReason() != "" {
+		t.Fatalf("identical local registration did not load stored row: %v", repeat)
+	}
+	sess, err := createOn(ctx, h.sessions, "later")
+	if err != nil {
+		t.Fatalf("Create after identical registration: %v", err)
+	}
+	if outs := execOutputs(t, h.sessions, sess, "works", 0); len(outs) != 1 || outs[0] != "echo:works" {
+		t.Fatalf("locally loaded harness did not execute: %v", outs)
 	}
 }
