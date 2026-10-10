@@ -74,18 +74,9 @@ nor duplicates a row.
 Status fields reflect journal evidence:
 
 - `last_seq` is `MAX(seq)` over the log, so the cursor a listing reports is always the log's own.
-- `exec_state` on `GetSession` and `ListSessions` is derived through the returned `last_seq`.
-  The latest execution is selected by first-seen nonempty execution ID on non-lifecycle events;
-  late events for older IDs cannot select them again. An unfinished latest execution with an
-  unanswered `APPROVAL_REQUEST` reports `AWAITING`. Requests require an approval body and nonempty
-  execution and tool-call IDs. A later `APPROVAL_RESULT` with a result body and the same execution
-  and call IDs answers the request, whether approved or denied; a decision before the request
-  does not. `END` finishes the execution; `ERROR` and lifecycle records do not clear awaiting.
-  ID-bearing markerless histories work the same way. Other nonempty histories, including ID-less
-  legacy histories and interrupted turns without unanswered approvals, retain `COMPLETED`; empty
-  histories report `PENDING`. This is not a live execution probe. `CreateSession`, `Fork`,
-  `Suspend`, `Resume` and Exec's initial session frame retain the empty/nonempty fallback without
-  reading approval evidence. Poll `GetSession` or `ListSessions` for approval state.
+- `exec_state` reports unanswered approvals on `GetSession` and `ListSessions`; otherwise it is
+  `PENDING` for an empty history and `COMPLETED` for a nonempty one. It is not a live probe.
+  See [How exec_state is derived](#how-exec_state-is-derived) for the rules.
 - `compute_state` is a projection maintained in the same transaction that appends an event, since an
   event body is an opaque blob no query can filter on. It records **what the log implies about
   compute**, not a live probe of the backend. Any ordinary event moves a session to `LIVE`, because
@@ -94,12 +85,6 @@ Status fields reflect journal evidence:
   makes it visible in a listing before it has any compute. `LIVE` goes stale if the process behind
   it later died. A backend that can enumerate its own incarnations is the thing that would make this
   exact; reconciling against the runtime is not implemented.
-
-Approval reporting does not implement a gate or a decision RPC: `REQUIRES_APPROVAL` tool execution
-remains unsupported. The current correlation fields are execution ID and tool-call ID, not a unique
-request ID. If a call ID is reused within one execution, a stale duplicate decision cannot be
-distinguished from an answer to the new request. A copied unanswered fork request remains awaiting
-evidence in the child, not permission to execute the parent's inherited intent.
 
 A fork inherits the parent's `project`, `harness` and `model`, because those define the workload and
 a branch of a run is still that run. It does **not** inherit the parent's name. A name is a label the
@@ -121,6 +106,29 @@ identity, even an empty message, is rejected with `INVALID_ARGUMENT` before plac
 provisioning, or journal mutation. Leave it unset to fork; children do not inherit the parent's
 identity. This does not change `Session.identity`, which remains recorded provenance rather than
 authorization (see [security posture](security.md)).
+
+### How exec_state is derived
+
+- `GetSession` and `ListSessions` use only committed records through the returned `last_seq`,
+  never a live worker probe. Poll these RPCs for approval state.
+- The latest execution is the last nonempty `execution_id` first seen on a non-`LIFECYCLE` event.
+  Later records for older IDs do not select them again.
+- `EXEC_AWAITING` means that latest execution is unfinished and has an unanswered
+  `APPROVAL_REQUEST`. A request needs an approval body and nonempty execution and tool-call IDs;
+  missing IDs or bodies do not count.
+- A later `APPROVAL_RESULT` with a result body and matching `execution_id` and `tool_call_id`
+  answers the request, whether approved or denied. A decision before the request does not.
+- `END` finishes the execution. `ERROR` and `LIFECYCLE` neither answer requests nor finish it.
+- Histories with execution IDs but no `EXECUTION_START` marker follow the same rules. Otherwise,
+  empty histories report `EXEC_PENDING` and nonempty ones `EXEC_COMPLETED`, including ID-less
+  histories and interrupted turns without unanswered approvals.
+- `CreateSession`, `Fork`, `Suspend`, `Resume` and Exec's initial session frame use only that
+  empty/nonempty fallback, without reading approval evidence.
+- Copied fork requests are reporting evidence in the child, not permission to execute inherited
+  intent. Reporting implements neither an approval gate nor a decision RPC; `REQUIRES_APPROVAL`
+  tool execution remains unsupported.
+- There is no unique request ID. If a `tool_call_id` is reused within one execution, a stale
+  duplicate decision cannot be distinguished from an answer to the new request.
 
 ## Event and the typed log
 

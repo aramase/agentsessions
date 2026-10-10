@@ -35,7 +35,7 @@ const (
 	ExecState_EXEC_STATE_UNSPECIFIED ExecState = 0
 	ExecState_EXEC_PENDING           ExecState = 1
 	ExecState_EXEC_RUNNING           ExecState = 2
-	ExecState_EXEC_AWAITING          ExecState = 3 // GetSession/ListSessions: unanswered approval evidence at last_seq
+	ExecState_EXEC_AWAITING          ExecState = 3 // waiting on an approval decision
 	ExecState_EXEC_COMPLETED         ExecState = 4
 	ExecState_EXEC_FAILED            ExecState = 5
 	ExecState_EXEC_CANCELED          ExecState = 6
@@ -383,24 +383,11 @@ type Session struct {
 	Metadata *ResourceMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
 	Harness  string                 `protobuf:"bytes,2,opt,name=harness,proto3" json:"harness,omitempty"`
 	Model    string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"` // model-agnostic id
-	// GetSession/ListSessions derive EXEC_AWAITING from committed records through last_seq only.
-	// The latest execution is the last nonempty execution_id first seen on a non-LIFECYCLE event;
-	// later records for older IDs do not select them again. An APPROVAL_REQUEST with an approval
-	// body and nonempty tool_call_id is unanswered until a later APPROVAL_RESULT with a result
-	// body matches that execution_id and tool_call_id. Approve and deny both answer it; a decision
-	// before its request does not. END finishes the execution; ERROR and LIFECYCLE do not answer
-	// requests or finish it. The latest execution must be unfinished and have an unanswered request
-	// to report EXEC_AWAITING. Missing execution/call IDs or approval bodies are not awaiting evidence.
-	// ID-bearing markerless histories follow the same rule; ID-less histories retain the fallback.
-	// Otherwise empty histories report EXEC_PENDING and all nonempty histories report EXEC_COMPLETED,
-	// including interrupted turns without unanswered approvals. This is not a live execution probe.
-	// CreateSession, Fork, Suspend, Resume and Exec's initial session frame retain that fallback,
-	// without approval-state journal reads. Use GetSession/ListSessions for approval reporting.
-	// Copied fork requests are reporting evidence, not authorization to execute inherited intent.
-	// Correlation has no unique request ID: a stale duplicate decision for a reused tool_call_id
-	// cannot be distinguished from an answer to the new request within the same execution.
-	// This reporting does not implement an approval gate or decision RPC; REQUIRES_APPROVAL tool
-	// execution remains unsupported.
+	// exec_state is derived from the journal up to last_seq; it is not a live probe.
+	// GetSession and ListSessions report EXEC_AWAITING when the latest execution is unfinished
+	// and has an APPROVAL_REQUEST with no matching APPROVAL_RESULT (same execution_id and
+	// tool_call_id). Otherwise an empty history is EXEC_PENDING and a nonempty one is
+	// EXEC_COMPLETED. Other RPCs report only PENDING or COMPLETED.
 	ExecState    ExecState    `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`
 	ComputeState ComputeState `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
 	LastSeq      int64        `protobuf:"varint,5,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`                                                    // event-log cursor

@@ -1451,7 +1451,7 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | metadata | [ResourceMetadata](#agentsessions-v1-ResourceMetadata) |  |  |
 | harness | [string](#string) |  |  |
 | model | [string](#string) |  | model-agnostic id |
-| exec_state | [ExecState](#agentsessions-v1-ExecState) |  | GetSession/ListSessions derive EXEC_AWAITING from committed records through last_seq only. The latest execution is the last nonempty execution_id first seen on a non-LIFECYCLE event; later records for older IDs do not select them again. An APPROVAL_REQUEST with an approval body and nonempty tool_call_id is unanswered until a later APPROVAL_RESULT with a result body matches that execution_id and tool_call_id. Approve and deny both answer it; a decision before its request does not. END finishes the execution; ERROR and LIFECYCLE do not answer requests or finish it. The latest execution must be unfinished and have an unanswered request to report EXEC_AWAITING. Missing execution/call IDs or approval bodies are not awaiting evidence. ID-bearing markerless histories follow the same rule; ID-less histories retain the fallback. Otherwise empty histories report EXEC_PENDING and all nonempty histories report EXEC_COMPLETED, including interrupted turns without unanswered approvals. This is not a live execution probe. CreateSession, Fork, Suspend, Resume and Exec&#39;s initial session frame retain that fallback, without approval-state journal reads. Use GetSession/ListSessions for approval reporting. Copied fork requests are reporting evidence, not authorization to execute inherited intent. Correlation has no unique request ID: a stale duplicate decision for a reused tool_call_id cannot be distinguished from an answer to the new request within the same execution. This reporting does not implement an approval gate or decision RPC; REQUIRES_APPROVAL tool execution remains unsupported. |
+| exec_state | [ExecState](#agentsessions-v1-ExecState) |  | exec_state is derived from the journal up to last_seq; it is not a live probe. GetSession and ListSessions report EXEC_AWAITING when the latest execution is unfinished and has an APPROVAL_REQUEST with no matching APPROVAL_RESULT (same execution_id and tool_call_id). Otherwise an empty history is EXEC_PENDING and a nonempty one is EXEC_COMPLETED. Other RPCs report only PENDING or COMPLETED. |
 | compute_state | [ComputeState](#agentsessions-v1-ComputeState) |  | incarnation axis |
 | last_seq | [int64](#int64) |  | event-log cursor |
 | parent_uid | [string](#string) |  | fork lineage |
@@ -1571,7 +1571,7 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 | EXEC_STATE_UNSPECIFIED | 0 |  |
 | EXEC_PENDING | 1 |  |
 | EXEC_RUNNING | 2 |  |
-| EXEC_AWAITING | 3 | GetSession/ListSessions: unanswered approval evidence at last_seq |
+| EXEC_AWAITING | 3 | waiting on an approval decision |
 | EXEC_COMPLETED | 4 |  |
 | EXEC_FAILED | 5 |  |
 | EXEC_CANCELED | 6 |  |
