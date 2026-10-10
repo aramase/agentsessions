@@ -31,29 +31,32 @@ func (c *Controller) resolvedHarnessName(desc api.Descriptor) string {
 // checkHarness preflights the selected invocations against the single supplied harness. Legacy
 // invocations without identity evidence do not introduce a Describe dependency. Version matching
 // is opt-in per invocation; recorded nonempty versions require an exact match, even if served empty.
-func (c *Controller) checkHarness(ctx context.Context, har api.Harness, executions []recordedExecution) error {
+func (c *Controller) checkHarness(ctx context.Context, har api.Harness, executions []recordedExecution) (*api.Descriptor, error) {
 	needsDescription := false
 	for _, execution := range executions {
-		if execution.harness != "" || execution.harnessVersion != "" {
+		if execution.harness != "" || execution.harnessVersion != "" || execution.hasApproval() {
 			needsDescription = true
 			break
 		}
 	}
 	if !needsDescription {
-		return nil
+		return nil, nil
 	}
 	desc, err := describeHarness(ctx, har)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	name := c.resolvedHarnessName(desc)
 	for _, execution := range executions {
 		if execution.harness != "" && execution.harness != name {
-			return fmt.Errorf("%w: execution %q recorded %q, supplied %q", ErrHarnessMismatch, execution.id, execution.harness, name)
+			return nil, fmt.Errorf("%w: execution %q recorded %q, supplied %q", ErrHarnessMismatch, execution.id, execution.harness, name)
 		}
 		if execution.harnessVersion != "" && execution.harnessVersion != desc.Version {
-			return fmt.Errorf("%w: execution %q recorded %q, supplied %q", ErrHarnessVersionMismatch, execution.id, execution.harnessVersion, desc.Version)
+			return nil, fmt.Errorf("%w: execution %q recorded %q, supplied %q", ErrHarnessVersionMismatch, execution.id, execution.harnessVersion, desc.Version)
+		}
+		if execution.hasApproval() && desc.Capabilities.Resumability != api.ResumabilityStatelessReplay {
+			return nil, ErrApprovalUnavailable
 		}
 	}
-	return nil
+	return &desc, nil
 }

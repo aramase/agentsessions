@@ -109,6 +109,10 @@ func scanApprovals(log eventlog.Store, throughSeq int64) (*approvalScan, error) 
 	if err != nil {
 		return nil, err
 	}
+	return scanApprovalRecords(records, throughSeq)
+}
+
+func scanApprovalRecords(records []eventlog.Record, throughSeq int64) (*approvalScan, error) {
 	scan := &approvalScan{}
 	var executions []approvalExecution
 	byID := make(map[string]int)

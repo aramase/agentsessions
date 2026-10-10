@@ -69,7 +69,7 @@ var ErrIncompleteInvocation = fmt.Errorf("%w: incomplete invocation", ErrInvalid
 var ErrMissingIdempotencyKey = errors.New("controller: CONTROLLER_MEDIATED tool call requires an idempotency key")
 
 // ErrUnmediatedToolCall rejects a ToolCall whose mediation tier is not host-executed. ToolCall is
-// only for CONTROLLER_MEDIATED (and, once implemented, REQUIRES_APPROVAL); an UNSPECIFIED or
+// only for CONTROLLER_MEDIATED and REQUIRES_APPROVAL; an UNSPECIFIED or
 // IN_HARNESS_REPORTED call must not execute here (the latter uses Report), so it is rejected before
 // anything is recorded — closing the keyless-execute bypass.
 var ErrUnmediatedToolCall = errors.New("controller: ToolCall requires a host-mediated tier")
@@ -92,9 +92,9 @@ type ModelFunc func(ctx context.Context, req api.ModelRequest) (api.ModelRespons
 // harness wire protocol.
 type StreamFunc func(ctx context.Context, req api.ModelRequest, onChunk func(string)) (api.ModelResponse, error)
 
-// Observer receives a turn's events as they happen. Both callbacks fire on the goroutine driving
-// the turn, in order, so an implementation that writes to a stream needs no synchronization of its
-// own but must not block for long.
+// Observer receives a turn's events as they happen. Sink callbacks are serialized in effect
+// order for one invocation, so an implementation that writes to a stream needs no synchronization
+// of its own but must not block for long.
 type Observer struct {
 	// OnRecord fires once per committed record, after it is durable.
 	OnRecord func(eventlog.Record)
@@ -108,7 +108,7 @@ type ToolCallContext struct {
 	SessionUID string // Nonempty identity configured by WithSessionUID.
 }
 
-// ToolFunc executes a CONTROLLER_MEDIATED tool. The host calls it between appending the TOOL_CALL
+// ToolFunc executes a CONTROLLER_MEDIATED or approved REQUIRES_APPROVAL tool. The host calls it between appending the TOOL_CALL
 // intent and appending the TOOL_RESULT (the two-phase write-ahead of §3/I3). The host owns
 // tool/resource authorization and durable deduplication scoped by scope.SessionUID plus the
 // harness-chosen IdempotencyKey, which is only unique within a session. On same-session
@@ -120,7 +120,7 @@ type ToolFunc func(ctx context.Context, scope ToolCallContext, call api.ToolCall
 // Option configures a Controller at construction.
 type Option func(*Controller)
 
-// WithToolExecutor sets the executor for CONTROLLER_MEDIATED tool calls. Without it, a harness that
+// WithToolExecutor sets the executor for CONTROLLER_MEDIATED and approved tool calls. Without it, a harness that
 // emits a host-mediated ToolCall gets an error (in-harness-reported tools use Report instead).
 // A non-nil executor requires a nonempty WithSessionUID; New rejects an unscoped executor.
 func WithToolExecutor(tool ToolFunc) Option { return func(c *Controller) { c.tool = tool } }
@@ -214,7 +214,8 @@ func New(log eventlog.Store, model ModelFunc, opts ...Option) (*Controller, erro
 
 // Exec runs one live execution/turn. The first append (EXECUTION_START) is guarded by
 // expectedLastSeq (the single-writer CAS at the session boundary); the harness runs
-// host-mediated, and the turn ends with an END event.
+// host-mediated, and a completed turn ends with END. A durable approval request seals the sink
+// and returns a typed park without ERROR/END. An owned unresolved gate blocks new turns before Describe.
 func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Message, expectedLastSeq int64) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
 	executionID := newID()
@@ -245,6 +246,13 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 		return err
 	}
 	historyEvents = len(prior)
+	scan, err := scanApprovalRecords(prior, 0)
+	if err != nil {
+		return err
+	}
+	if state := scan.selected; state != nil && !state.Inherited && state.Receipt == nil {
+		return ErrApprovalBlocked
+	}
 	history := make([]api.Event, 0, len(prior))
 	for _, r := range prior {
 		history = append(history, r.Event)
@@ -303,12 +311,23 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 	)
 	start := &api.Start{
 		ExecutionID:   executionID,
+		SessionUID:    c.sessionUID,
 		History:       history,
 		Inputs:        inputs,
 		Config:        config,
 		ResumeFromSeq: c.startResumeFromSeq,
 	}
-	if err := har.Run(ctx, start, &liveSink{c: c, executionID: executionID}); err != nil {
+	sink := &liveSink{c: c, executionID: executionID, guard: &sinkGuard{}, desc: &desc, har: har, calls: make(map[string]bool)}
+	runErr := har.Run(ctx, start, sink)
+	stop := sink.guard.close()
+	if stop != nil {
+		if runErr == nil || !errors.Is(stop, api.ErrApprovalParked) {
+			runErr = stop
+		}
+		runFinished(runErr, "error_kind", controllerErrorKind(runErr))
+		return runErr // no terminal/audit record past an open approval intent
+	}
+	if err := runErr; err != nil {
 		runFinished(err, "error_kind", "harness_run_failed")
 		// Best-effort: record the failure. If this append itself fails we still surface the
 		// original harness error to the caller.
@@ -351,6 +370,10 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 	if err != nil {
 		return nil, err
 	}
+	scan, err := scanApprovalRecords(recs, 0)
+	if err != nil {
+		return nil, err
+	}
 
 	// Check every selected turn before the first Run. A later incompatible version must not
 	// allow even the compatible prefix to execute against the supplied harness. Legacy replay
@@ -361,7 +384,7 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 			selected = append(selected, execution)
 		}
 	}
-	if err := c.checkHarness(ctx, har, selected); err != nil {
+	if _, err := c.checkHarness(ctx, har, selected); err != nil {
 		return nil, err
 	}
 
@@ -369,7 +392,7 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 	for _, execution := range selected {
 		legacy := execution.legacyEnd > 0
 		effectCount += len(execution.stream)
-		sink := &replaySink{stream: execution.stream, legacy: legacy}
+		sink := &replaySink{stream: execution.stream, legacy: legacy, guard: &sinkGuard{}, approvals: approvalEvidence(scan, execution.id)}
 		history := events[:execution.start]
 		invocationID := execution.id
 		if legacy {
@@ -393,12 +416,14 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 		}
 		start := &api.Start{
 			ExecutionID:   invocationID,
+			SessionUID:    c.sessionUID,
 			History:       history,
 			Inputs:        execution.inputs,
 			Config:        execution.config,
 			ResumeFromSeq: execution.resumeFromSeq,
 		}
 		runErr := har.Run(ctx, start, sink)
+		sink.guard.close()
 		if sink.failure != nil {
 			return nil, sink.failure
 		}

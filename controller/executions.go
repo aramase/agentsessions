@@ -91,7 +91,7 @@ func recordedExecutions(events []api.Event) ([]recordedExecution, error) {
 			if event.Message != nil {
 				execution.inputs = append(execution.inputs, *event.Message)
 			}
-		case api.EventModelCall, api.EventOutput, api.EventToolCall, api.EventToolResult, api.EventUsage:
+		case api.EventModelCall, api.EventOutput, api.EventToolCall, api.EventToolResult, api.EventUsage, api.EventApprovalRequest, api.EventApprovalResult:
 			execution.stream = append(execution.stream, event)
 		case api.EventEnd:
 			execution.completed = true
@@ -139,6 +139,15 @@ func pendingResumeExecution(events []api.Event, executions []recordedExecution) 
 		execution = &legacy
 	}
 	return execution, nil
+}
+
+func (e recordedExecution) hasApproval() bool {
+	for _, ev := range e.stream {
+		if ev.Kind == api.EventToolCall && ev.ToolCall != nil && ev.ToolCall.Mediation == api.MediationRequiresApproval {
+			return true
+		}
+	}
+	return false
 }
 
 func (e recordedExecution) invocation() *api.ExecutionStart {

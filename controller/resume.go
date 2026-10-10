@@ -48,6 +48,10 @@ func ResumeInvocation(log eventlog.Store) (*api.ExecutionStart, error) {
 // An unresolved tool intent inherited across a fork returns ErrInheritedToolIntent before running
 // the harness or appending events: the child's dedup namespace cannot recover the parent's effect.
 //
+// An owned unanswered approval returns (true, *api.ApprovalParkedError) without Describe or Run.
+// A call-only cut repairs its request exactly once using the captured head and current fence;
+// repair failure returns (true, operational error). A decided call resumes under the original key.
+//
 // Outside a legacy ID-less prefix, ERROR events, including those left by earlier failed Resume
 // attempts, are not effects: they stay in the journal as an audit trail, are skipped when the
 // effect stream is rebuilt, and do not end the execution, so a later Resume still recovers it.
@@ -81,11 +85,32 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	if err != nil {
 		return false, err
 	}
+	scan, err := scanApprovalRecords(recs, 0)
+	if err != nil {
+		return false, err
+	}
 	execution, err := pendingResumeExecution(events, executions)
 	if err != nil || execution == nil {
 		return false, err
 	}
 	legacy := execution.legacyEnd > 0
+	// Missing-request repair and pending queries do not need a harness, model, or executor.
+	if state := scan.selected; state != nil && state.ExecutionID == execution.id && state.Receipt == nil {
+		if state.Inherited {
+			return false, ErrInheritedToolIntent
+		}
+		if state.Request == nil {
+			record, err := c.log.Append(scan.head, c.fence, api.Event{ExecutionID: state.ExecutionID, Kind: api.EventApprovalRequest, Approval: &api.ApprovalRequest{ToolCallID: state.Call.ID}})
+			if err != nil {
+				return true, err
+			}
+			c.observe(record)
+			state.Request = &record
+		}
+		if state.Decision == nil {
+			return true, approvalPark(state)
+		}
+	}
 	// An inherited intent belongs to the parent's dedup namespace, not this controller's UID.
 	// Scan to the end: legacy child recovery may have recorded the result after the fork marker.
 	// Check before running the harness so even a harness that handles errors cannot bypass it.
@@ -121,7 +146,8 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		return false, fmt.Errorf("%w: execution %q", ErrInheritedToolIntent, execution.id)
 	}
 	// Reject identity mismatches before Run or its best-effort ERROR append path.
-	if err := c.checkHarness(ctx, har, []recordedExecution{*execution}); err != nil {
+	desc, err := c.checkHarness(ctx, har, []recordedExecution{*execution})
+	if err != nil {
 		return false, err
 	}
 	invocationID := execution.id
@@ -133,18 +159,27 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 		}
 	}
 	sink := &resumeSink{
-		live:   liveSink{c: c, executionID: execution.id, legacyRecovery: legacy},
-		stream: execution.stream,
+		live:      liveSink{c: c, executionID: execution.id, legacyRecovery: legacy, guard: &sinkGuard{}, har: har, desc: desc, calls: make(map[string]bool)},
+		stream:    execution.stream,
+		approvals: approvalEvidence(scan, execution.id),
 	}
 	recordedEffectCount = len(execution.stream)
 	start := &api.Start{
 		ExecutionID:   invocationID,
+		SessionUID:    c.sessionUID,
 		Inputs:        execution.inputs,
 		History:       events[:execution.start],
 		Config:        execution.config,
 		ResumeFromSeq: execution.resumeFromSeq,
 	}
 	runErr := har.Run(ctx, start, sink)
+	stop := sink.live.guard.close()
+	if stop != nil {
+		if runErr == nil || !errors.Is(stop, api.ErrApprovalParked) {
+			runErr = stop
+		}
+		return true, runErr // open approval intent cannot be followed by ERROR/END
+	}
 	if sink.failure != nil {
 		runErr = sink.failure
 	}
@@ -164,13 +199,19 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 // completed effect is served without invocation; an unanswered trailing model intent (a MODEL_CALL
 // with no recorded completion) may be re-invoked once per Resume (I3).
 type resumeSink struct {
-	live    liveSink
-	stream  []api.Event
-	i       int
-	failure error // Rejecting a recorded tool prefix must never unlock the live path.
+	live      liveSink
+	stream    []api.Event
+	i         int
+	failure   error // Rejecting a recorded tool prefix must never unlock the live path.
+	approvals map[string]*ApprovalState
 }
 
 var _ api.EventSink = (*resumeSink)(nil)
+
+func (s *resumeSink) diverged(err error) error {
+	s.failure = fmt.Errorf("%w: %w", ErrReplayDiverged, err)
+	return s.failure
+}
 
 func (s *resumeSink) recordedNext(kind api.EventKind) (api.Event, bool) {
 	if s.i >= len(s.stream) || s.stream[s.i].Kind != kind {
@@ -182,16 +223,21 @@ func (s *resumeSink) recordedNext(kind api.EventKind) (api.Event, bool) {
 }
 
 func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	s.live.guard.mu.Lock()
+	defer s.live.guard.mu.Unlock()
+	if err := s.live.guard.err(); err != nil {
+		return api.ModelResponse{}, err
+	}
 	if s.failure != nil {
 		return api.ModelResponse{}, s.failure
 	}
 	if s.i < len(s.stream) {
 		mc, ok := s.recordedNext(api.EventModelCall)
 		if !ok {
-			return api.ModelResponse{}, errors.New("resume: recorded stream diverged (expected model call)")
+			return api.ModelResponse{}, s.diverged(errors.New("resume: recorded stream diverged (expected model call)"))
 		}
-		if mc.ModelCall.InputHash != hashModelInput(req) {
-			return api.ModelResponse{}, fmt.Errorf("%w: resume: model input hash mismatch (I0)", ErrReplayDiverged)
+		if mc.ModelCall == nil || mc.ModelCall.InputHash != hashModelInput(req) {
+			return api.ModelResponse{}, s.diverged(errors.New("resume: model input hash mismatch (I0)"))
 		}
 		out, ok := s.recordedNext(api.EventOutput)
 		if !ok {
@@ -216,31 +262,41 @@ func (s *resumeSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 		}
 		return api.ModelResponse{Message: msg}, nil // served — model NOT re-invoked
 	}
-	return s.live.Model(ctx, req) // past the crash point: first-ever execution
+	return s.live.model(ctx, req) // past the crash point: first-ever execution
 }
 
 func (s *resumeSink) Output(ctx context.Context, delta string) error {
+	s.live.guard.mu.Lock()
+	defer s.live.guard.mu.Unlock()
+	if err := s.live.guard.err(); err != nil {
+		return err
+	}
 	if s.failure != nil {
 		return s.failure
 	}
 	if s.i < len(s.stream) {
 		out, ok := s.recordedNext(api.EventOutput)
 		if !ok {
-			return errors.New("resume: recorded stream diverged (expected output)")
+			return s.diverged(errors.New("resume: recorded stream diverged (expected output)"))
 		}
 		recorded := ""
 		if out.Message != nil {
 			recorded = out.Message.Text()
 		}
 		if delta != recorded {
-			return fmt.Errorf("resume: output mismatch — %q != recorded %q", delta, recorded)
+			return s.diverged(fmt.Errorf("resume: output mismatch — %q != recorded %q", delta, recorded))
 		}
 		return nil
 	}
-	return s.live.Output(ctx, delta)
+	return s.live.output(ctx, delta)
 }
 
 func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
+	s.live.guard.mu.Lock()
+	defer s.live.guard.mu.Unlock()
+	if err := s.live.guard.err(); err != nil {
+		return api.ToolResult{}, err
+	}
 	if s.failure != nil {
 		return api.ToolResult{}, s.failure
 	}
@@ -252,7 +308,7 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 	if s.i < len(s.stream) {
 		// Preserve a distinct fallback's intent while reproducing a pre-intent rejection.
 		next := s.stream[s.i]
-		if next.Kind == api.EventToolCall && next.ToolCall != nil && next.ToolCall.ID != tc.ID {
+		if next.Kind == api.EventToolCall && next.ToolCall != nil && next.ToolCall.ID != tc.ID && next.ToolCall.Mediation != api.MediationRequiresApproval {
 			if err := toolMediationError(tc.Mediation); err != nil {
 				return api.ToolResult{}, err
 			}
@@ -268,6 +324,27 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 		if err := matchToolCall(tc, call.ToolCall); err != nil {
 			s.failure = err
 			return api.ToolResult{}, err
+		}
+		s.live.calls[call.ToolCall.ID] = call.ToolCall.Mediation == api.MediationRequiresApproval
+		if call.ToolCall.Mediation == api.MediationRequiresApproval {
+			state := s.approvals[call.ToolCall.ID]
+			if err := consumeApprovalPrefix(s.stream, &s.i, state); err != nil {
+				s.failure = err
+				return api.ToolResult{}, err
+			}
+			if state.Receipt == nil {
+				return s.live.completeApproval(ctx, state)
+			}
+			tr, ok := s.recordedNext(api.EventToolResult)
+			if !ok {
+				s.failure = fmt.Errorf("%w: missing approval receipt", ErrReplayDiverged)
+				return api.ToolResult{}, s.failure
+			}
+			result, err := serveApproval(state, tr.Result)
+			if err != nil {
+				s.failure = err
+			}
+			return result, err
 		}
 		if tr, ok := s.recordedNext(api.EventToolResult); ok {
 			result, err := recordedToolResult(call.ToolCall, tr.Result)
@@ -285,23 +362,40 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 		// outcomes, not evidence failures: the harness may handle them and finish the turn.
 		return s.live.execTool(ctx, *call.ToolCall)
 	}
-	return s.live.ToolCall(ctx, tc)
+	return s.live.toolCall(ctx, tc)
 }
 
 func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
+	s.live.guard.mu.Lock()
+	defer s.live.guard.mu.Unlock()
+	if err := s.live.guard.err(); err != nil {
+		return err
+	}
 	if s.failure != nil {
 		return s.failure
 	}
+	if err := approvalReportError(tr); err != nil {
+		return err
+	}
 	if s.i < len(s.stream) {
+		if s.stream[s.i].Result != nil && approvalReportError(*s.stream[s.i].Result) != nil {
+			s.failure = fmt.Errorf("%w: Report cannot consume approval receipt", ErrReplayDiverged)
+			return s.failure
+		}
 		if _, ok := s.recordedNext(api.EventToolResult); !ok {
-			return errors.New("resume: recorded stream diverged (expected tool result)")
+			return s.diverged(errors.New("resume: recorded stream diverged (expected tool result)"))
 		}
 		return nil
 	}
-	return s.live.Report(ctx, tr)
+	return s.live.report(ctx, tr)
 }
 
 func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
+	s.live.guard.mu.Lock()
+	defer s.live.guard.mu.Unlock()
+	if err := s.live.guard.err(); err != nil {
+		return err
+	}
 	if s.failure != nil {
 		return s.failure
 	}
@@ -309,20 +403,20 @@ func (s *resumeSink) Usage(ctx context.Context, u api.Usage) error {
 		if s.i < len(s.stream) {
 			return nil // v0.1.2 did not serve usage; past the crash point it journals it live.
 		}
-		return s.live.Usage(ctx, u)
+		return s.live.usage(ctx, u)
 	}
 	if s.i < len(s.stream) {
 		ev, ok := s.recordedNext(api.EventUsage)
 		if !ok {
-			return errors.New("resume: recorded stream diverged (expected usage)")
+			return s.diverged(errors.New("resume: recorded stream diverged (expected usage)"))
 		}
 		if ev.Usage == nil {
-			return errors.New("resume: recorded usage is missing its payload")
+			return s.diverged(errors.New("resume: recorded usage is missing its payload"))
 		}
 		if *ev.Usage != u {
-			return fmt.Errorf("resume: usage mismatch — %+v != recorded %+v", u, *ev.Usage)
+			return s.diverged(fmt.Errorf("resume: usage mismatch — %+v != recorded %+v", u, *ev.Usage))
 		}
 		return nil
 	}
-	return s.live.Usage(ctx, u)
+	return s.live.usage(ctx, u)
 }

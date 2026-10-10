@@ -19,7 +19,9 @@ func matchToolCall(emitted api.ToolCall, recorded *api.ToolCall) error {
 	switch recorded.Mediation {
 	case api.MediationControllerMediated:
 	case api.MediationRequiresApproval:
-		return fmt.Errorf("%w: recorded tool call requires unsupported approval", ErrReplayDiverged)
+		if recorded.ID == "" {
+			return fmt.Errorf("%w: recorded approval call has no ID", ErrReplayDiverged)
+		}
 	default:
 		return fmt.Errorf("%w: invalid recorded tool mediation: %w", ErrReplayDiverged, ErrUnmediatedToolCall)
 	}
