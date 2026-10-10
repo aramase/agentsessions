@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/aramase/agentsessions/api"
 	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/eventlog"
 )
@@ -188,20 +189,30 @@ func (r *Registry) For(harness string) (*Placer, error) {
 type RegistryResumeOption func(*registryResumeConfig)
 
 type registryResumeConfig struct {
-	check func(name string) error
+	check    func(name string) error
+	observer controller.Observer
 }
 
-// WithResolvedHarnessCheck runs check on the harness name Registry.Resume resolved, under the
-// session guard and before anything is restored. A non-nil error is returned unchanged and
-// nothing is resumed. The host uses it to apply routing rules that live above the Registry.
+// WithRegistryResumeObserver reports newly committed recovery records and streaming chunks.
+// This is a RegistryResumeOption, distinct from the Placer's WithResumeObserver option.
+func WithRegistryResumeObserver(o controller.Observer) RegistryResumeOption {
+	return func(c *registryResumeConfig) { c.observer = o }
+}
+
+// WithResolvedHarnessCheck runs check on the harness name Registry.Resume or Registry.Suspend
+// resolved, under the session guard and before runtime IO. A non-nil error is returned unchanged.
+// The host uses it to apply routing rules that live above the Registry.
 func WithResolvedHarnessCheck(check func(name string) error) RegistryResumeOption {
 	return func(c *registryResumeConfig) { c.check = check }
 }
 
-// Resume resolves and recovers a pending invocation under the Registry's shared session guard.
-// Selection cannot race with Exec or Suspend through this Registry: contention wins over stale
-// invocation errors, and routing plus recovery share one local critical section.
-// Legacy markerless and completed journals retain sessionDefaultName (empty = registry default).
+// Resume resolves and recovers an invocation under the Registry's shared session guard, running
+// the resolved-harness check before runtime IO or call-only repair. Pending/repaired requests
+// return *api.ApprovalParkedError without runtime IO; that alone is not cold-compute proof.
+// Decided recovery delegates to the Placer: a new gate commits SUSPEND and returns park, while
+// ordinary success records RESUME. Repair/handoff failures retain their actual cause.
+// Contention through this Registry wins over stale invocation errors. Legacy markerless and
+// completed journals retain sessionDefaultName (empty = registry default).
 func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, sessionDefaultName string, opts ...RegistryResumeOption) error {
 	var cfg registryResumeConfig
 	for _, o := range opts {
@@ -213,6 +224,13 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 	}
 	defer release()
 
+	state, err := controller.InspectApproval(log, 0)
+	if err != nil {
+		return err
+	}
+	if state != nil && state.Inherited && state.Receipt == nil {
+		return controller.ErrInheritedToolIntent
+	}
 	invocation, err := controller.ResumeInvocation(log)
 	if err != nil {
 		return err
@@ -237,7 +255,60 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 			return err
 		}
 	}
-	return p.resume(ctx, log, sessionUID, resumeConfig{harness: name})
+	if handled, err := p.resumeApproval(log, state, cfg.observer); handled {
+		return err
+	}
+	return p.resume(ctx, log, sessionUID, resumeConfig{harness: name, observer: cfg.observer})
+}
+
+// Approve journals only a decision under the shared session guard. The decision does not need
+// a served/available harness or any compute, so routing and host recovery checks do not apply.
+func (r *Registry) Approve(ctx context.Context, log eventlog.Store, sessionUID string, decision api.ApprovalDecision) (eventlog.Record, error) {
+	release, err := r.guard.tryLock(sessionUID)
+	if err != nil {
+		return eventlog.Record{}, err
+	}
+	defer release()
+	return controller.Approve(log, decision)
+}
+
+// Suspend routes an unreceipted approval to its recorded harness, including retries after an
+// automatic snapshot/append failure. Ordinary sessions retain their stored-default route.
+func (r *Registry) Suspend(ctx context.Context, log eventlog.Store, sessionUID, sessionDefaultName string, opts ...RegistryResumeOption) (api.SnapshotRef, error) {
+	var cfg registryResumeConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	release, err := r.guard.tryLock(sessionUID)
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	defer release()
+	state, err := controller.InspectApproval(log, 0)
+	if err != nil {
+		return api.SnapshotRef{}, err
+	}
+	name := sessionDefaultName
+	recordedName := state != nil && state.Receipt == nil && state.Invocation != nil && state.Invocation.Harness != ""
+	if recordedName {
+		name = state.Invocation.Harness
+	}
+	if name == "" {
+		name = r.defaultHarness
+	}
+	p, err := r.For(name)
+	if err != nil {
+		if recordedName && errors.Is(err, ErrUnknownHarness) {
+			return api.SnapshotRef{}, fmt.Errorf("%w: %w", ErrRecordedHarnessNotServed, err)
+		}
+		return api.SnapshotRef{}, err
+	}
+	if cfg.check != nil {
+		if err := cfg.check(name); err != nil {
+			return api.SnapshotRef{}, err
+		}
+	}
+	return p.suspend(ctx, log, sessionUID, nil)
 }
 
 // Default is the harness used when a caller names none. session.Service records it on a session

@@ -1,7 +1,8 @@
 // Shared wire types for the agentsessions Session and Harness services.
 //
 // The Event message is used by BOTH the session log (Sessions.Exec / Replay) and the
-// harness stream (Harness.Connect) — harness events become the log alongside host-owned records.
+// harness stream (Harness.Connect) — durable harness events become the log alongside host-owned
+// records. EVENT_PARKED is a transport-only acknowledgement and is never journaled.
 //
 // The content model (Part) is aligned with A2A `Part` + MCP content for interop; the
 // event/log model is native. Derived from the durable-log & replay contract §7 (record
@@ -118,7 +119,10 @@ enum Mediation {
   MEDIATION_UNSPECIFIED = 0;
   MEDIATION_IN_HARNESS_REPORTED = 1; // harness runs it, reports for audit (cooperative WAL)
   MEDIATION_CONTROLLER_MEDIATED = 2; // host/gateway executes (host-enforced WAL; trustless)
-  MEDIATION_REQUIRES_APPROVAL = 3;   // pause for human/policy approval
+  // Host-owned durable approval gate for STATELESS_REPLAY only. The harness emits a tool call,
+  // then awaits a decision/receipt or park control frame; it never executes the effect itself.
+  // REQUIRES_MEMORY_SNAPSHOT is unsupported for this gate and fails closed before the effect.
+  MEDIATION_REQUIRES_APPROVAL = 3;
 }
 
 // ModelCall is a model REQUEST emitted by the harness (EVENT_MODEL_CALL). The host records
@@ -180,7 +184,19 @@ message ToolCall {
   string idempotency_key = 5; // §3/I3: dedups a retried side-effecting call tool-side
 }
 
+// ToolResult is a durable execution receipt, also usable as model-facing history. A decision
+// itself is a separate host-owned APPROVAL_RESULT; it is not embedded in this message.
 message ToolResult {
+  enum Code {
+    // Legacy/unspecified status. With is_error=false this is also a successful receipt.
+    // Old is_error=true receipts retain their legacy, unclassified failure shape.
+    CODE_UNSPECIFIED = 0;
+    // A denied approval: is_error=true and the executor MUST NOT have been invoked.
+    APPROVAL_DENIED = 1;
+    // An attempted executor call failed: is_error=true; error describes the failure. This is
+    // a durable handled receipt, not an unrecorded effect or an approval denial.
+    EXECUTOR_ERROR = 2;
+  }
   string id = 1;
   google.protobuf.Struct output = 2;
   string output_uri = 3;    // externalized large output (MCP resource_link), else inline `output`
@@ -191,18 +207,46 @@ message ToolResult {
   // A harness records on EVENT_TOOL_RESULT the same ToolResult it feeds back as a tool_result part,
   // so history rebuilt from the journal can give the model what it saw live.
   repeated Part content = 7;
+  Code code = 8;
+  // For approval-gated calls, the positive journal sequences of the host-owned request and
+  // decision. Both are set on success, denial, or executor failure after approval. Other calls
+  // and legacy receipts leave both zero. The host checks these against the same session,
+  // execution_id and tool call id; a receipt cannot resolve a different request/decision.
+  int64 approval_request_seq = 9;
+  int64 approval_decision_seq = 10;
 }
 
-// Approval is modeled as durable log entries: an unresolved request, later resolved by a
-// decision — so compute can suspend while awaiting a human/policy decision (§7).
+// Approval is durable journal state, not a mutable session flag or side table. For a
+// REQUIRES_APPROVAL call the host commits TOOL_CALL then APPROVAL_REQUEST before parking;
+// only the host may commit the request or its later APPROVAL_RESULT. The harness cannot mint
+// requests or decisions by emitting these events. Identity on a decision's Event.actor is
+// recorded provenance only, not authorization. This gate supports STATELESS_REPLAY only;
+// it defines no policy hook, expiry, automatic decision, or Cancel behavior.
 message ApprovalRequest {
   string tool_call_id = 1;
   string reason = 2;
 }
+
+// ApprovalResult resolves one request in the enclosing session and Event.execution_id.
+// A committed decision allows recovery via Resume; Approve itself never invokes the executor.
+// The host also sends this body in ControllerFrame.approval before the correlated tool receipt
+// during decided recovery/replay. approved=false is a real denial, not an absent decision.
 message ApprovalResult {
   string tool_call_id = 1;
-  bool approved = 2;
+  bool approved = 2; // non-optional durable value; request-level decision presence is in ApproveRequest
   string reason = 3;
+  // Positive sequence of the resolved APPROVAL_REQUEST. Zero is retained for legacy decisions;
+  // it cannot identify a new durable approval request.
+  int64 request_seq = 4;
+}
+
+// ApprovalRef identifies an unresolved, host-owned APPROVAL_REQUEST within the enclosing
+// session. All fields are required by the approval protocol and request_seq must be positive.
+// A reference inherited through Fork cannot authorize a new effect in the child session.
+message ApprovalRef {
+  string execution_id = 1;
+  string tool_call_id = 2;
+  int64 request_seq = 3;
 }
 
 message Error {
@@ -278,9 +322,13 @@ enum EventKind {
   EVENT_END = 10;
   EVENT_ERROR = 11;
   EVENT_EXECUTION_START = 12; // host-owned config/cursor/input count, before inputs and harness effects
+  // Harness acknowledgement of ControllerFrame.park with the exact ApprovalRef. Transport only:
+  // the host MUST NOT journal/hash-chain it or treat it as a terminal execution outcome.
+  EVENT_PARKED = 13;
 }
 
-// Event is the shared journal/stream content unit; EXECUTION_START is emitted only by the host.
+// Event is the shared journal/stream content unit; EXECUTION_START, APPROVAL_REQUEST and
+// APPROVAL_RESULT are host-owned journal entries. PARKED is transport only, never journaled.
 // Ordering (seq) and integrity (prev_hash /
 // content_hash) are host-assigned and live on LogRecord — the harness, which does not know
 // seq/prev, emits a hash-free Event, so there is no circular hashing. Streaming deltas are
@@ -305,6 +353,8 @@ message Event {
     HarnessEnd end = 16;
     Error error = 17;
     ExecutionStart execution_start = 19;
+    // EVENT_PARKED echoes the park reference; Event.execution_id must match its execution_id.
+    ApprovalRef parked = 20;
   }
 
   IdentityRef actor = 18; // emitter principal -> provenance

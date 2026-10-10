@@ -43,7 +43,11 @@ and never accepts it as a flag, so it does not appear in the process list or she
 transport with no credentials. Any process that can reach the port can call every RPC.
 
 **There is no authorization.** `IdentityRef` exists in the contract and is carried on the wire, but
-nothing verifies or enforces it. It is metadata today, not a control.
+nothing verifies or enforces it. It is metadata today, not a control. In particular, anyone who can
+reach Sessions can discover an owned pending approval through Get/List and approve or deny it.
+`ApproveRequest.identity` is copied to the decision's `Event.actor` as caller-supplied provenance;
+`--actor`, issuer and subject flags are not credentials or permission checks. The durable gate
+controls event ordering and effect recovery, not who is entitled to decide.
 
 **`project` is not a tenancy boundary.** It is an exact-match filter on listing. A caller that names
 another project gets that project's sessions. Do not treat it as isolation.
@@ -91,6 +95,23 @@ listener only an operator can reach, never beside the Sessions service. A regist
 is whatever answers at its address, as above. `HarnessSpec.descriptor_id` makes the host refuse a
 turn when the harness there reports another descriptor id, which catches a misdirected address; the
 id is what the harness says about itself, so it does not authenticate the harness.
+
+## Approval is not a security policy
+
+`REQUIRES_APPROVAL` is supported only for stateless replay. The RPC/SDK commits a decision without
+compute or an executor call; explicit Resume performs recovery. CLI approve/deny do both, and a
+recovery failure leaves the decision committed. There is no authorization hook, policy evaluator,
+approval timeout, expiry, automatic decision or implemented Cancel/DeleteSession path. Unresolved
+requests and suspended snapshots/handles are retained indefinitely; operators must manage retained
+resources outside these APIs.
+
+A custom host executor must authorize tools/resources itself and durably deduplicate by **session UID
+plus idempotency key**, storing the original receipt across host restarts. A hash-chained request or
+decision alone does not make delivery exactly once. Two sessions using the same harness-chosen key
+are distinct namespaces. The stock daemon does not configure an executor. An approved gate without
+one stays recoverable and fails Resume with `FAILED_PRECONDITION`; denial requires no executor and
+records a denied receipt. Neither path prevents a trusted harness from doing unmediated work outside
+the sink.
 
 ## Deploying it
 

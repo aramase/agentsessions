@@ -225,9 +225,8 @@ func TestRecoveryRejectsInvalidRecordedToolIntent(t *testing.T) {
 		{"empty key", func(c *api.ToolCall) { c.IdempotencyKey = "" }, controller.ErrMissingIdempotencyKey},
 		{"unmediated", func(c *api.ToolCall) { c.Mediation = api.MediationInHarnessReported }, controller.ErrUnmediatedToolCall},
 		{"unspecified", func(c *api.ToolCall) { c.Mediation = "" }, controller.ErrUnmediatedToolCall},
-		// Approval has no live sentinel on main. Invalid recorded approval evidence is classified
-		// as divergence, without inventing an error-string match or a new public approval API.
-		{"approval", func(c *api.ToolCall) { c.Mediation = api.MediationRequiresApproval }, controller.ErrReplayDiverged},
+		// Approval call-only cuts are now repairable; approval-specific malformed receipt
+		// coverage lives in TestApprovalIncompleteReceiptEvidenceFailsClosed.
 	} {
 		for _, path := range []string{"replay", "resume result", "resume intent"} {
 			t.Run(path+"/"+change.name, func(t *testing.T) {
@@ -887,7 +886,10 @@ type handlesMediationRejectionHarness struct {
 }
 
 func (*handlesMediationRejectionHarness) Describe(ctx context.Context) (api.Descriptor, error) {
-	return (&callHarness{}).Describe(ctx)
+	desc, err := (&callHarness{}).Describe(ctx)
+	// Exercise a live pre-intent refusal now that stateless keyed approval calls can park.
+	desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+	return desc, err
 }
 
 func (h *handlesMediationRejectionHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
@@ -1003,9 +1005,12 @@ func assertMediationRejection(t *testing.T, err error, mediation api.Mediation) 
 	if err == nil || errors.Is(err, controller.ErrReplayDiverged) {
 		t.Fatalf("want handleable mediation rejection, got %v", err)
 	}
-	// Approval has no live sentinel; preserve that generic rejection without matching its text.
-	if mediation != api.MediationRequiresApproval && !errors.Is(err, controller.ErrUnmediatedToolCall) {
-		t.Fatalf("want unmediated tool rejection, got %v", err)
+	want := controller.ErrUnmediatedToolCall
+	if mediation == api.MediationRequiresApproval {
+		want = controller.ErrApprovalUnavailable
+	}
+	if !errors.Is(err, want) {
+		t.Fatalf("want %v, got %v", want, err)
 	}
 }
 
@@ -1015,6 +1020,13 @@ type mediationFallbackHarness struct {
 	continuesAfterToolFailureHarness
 	rejected       api.ToolCall
 	rejectionError error
+}
+
+func (*mediationFallbackHarness) Describe(ctx context.Context) (api.Descriptor, error) {
+	desc, err := (&callHarness{}).Describe(ctx)
+	// Preserve refusal/fallback coverage without asking a supported live gate to reject.
+	desc.Capabilities.Resumability = api.ResumabilityRequiresMemorySnapshot
+	return desc, err
 }
 
 func (h *mediationFallbackHarness) Run(ctx context.Context, start *api.Start, sink api.EventSink) error {

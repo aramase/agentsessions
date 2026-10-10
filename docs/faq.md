@@ -74,9 +74,11 @@ all plug in the same way. See [`harness-authoring.md`](harness-authoring.md).
 
 ## What happens if the harness crashes in the middle of a turn?
 
-The controller re-drives the interrupted execution at most once (invariant I3). An `Exec` with no inputs
-means "continue the last execution" rather than "start a new turn". Host-executed tools carry an
-idempotency key so a re-driven side-effecting call dedups on the tool side and the effect happens once.
+Use `Resume` to re-drive an interrupted execution. For an existing current approval-bearing execution,
+no-input `Exec` also continues that recorded invocation, ignoring request config/harness/cursor
+overrides. Other inputless Exec calls keep ordinary new-turn behavior. Host-executed tools carry an
+idempotency key; a durable executor must deduplicate on session UID plus that key and retrieve the
+original receipt after a crash. The journal alone does not make external effects exactly once.
 
 ## What is fork actually for?
 
@@ -128,9 +130,16 @@ fan-out costs N restores rather than one shared image — see
 
 Each tool declares a mediation tier. `IN_HARNESS_REPORTED` (the default) runs the tool in the sandbox and
 reports the result for audit. `CONTROLLER_MEDIATED` has the host execute the tool so it can apply authz,
-policy, and audit centrally. `REQUIRES_APPROVAL` pauses for a human or policy decision. The approval tier
-is declared in the contract; the approval gate itself is a tracked follow-up. Tool calls align with the
-MCP shape (name plus structured arguments), so MCP tools map onto them directly.
+policy, and audit centrally in a custom executor. `REQUIRES_APPROVAL` parks a stateless-replay execution
+for an explicit caller decision. RPC/SDK `Approve` commits only that decision; call `Resume` separately.
+CLI approve and deny do both, and say "decision committed" if recovery fails. Get/List and final paused
+Exec frames expose the pending tuple at their captured cursor. A decision clears that reference, but
+new input stays blocked until its receipt commits. Identity is not authorization; there is no policy
+hook, timeout or expiry. Snapshots and unresolved requests are retained indefinitely, and Cancel and
+DeleteSession remain `UNIMPLEMENTED`. Tool calls align with the MCP shape (name plus structured
+arguments), but the stock daemon has no executor and the bundled model adapter does not map tools;
+this is not a complete MCP/provider integration. See
+[approval recovery](interaction-model.md#approval-decisions-and-recovery).
 
 ## How do I list sessions, and can I trust the compute state I get back?
 

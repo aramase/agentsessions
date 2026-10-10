@@ -2,8 +2,11 @@
 //
 // A Microsoft Agent Framework (MAF) agent, a GitHub Copilot agent, or a custom agent
 // implements it via a thin adapter. The host drives one execution per Connect stream;
-// the harness streams typed Events terminated by one EVENT_END. Beyond plain streaming, it
-// adds tool-call / approval mediation, per-call usage, and capability declaration.
+// the harness streams typed Events terminated by one EVENT_END, except a host-requested approval
+// park, which ends with a correlated EVENT_PARKED acknowledgement and stream closure, not END.
+// Beyond plain streaming, it adds tool-call / approval mediation, per-call usage, and capabilities.
+// The host and bridge implement durable approval/park for STATELESS_REPLAY only. Unsupported
+// peers and memory-snapshot harnesses must not execute REQUIRES_APPROVAL effects.
 syntax = "proto3";
 
 package agentsessions.v1;
@@ -73,16 +76,40 @@ message Cancel {
   string reason = 1; // USER | TIMEOUT | INTERNAL
 }
 
-// ControllerFrame is sent by the host to the harness during an execution.
+// ControllerFrame is sent by the host to the harness during an execution. Tool/approval control
+// frames MUST match the Start envelope's session and execution_id and the outstanding tool call
+// id. The session is the effect namespace; a reused tool id in another session is unrelated.
+//
+// For a STATELESS_REPLAY REQUIRES_APPROVAL call, the host owns the durable request/decision.
+// While unresolved, it sends park after committing the request. The harness checks the full
+// session/execution/call/request tuple, stops this Run, sends one matching EVENT_PARKED, and
+// closes its sending side WITHOUT EVENT_END. The host receives and validates that acknowledgement
+// before closing the stream. Missing/mismatched acknowledgements fail the exchange; the durable
+// unresolved request remains recoverable. The host never journals EVENT_PARKED. This is not
+// Cancel and does not record a completed, failed, or canceled execution.
+//
+// On decided recovery or replay the host sends approval BEFORE tool, even if a receipt already
+// exists. The harness must correlate approval.tool_call_id/request_seq with the waiting call and
+// receipt.id/approval_request_seq; the receipt's approval_decision_seq must identify the committed
+// decision in that session's journal, which the host validates. Denial requires APPROVAL_DENIED
+// and is_error=true without an executor call. Approval permits a success (CODE_UNSPECIFIED with
+// is_error=false) or EXECUTOR_ERROR with is_error=true. Conflicting decisions or receipt tuples
+// fail closed rather than being served to a different call. The harness may not manufacture
+// durable APPROVAL_REQUEST/APPROVAL_RESULT events. The gate is not supported for memory-snapshot
+// harnesses; reject it before executing an effect rather than pretending a park is a snapshot.
+// Host sink operations for an execution are serialized; callbacks must not re-enter that sink.
+// Once a recorded-prefix identity/correlation mismatch occurs, the execution remains divergent:
+// catching the error cannot authorize a later model/tool effect or mark recovery complete.
 message ControllerFrame {
   string session = 1;
   string execution_id = 2;
   oneof frame {
     Start start = 3;
     Cancel cancel = 4;
-    ApprovalResult approval = 5; // response to an EVENT_APPROVAL_REQUEST
-    ToolResult tool = 6;         // result for a CONTROLLER_MEDIATED tool call
+    ApprovalResult approval = 5; // host-owned committed decision, before the correlated tool receipt
+    ToolResult tool = 6;         // result for a CONTROLLER_MEDIATED or decided REQUIRES_APPROVAL call
     ModelResult model = 7;       // served completion for a mediated/replayed model call
+    ApprovalRef park = 8;        // host-owned unresolved request; requires correlated EVENT_PARKED
   }
 }
 
@@ -98,7 +125,12 @@ service Harness {
   // Describe returns the static contract; used to match the harness to a runtime.
   rpc Describe(DescribeRequest) returns (HarnessDescriptor);
 
-  // Connect drives ONE execution. The host sends Start (and optional control frames);
-  // the harness streams Events terminated by exactly one EVENT_END.
+  // Connect drives ONE execution. The host sends Start (and optional control frames). Normally
+  // the harness streams Events terminated by exactly one EVENT_END. An unresolved approval
+  // instead follows park -> correlated EVENT_PARKED -> stream closure, with no EVENT_END.
+  // Durable requests/decisions belong to the host; this protocol applies to STATELESS_REPLAY only.
+  // After ACK and actual stream closure, the host closes the invocation connection, performs
+  // an external snapshot and commits SUSPEND before reporting a successful live pause. Handoff
+  // failures retain the durable request and their actual error; they are not park success.
   rpc Connect(stream ControllerFrame) returns (stream Event);
 }

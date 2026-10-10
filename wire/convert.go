@@ -4,7 +4,9 @@
 // them from drifting: if a field is added to one side and not the other, the conversion
 // (and its round-trip test) fails to compile or fails the test. The api.Event is the
 // load-bearing type — it crosses both the Harness.Connect stream and Sessions.Exec/Replay,
-// and it is what the event log hash-chains — so its round-trip must be lossless.
+// and it is what the event log hash-chains — so its durable fields must survive a round-trip.
+// ToolResult.Approval is a transient direct-sink decision carrier, intentionally not serialized;
+// EVENT_PARKED is convertible for transport but MUST NOT be journaled.
 //
 // Content constraint: structured content maps (ToolCall.Args, ToolResult.Output, DataPart)
 // MUST hold JSON-shaped values. They cross the wire as a protobuf Struct, whose numbers are
@@ -62,6 +64,8 @@ func EventToProto(e api.Event) *v1.Event {
 			InputCount: e.ExecutionStart.InputCount,
 			Harness:    e.ExecutionStart.Harness, HarnessVersion: e.ExecutionStart.HarnessVersion,
 		}}
+	case e.Parked != nil:
+		out.Body = &v1.Event_Parked{Parked: approvalRefToProto(e.Parked)}
 	}
 	return out
 }
@@ -109,6 +113,8 @@ func EventFromProto(p *v1.Event) api.Event {
 				Harness:    b.ExecutionStart.GetHarness(), HarnessVersion: b.ExecutionStart.GetHarnessVersion(),
 			}
 		}
+	case *v1.Event_Parked:
+		out.Parked = approvalRefFromProto(b.Parked)
 	}
 	return out
 }
@@ -360,13 +366,17 @@ func toolResultToProto(t *api.ToolResult) *v1.ToolResult {
 		return nil
 	}
 	return &v1.ToolResult{
-		Id:           t.ID,
-		Output:       toStruct(t.Output),
-		OutputUri:    t.OutputURI,
-		OutputDigest: t.OutputDigest,
-		IsError:      t.IsError,
-		Error:        t.Error,
-		Content:      partsToProto(t.Content),
+		Id:                  t.ID,
+		Output:              toStruct(t.Output),
+		OutputUri:           t.OutputURI,
+		OutputDigest:        t.OutputDigest,
+		IsError:             t.IsError,
+		Error:               t.Error,
+		Content:             partsToProto(t.Content),
+		Code:                v1.ToolResult_Code(t.Code),
+		ApprovalRequestSeq:  t.ApprovalRequestSeq,
+		ApprovalDecisionSeq: t.ApprovalDecisionSeq,
+		// Approval is transient and deliberately excluded from receipts and nested model history.
 	}
 }
 
@@ -375,13 +385,16 @@ func toolResultFromProto(t *v1.ToolResult) *api.ToolResult {
 		return nil
 	}
 	return &api.ToolResult{
-		ID:           t.GetId(),
-		Output:       fromStruct(t.GetOutput()),
-		OutputURI:    t.GetOutputUri(),
-		OutputDigest: t.GetOutputDigest(),
-		IsError:      t.GetIsError(),
-		Error:        t.GetError(),
-		Content:      partsFromProto(t.GetContent()),
+		ID:                  t.GetId(),
+		Output:              fromStruct(t.GetOutput()),
+		OutputURI:           t.GetOutputUri(),
+		OutputDigest:        t.GetOutputDigest(),
+		IsError:             t.GetIsError(),
+		Error:               t.GetError(),
+		Content:             partsFromProto(t.GetContent()),
+		Code:                api.ToolResultCode(t.GetCode()),
+		ApprovalRequestSeq:  t.GetApprovalRequestSeq(),
+		ApprovalDecisionSeq: t.GetApprovalDecisionSeq(),
 	}
 }
 
@@ -467,18 +480,32 @@ func approvalReqFromProto(a *v1.ApprovalRequest) *api.ApprovalRequest {
 	return &api.ApprovalRequest{ToolCallID: a.GetToolCallId(), Reason: a.GetReason()}
 }
 
+func approvalRefToProto(a *api.ApprovalRef) *v1.ApprovalRef {
+	if a == nil {
+		return nil
+	}
+	return &v1.ApprovalRef{ExecutionId: a.ExecutionID, ToolCallId: a.ToolCallID, RequestSeq: a.RequestSeq}
+}
+
+func approvalRefFromProto(a *v1.ApprovalRef) *api.ApprovalRef {
+	if a == nil {
+		return nil
+	}
+	return &api.ApprovalRef{ExecutionID: a.GetExecutionId(), ToolCallID: a.GetToolCallId(), RequestSeq: a.GetRequestSeq()}
+}
+
 func approvalResToProto(a *api.ApprovalResult) *v1.ApprovalResult {
 	if a == nil {
 		return nil
 	}
-	return &v1.ApprovalResult{ToolCallId: a.ToolCallID, Approved: a.Approved, Reason: a.Reason}
+	return &v1.ApprovalResult{ToolCallId: a.ToolCallID, Approved: a.Approved, Reason: a.Reason, RequestSeq: a.RequestSeq}
 }
 
 func approvalResFromProto(a *v1.ApprovalResult) *api.ApprovalResult {
 	if a == nil {
 		return nil
 	}
-	return &api.ApprovalResult{ToolCallID: a.GetToolCallId(), Approved: a.GetApproved(), Reason: a.GetReason()}
+	return &api.ApprovalResult{ToolCallID: a.GetToolCallId(), Approved: a.GetApproved(), Reason: a.GetReason(), RequestSeq: a.GetRequestSeq()}
 }
 
 // DeltaToProto converts an ephemeral streaming chunk. Deltas are transport only, so unlike Event
@@ -616,6 +643,8 @@ func kindToProto(k api.EventKind) v1.EventKind {
 		return v1.EventKind_EVENT_ERROR
 	case api.EventExecutionStart:
 		return v1.EventKind_EVENT_EXECUTION_START
+	case api.EventParked:
+		return v1.EventKind_EVENT_PARKED
 	default:
 		return v1.EventKind_EVENT_KIND_UNSPECIFIED
 	}
@@ -647,6 +676,8 @@ func kindFromProto(k v1.EventKind) api.EventKind {
 		return api.EventError
 	case v1.EventKind_EVENT_EXECUTION_START:
 		return api.EventExecutionStart
+	case v1.EventKind_EVENT_PARKED:
+		return api.EventParked
 	default:
 		return ""
 	}

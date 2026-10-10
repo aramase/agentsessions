@@ -76,7 +76,8 @@ The `Sessions` service. You implement none of it.
 | `Exec` | run one turn, streaming the session, deltas, and committed records | available |
 | `Replay` | re-deliver the committed log, read only | available |
 | `Fork` | branch a session into one or more children | available |
-| `Suspend` / `Resume` | free and restore compute | available |
+| `Suspend` / `Resume` | free and restore compute, or recover an approval-bearing turn | available |
+| `Approve` | commit an explicit approval or denial; no implicit Resume | available, stateless replay only |
 | `DeleteSession`, `Cancel` | — | declared, **not implemented** |
 
 Treat that last row as unavailable regardless of what a generated client offers.
@@ -132,10 +133,105 @@ Setting it to `0` is a real assertion, not an absent value: it says the session 
 
 Every `Exec` stream opens with the session, then carries ephemeral deltas and committed records. The
 session frame is sent before the turn runs, so **an error arrives after it**: read the stream to
-completion rather than treating the first receive as the result. The SDK does this for you.
+completion rather than treating the first receive as the result. A successful approval pause or
+approval-bearing no-input recovery also sends a **final current Session** before OK EOF. Its cursor,
+execution/compute axes and pending correlation describe the durable outcome, not just the starting
+point. The SDK's `TurnResult.Session` is the latest frame, `OnSession` sees both frames, and `LastSeq`
+accounts for Session and record cursors even when recovery produced no records. An initial UID and
+cursor remain available alongside an execution error.
 
 Deltas are transport only. They are never logged, never hash-chained, and never produced on replay,
 so the journal is identical whether or not anyone watched the turn.
+
+### Approval decisions and recovery
+
+A `STATELESS_REPLAY` harness can request `REQUIRES_APPROVAL` through `sink.ToolCall`. The host journals
+`TOOL_CALL` then `APPROVAL_REQUEST`; after a correlated park acknowledgement and actual stream closure,
+it snapshots externally and commits `SUSPEND`. The Exec stream ends successfully with a final
+`EXEC_AWAITING` Session and `pending_approval`. It does not invent `END`, `ERROR`, or a tool result.
+A handoff/snapshot/append failure remains an RPC error with the durable request available for recovery;
+use `Suspend` to retry the recorded route's cold transition when needed.
+
+`GetSession` and `ListSessions` expose valid owned pending decision tuples after a restart. Each tuple
+is derived only through that response's `last_seq`, not a mutable flag or a local SDK cache.
+Decodable legacy/handwritten or malformed approval evidence remains readable in Get/List and Fork
+response metadata, but confers no actionable `pending_approval` reference. Malformed historical
+approval evidence can withhold a reference even for a valid latest request: strict inspection
+validates all approval-bearing executions through the captured cursor. Database/read failures and
+undecodable journal or metadata values still return `INTERNAL`. This rendering tolerance does not
+relax command validation or grant admission authority.
+
+Host `APPROVAL_REQUEST` and `APPROVAL_RESULT` writes alone do not imply live compute. They preserve
+NONE/COLD; only actual execution or lifecycle evidence moves that independent durable projection.
+
+`Approve` requires the
+session UID, execution ID, tool call ID, positive request sequence, and explicit approved presence:
+`false` is denial, not an omitted choice. It commits only `APPROVAL_RESULT` and returns that record plus
+the current Session, without resolving a harness, describing compute, or running a tool. Identical
+retries of tuple, decision, reason and identity return the original record even after a receipt or
+later turn; changed choices/provenance and stale or inherited requests fail `FAILED_PRECONDITION`.
+Missing fields fail `INVALID_ARGUMENT`, unknown UIDs `NOT_FOUND`, and local overlap/CAS/fence conflict
+`ABORTED`.
+
+The Go SDK takes an `api.ApprovalDecision` value, so approved presence is always supplied:
+
+```go
+sess, err := c.GetSession(ctx, uid)
+if err != nil { return err }
+ref := sess.GetPendingApproval()
+if ref == nil { return fmt.Errorf("no pending approval; use Resume if already decided") }
+response, err := c.Approve(ctx, uid, api.ApprovalDecision{
+    ExecutionID: ref.GetExecutionId(), ToolCallID: ref.GetToolCallId(),
+    RequestSeq: ref.GetRequestSeq(), Approved: true, Reason: "reviewed",
+    Identity: api.IdentityRef{Principal: "reviewer", Issuer: "issuer", Subject: "subject"},
+})
+if err != nil { return err }
+// response.Decision is durable; a recovery failure must not be treated as an uncommitted decision.
+fmt.Println("decision committed", response.GetDecision().GetSeq())
+_, err = c.Resume(ctx, uid, false)
+```
+
+Both CLI commands commit a decision **then Resume**; examples assume a pending session on a custom
+stateless harness with a host executor, not the bundled echo/chat harnesses:
+
+```bash
+agentctl approve "$SID" --server 127.0.0.1:8080 --reason "reviewed" \
+  --actor reviewer --identity-issuer issuer --identity-subject subject
+agentctl deny --server 127.0.0.1:8080 --session "$SID" --reason "not allowed"
+# Complete explicit correlation permits an exact retry after pending_approval has cleared:
+agentctl approve --server 127.0.0.1:8080 --session "$SID" \
+  --execution "$EXECUTION" --tool-call "$CALL" --request-seq "$REQUEST_SEQ" \
+  --reason "reviewed" --actor reviewer --identity-issuer issuer --identity-subject subject --json
+```
+
+Omit all three tuple flags to discover through GetSession, or supply all three; partial tuples are
+rejected instead of mixed with newly discovered fields. With no pending reference, discovery advises
+Resume or an explicit exact retry. If Resume fails, either command exits unsuccessfully with
+**"decision committed"** and the recovery cause; it never retracts or changes the decision. `--json`
+prints the original committed decision and resumed current Session as protobuf JSON.
+
+While undecided, `Resume` returns a paused Session without runtime IO. A crash cut after `TOOL_CALL`
+but before its request repairs the request first; this alone does not prove compute cold. For an
+existing current approval-bearing execution, empty-input Exec takes the same recorded recovery path,
+with observer records and initial/final Session frames. It checks explicit `expected_last_seq` under
+the Registry guard before repair/provisioning and honors `deadline_unix`. Request harness/config/cursor
+overrides cannot replace the original invocation. Use Resume for other interrupted executions; other
+inputless Exec calls retain ordinary new-turn behavior.
+
+A decision clears `pending_approval`, but **only a committed receipt unlocks new input** for an owned
+gate. Until then a new-input Exec is `FAILED_PRECONDITION`, even if its requested harness is unserved.
+Decided recovery restores the recorded snapshot/name/version/config/inputs. It can park at another
+gate without `RESUME`, or finish and record `RESUME`. An approved call without a host executor is
+`FAILED_PRECONDITION` and leaves its decision recoverable. Denial records `APPROVAL_DENIED` without
+executing the tool; an approved executor failure records `EXECUTOR_ERROR` for harness/model
+continuation rather than turning that handled receipt into an RPC transport failure.
+
+This gate is stateless only. Identity is provenance, not authorization; there is no policy hook,
+automatic decision, approval timeout or expiry. Snapshots and unresolved requests are retained
+indefinitely. Cancel/DeleteSession remain `UNIMPLEMENTED`; a decision is not cancellation or teardown.
+A fork's inherited unresolved request cannot authorize effects in the child; fork at/after a receipt,
+or explicitly Exec a new turn in the child. See [security.md](security.md) and the
+[executor requirements](harness-authoring.md#host-composition-for-controller-mediated-tools).
 
 ## Choosing a client
 
@@ -210,8 +306,12 @@ Real today, and worth knowing before you build on it:
   startup; there is no API to add one to a running host.
 - **History is pushed whole on every turn.** The controller hands the harness the full log each
   time, which is fine for demos and does not scale to long sessions.
-- **`exec_state` does not distinguish an interrupted turn** from a completed one. Recovery keys off
-  the log, not off that field.
+- **Execution status is not admission authority.** An owned unresolved host approval is narrowly
+  projected as `EXEC_AWAITING`; ordinary/legacy interrupted turns still use metadata's `COMPLETED`
+  fallback. Legacy/malformed approval evidence also retains that fallback without an actionable
+  reference. A decided call with no receipt has no pending reference and is not reported awaiting,
+  but that fallback does not prove completion or unlock new input. Recovery/admission use the journal,
+  not the status enum. Compute status is an independent durable projection, not a live probe.
 - **`Capabilities.streaming` is declared but unused.** Streaming comes from the model provider, not
   from a harness declaring it.
 

@@ -143,6 +143,12 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+      # Go's ./... walk excludes testdata; compile and vet the runnable actor fixture explicitly.
+      - name: approval fixture main builds
+        run: |
+          go build -o "${RUNNER_TEMP}/approval-harness" ./e2e/testdata/approval-harness
+          go vet ./e2e/testdata/approval-harness
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:

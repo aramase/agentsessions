@@ -73,6 +73,14 @@ message Session {
   reserved 4; // retired: a flattened lifecycle phase, replaced by the two axes below
   ExecState exec_state = 13;       // execution/turn axis
   ComputeState compute_state = 14; // incarnation axis
+  // Output-only, derived from an unresolved host-owned APPROVAL_REQUEST in the journal. Unset
+  // when no request is pending or after a committed decision; not caller-writable metadata or a
+  // mutable approval flag. The request belongs to this session's stateless execution; an inherited
+  // unresolved request cannot authorize an effect in a fork child. Correlation is bounded by
+  // this response's last_seq, even if a later append resolves that request. An owned pending
+  // host request reports EXEC_AWAITING; compute_state independently reflects durable lifecycle
+  // metadata. Clearing this reference after a decision does not prove a receipt or completion.
+  ApprovalRef pending_approval = 15;
   int64 last_seq = 5;              // event-log cursor
 
   string parent_uid = 6; // fork lineage
@@ -116,8 +124,15 @@ message ExecRequest {
   // or model still calls CreateSession; this exists so the common case is one call rather than
   // three (create, read the cursor, exec).
   string session = 1;
-  // Input messages for this turn. Empty = resume/re-drive the last non-terminal
-  // execution with no new input (recovery after a crash/interruption).
+  // Input messages for a new turn. While this session owns an unreceipted approval call,
+  // new inputs are FAILED_PRECONDITION, including after a decision but before its receipt.
+  // For an existing current approval-bearing, non-terminal execution, empty inputs recover
+  // that recorded invocation via Resume, without a new EXECUTION_START. Recorded inputs,
+  // config, harness, version and resume cursor win over this request's invocation overrides.
+  // Pending requests return a paused Session without runtime IO; a call-only crash cut repairs
+  // the request first. expected_last_seq is checked under the session guard before runtime IO
+  // or repair, and deadline_unix bounds recovery. Other inputless Exec calls retain their
+  // ordinary new-turn behavior; use Resume for general interrupted-turn recovery.
   repeated Message inputs = 2;
   // Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a
   // harness knows what resuming from a sequence means for its own state. To re-read committed
@@ -148,6 +163,31 @@ message ReplayRequest {
   string session = 1;
   int64 from_seq = 2;
   int64 to_seq = 3; // 0 = to head
+}
+
+// Approve supplies an explicit decision for one unresolved request in a stateless execution.
+// All tuple fields are required and request_seq must be positive. A decision resolves only a
+// request owned by this session, not an inherited parent request. Identity is recorded on the
+// decision's Event.actor as provenance, never checked as authorization. No policy hook, expiry,
+// automatic decision, or Cancel semantics are implied by this API.
+message ApproveRequest {
+  string session = 1;
+  string execution_id = 2;
+  string tool_call_id = 3;
+  int64 request_seq = 4;
+  // Required presence: false means deny; absent is INVALID_ARGUMENT. Unlike this request, the
+  // journal's ApprovalResult.approved remains a non-optional bool for compatibility.
+  optional bool approved = 5;
+  string reason = 6;
+  IdentityRef identity = 7;
+}
+
+// A successful Approve commits the decision only, never resumes compute or executes a tool.
+// The caller invokes Resume separately. decision is the committed APPROVAL_RESULT LogRecord;
+// an exact retry returns that same record, not a new decision or receipt.
+message ApproveResponse {
+  Session session = 1;
+  LogRecord decision = 2;
 }
 
 message SuspendRequest { string session = 1; }
@@ -197,9 +237,12 @@ message ExecUpdate {
     LogRecord record = 1;
     Delta delta = 2;
     // The session this execution runs against, sent as the FIRST frame of every Exec stream. It is
-    // how a caller learns the uid of a session Exec created for it, and it reports the cursor the
-    // turn started from, so a caller that wants the strict CAS on its next turn has the value
-    // without a separate GetSession.
+    // how a caller learns the uid of a session Exec created for it, and it reports the cursor
+    // the turn started from. A successful approval park or approval-bearing no-input recovery
+    // also sends a FINAL current Session before OK stream closure. That frame carries the latest
+    // cursor and pending approval, when present; use the latest Session and committed record
+    // cursors for the next CAS, not the initial frame alone. A pause is not a terminal END/ERROR,
+    // and a pending query alone is not proof that compute has been made cold.
     //
     // It is sent before the turn runs, so a failed execution still tells the caller which session
     // it was against. A caller therefore sees this frame BEFORE any error, and must read the
@@ -230,13 +273,35 @@ service Sessions {
   rpc Exec(ExecRequest) returns (stream ExecUpdate);
   rpc Replay(ReplayRequest) returns (stream LogRecord);
 
+  // Implemented durable approval decisions for STATELESS_REPLAY executions.
+  // OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
+  // approved value, reason and identity returns the existing decision, even after resolution.
+  // A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite.
+  // INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
+  // approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
+  // tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
+  // for a non-stateless execution; Approve does not Describe or resolve a harness.
+  // ABORTED: local contention, append-CAS conflict or superseded fence; retry
+  // after reading the session. Identity is provenance only; this method provides no authorization,
+  // policy hook, expiry, implicit Resume, or Cancel behavior.
+  rpc Approve(ApproveRequest) returns (ApproveResponse);
+
   // In-flight control: cancel the running execution. Not implemented: the server returns
   // UNIMPLEMENTED.
   rpc Cancel(CancelRequest) returns (Session);
 
   // Compute-layer durability. There is no warm Pause: no Runtime backend implements a
   // node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
+  // Suspend routes an unreceipted approval to its recorded harness; ordinary sessions use
+  // their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback.
   rpc Suspend(SuspendRequest) returns (Session); // cold, free worker
+  // An unresolved owned approval returns its current paused Session without runtime IO.
+  // A call-only cut repairs the request; neither outcome proves cold compute. After a decision,
+  // recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without
+  // RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves
+  // the decision recoverable. Approved executor failures are durable EXECUTOR_ERROR receipts,
+  // available to the harness for continuation, not transport failures. Snapshots and unresolved
+  // requests are retained indefinitely; there is no approval expiry or automatic decision.
   rpc Resume(ResumeRequest) returns (Session);
 
   // The differentiator: branch a session at a sequence into one or more children. Forking a

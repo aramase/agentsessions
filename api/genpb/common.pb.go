@@ -1,7 +1,8 @@
 // Shared wire types for the agentsessions Session and Harness services.
 //
 // The Event message is used by BOTH the session log (Sessions.Exec / Replay) and the
-// harness stream (Harness.Connect) — harness events become the log alongside host-owned records.
+// harness stream (Harness.Connect) — durable harness events become the log alongside host-owned
+// records. EVENT_PARKED is a transport-only acknowledgement and is never journaled.
 //
 // The content model (Part) is aligned with A2A `Part` + MCP content for interop; the
 // event/log model is native. Derived from the durable-log & replay contract §7 (record
@@ -39,7 +40,10 @@ const (
 	Mediation_MEDIATION_UNSPECIFIED         Mediation = 0
 	Mediation_MEDIATION_IN_HARNESS_REPORTED Mediation = 1 // harness runs it, reports for audit (cooperative WAL)
 	Mediation_MEDIATION_CONTROLLER_MEDIATED Mediation = 2 // host/gateway executes (host-enforced WAL; trustless)
-	Mediation_MEDIATION_REQUIRES_APPROVAL   Mediation = 3 // pause for human/policy approval
+	// Host-owned durable approval gate for STATELESS_REPLAY only. The harness emits a tool call,
+	// then awaits a decision/receipt or park control frame; it never executes the effect itself.
+	// REQUIRES_MEMORY_SNAPSHOT is unsupported for this gate and fails closed before the effect.
+	Mediation_MEDIATION_REQUIRES_APPROVAL Mediation = 3
 )
 
 // Enum value maps for Mediation.
@@ -101,6 +105,9 @@ const (
 	EventKind_EVENT_END              EventKind = 10
 	EventKind_EVENT_ERROR            EventKind = 11
 	EventKind_EVENT_EXECUTION_START  EventKind = 12 // host-owned config/cursor/input count, before inputs and harness effects
+	// Harness acknowledgement of ControllerFrame.park with the exact ApprovalRef. Transport only:
+	// the host MUST NOT journal/hash-chain it or treat it as a terminal execution outcome.
+	EventKind_EVENT_PARKED EventKind = 13
 )
 
 // Enum value maps for EventKind.
@@ -119,6 +126,7 @@ var (
 		10: "EVENT_END",
 		11: "EVENT_ERROR",
 		12: "EVENT_EXECUTION_START",
+		13: "EVENT_PARKED",
 	}
 	EventKind_value = map[string]int32{
 		"EVENT_KIND_UNSPECIFIED": 0,
@@ -134,6 +142,7 @@ var (
 		"EVENT_END":              10,
 		"EVENT_ERROR":            11,
 		"EVENT_EXECUTION_START":  12,
+		"EVENT_PARKED":           13,
 	}
 )
 
@@ -216,6 +225,60 @@ func (ToolChoice_Mode) EnumDescriptor() ([]byte, []int) {
 	return file_common_proto_rawDescGZIP(), []int{11, 0}
 }
 
+type ToolResult_Code int32
+
+const (
+	// Legacy/unspecified status. With is_error=false this is also a successful receipt.
+	// Old is_error=true receipts retain their legacy, unclassified failure shape.
+	ToolResult_CODE_UNSPECIFIED ToolResult_Code = 0
+	// A denied approval: is_error=true and the executor MUST NOT have been invoked.
+	ToolResult_APPROVAL_DENIED ToolResult_Code = 1
+	// An attempted executor call failed: is_error=true; error describes the failure. This is
+	// a durable handled receipt, not an unrecorded effect or an approval denial.
+	ToolResult_EXECUTOR_ERROR ToolResult_Code = 2
+)
+
+// Enum value maps for ToolResult_Code.
+var (
+	ToolResult_Code_name = map[int32]string{
+		0: "CODE_UNSPECIFIED",
+		1: "APPROVAL_DENIED",
+		2: "EXECUTOR_ERROR",
+	}
+	ToolResult_Code_value = map[string]int32{
+		"CODE_UNSPECIFIED": 0,
+		"APPROVAL_DENIED":  1,
+		"EXECUTOR_ERROR":   2,
+	}
+)
+
+func (x ToolResult_Code) Enum() *ToolResult_Code {
+	p := new(ToolResult_Code)
+	*p = x
+	return p
+}
+
+func (x ToolResult_Code) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ToolResult_Code) Descriptor() protoreflect.EnumDescriptor {
+	return file_common_proto_enumTypes[3].Descriptor()
+}
+
+func (ToolResult_Code) Type() protoreflect.EnumType {
+	return &file_common_proto_enumTypes[3]
+}
+
+func (x ToolResult_Code) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ToolResult_Code.Descriptor instead.
+func (ToolResult_Code) EnumDescriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{14, 0}
+}
+
 type Lifecycle_Kind int32
 
 const (
@@ -258,11 +321,11 @@ func (x Lifecycle_Kind) String() string {
 }
 
 func (Lifecycle_Kind) Descriptor() protoreflect.EnumDescriptor {
-	return file_common_proto_enumTypes[3].Descriptor()
+	return file_common_proto_enumTypes[4].Descriptor()
 }
 
 func (Lifecycle_Kind) Type() protoreflect.EnumType {
-	return &file_common_proto_enumTypes[3]
+	return &file_common_proto_enumTypes[4]
 }
 
 func (x Lifecycle_Kind) Number() protoreflect.EnumNumber {
@@ -271,7 +334,7 @@ func (x Lifecycle_Kind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Lifecycle_Kind.Descriptor instead.
 func (Lifecycle_Kind) EnumDescriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{19, 0}
+	return file_common_proto_rawDescGZIP(), []int{20, 0}
 }
 
 // ResourceMetadata is carried by every top-level resource.
@@ -1403,6 +1466,8 @@ func (x *ToolCall) GetIdempotencyKey() string {
 	return ""
 }
 
+// ToolResult is a durable execution receipt, also usable as model-facing history. A decision
+// itself is a separate host-owned APPROVAL_RESULT; it is not embedded in this message.
 type ToolResult struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	Id           string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -1414,9 +1479,16 @@ type ToolResult struct {
 	// content is the model-facing result (MCP CallToolResult.content: text, file, structured data).
 	// A harness records on EVENT_TOOL_RESULT the same ToolResult it feeds back as a tool_result part,
 	// so history rebuilt from the journal can give the model what it saw live.
-	Content       []*Part `protobuf:"bytes,7,rep,name=content,proto3" json:"content,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Content []*Part         `protobuf:"bytes,7,rep,name=content,proto3" json:"content,omitempty"`
+	Code    ToolResult_Code `protobuf:"varint,8,opt,name=code,proto3,enum=agentsessions.v1.ToolResult_Code" json:"code,omitempty"`
+	// For approval-gated calls, the positive journal sequences of the host-owned request and
+	// decision. Both are set on success, denial, or executor failure after approval. Other calls
+	// and legacy receipts leave both zero. The host checks these against the same session,
+	// execution_id and tool call id; a receipt cannot resolve a different request/decision.
+	ApprovalRequestSeq  int64 `protobuf:"varint,9,opt,name=approval_request_seq,json=approvalRequestSeq,proto3" json:"approval_request_seq,omitempty"`
+	ApprovalDecisionSeq int64 `protobuf:"varint,10,opt,name=approval_decision_seq,json=approvalDecisionSeq,proto3" json:"approval_decision_seq,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *ToolResult) Reset() {
@@ -1498,8 +1570,33 @@ func (x *ToolResult) GetContent() []*Part {
 	return nil
 }
 
-// Approval is modeled as durable log entries: an unresolved request, later resolved by a
-// decision — so compute can suspend while awaiting a human/policy decision (§7).
+func (x *ToolResult) GetCode() ToolResult_Code {
+	if x != nil {
+		return x.Code
+	}
+	return ToolResult_CODE_UNSPECIFIED
+}
+
+func (x *ToolResult) GetApprovalRequestSeq() int64 {
+	if x != nil {
+		return x.ApprovalRequestSeq
+	}
+	return 0
+}
+
+func (x *ToolResult) GetApprovalDecisionSeq() int64 {
+	if x != nil {
+		return x.ApprovalDecisionSeq
+	}
+	return 0
+}
+
+// Approval is durable journal state, not a mutable session flag or side table. For a
+// REQUIRES_APPROVAL call the host commits TOOL_CALL then APPROVAL_REQUEST before parking;
+// only the host may commit the request or its later APPROVAL_RESULT. The harness cannot mint
+// requests or decisions by emitting these events. Identity on a decision's Event.actor is
+// recorded provenance only, not authorization. This gate supports STATELESS_REPLAY only;
+// it defines no policy hook, expiry, automatic decision, or Cancel behavior.
 type ApprovalRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ToolCallId    string                 `protobuf:"bytes,1,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
@@ -1552,11 +1649,18 @@ func (x *ApprovalRequest) GetReason() string {
 	return ""
 }
 
+// ApprovalResult resolves one request in the enclosing session and Event.execution_id.
+// A committed decision allows recovery via Resume; Approve itself never invokes the executor.
+// The host also sends this body in ControllerFrame.approval before the correlated tool receipt
+// during decided recovery/replay. approved=false is a real denial, not an absent decision.
 type ApprovalResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ToolCallId    string                 `protobuf:"bytes,1,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
-	Approved      bool                   `protobuf:"varint,2,opt,name=approved,proto3" json:"approved,omitempty"`
-	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	ToolCallId string                 `protobuf:"bytes,1,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
+	Approved   bool                   `protobuf:"varint,2,opt,name=approved,proto3" json:"approved,omitempty"` // non-optional durable value; request-level decision presence is in ApproveRequest
+	Reason     string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Positive sequence of the resolved APPROVAL_REQUEST. Zero is retained for legacy decisions;
+	// it cannot identify a new durable approval request.
+	RequestSeq    int64 `protobuf:"varint,4,opt,name=request_seq,json=requestSeq,proto3" json:"request_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1612,6 +1716,76 @@ func (x *ApprovalResult) GetReason() string {
 	return ""
 }
 
+func (x *ApprovalResult) GetRequestSeq() int64 {
+	if x != nil {
+		return x.RequestSeq
+	}
+	return 0
+}
+
+// ApprovalRef identifies an unresolved, host-owned APPROVAL_REQUEST within the enclosing
+// session. All fields are required by the approval protocol and request_seq must be positive.
+// A reference inherited through Fork cannot authorize a new effect in the child session.
+type ApprovalRef struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ExecutionId   string                 `protobuf:"bytes,1,opt,name=execution_id,json=executionId,proto3" json:"execution_id,omitempty"`
+	ToolCallId    string                 `protobuf:"bytes,2,opt,name=tool_call_id,json=toolCallId,proto3" json:"tool_call_id,omitempty"`
+	RequestSeq    int64                  `protobuf:"varint,3,opt,name=request_seq,json=requestSeq,proto3" json:"request_seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApprovalRef) Reset() {
+	*x = ApprovalRef{}
+	mi := &file_common_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApprovalRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApprovalRef) ProtoMessage() {}
+
+func (x *ApprovalRef) ProtoReflect() protoreflect.Message {
+	mi := &file_common_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApprovalRef.ProtoReflect.Descriptor instead.
+func (*ApprovalRef) Descriptor() ([]byte, []int) {
+	return file_common_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ApprovalRef) GetExecutionId() string {
+	if x != nil {
+		return x.ExecutionId
+	}
+	return ""
+}
+
+func (x *ApprovalRef) GetToolCallId() string {
+	if x != nil {
+		return x.ToolCallId
+	}
+	return ""
+}
+
+func (x *ApprovalRef) GetRequestSeq() int64 {
+	if x != nil {
+		return x.RequestSeq
+	}
+	return 0
+}
+
 type Error struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Code          int32                  `protobuf:"varint,1,opt,name=code,proto3" json:"code,omitempty"` // grpc status code
@@ -1622,7 +1796,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_common_proto_msgTypes[17]
+	mi := &file_common_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1634,7 +1808,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[17]
+	mi := &file_common_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1647,7 +1821,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{17}
+	return file_common_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Error) GetCode() int32 {
@@ -1674,7 +1848,7 @@ type HarnessEnd struct {
 
 func (x *HarnessEnd) Reset() {
 	*x = HarnessEnd{}
-	mi := &file_common_proto_msgTypes[18]
+	mi := &file_common_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1686,7 +1860,7 @@ func (x *HarnessEnd) String() string {
 func (*HarnessEnd) ProtoMessage() {}
 
 func (x *HarnessEnd) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[18]
+	mi := &file_common_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1699,7 +1873,7 @@ func (x *HarnessEnd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HarnessEnd.ProtoReflect.Descriptor instead.
 func (*HarnessEnd) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{18}
+	return file_common_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *HarnessEnd) GetState() string {
@@ -1737,7 +1911,7 @@ type Lifecycle struct {
 
 func (x *Lifecycle) Reset() {
 	*x = Lifecycle{}
-	mi := &file_common_proto_msgTypes[19]
+	mi := &file_common_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1749,7 +1923,7 @@ func (x *Lifecycle) String() string {
 func (*Lifecycle) ProtoMessage() {}
 
 func (x *Lifecycle) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[19]
+	mi := &file_common_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1762,7 +1936,7 @@ func (x *Lifecycle) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Lifecycle.ProtoReflect.Descriptor instead.
 func (*Lifecycle) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{19}
+	return file_common_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Lifecycle) GetKind() Lifecycle_Kind {
@@ -1835,7 +2009,7 @@ type ExecutionStart struct {
 
 func (x *ExecutionStart) Reset() {
 	*x = ExecutionStart{}
-	mi := &file_common_proto_msgTypes[20]
+	mi := &file_common_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1847,7 +2021,7 @@ func (x *ExecutionStart) String() string {
 func (*ExecutionStart) ProtoMessage() {}
 
 func (x *ExecutionStart) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[20]
+	mi := &file_common_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1860,7 +2034,7 @@ func (x *ExecutionStart) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutionStart.ProtoReflect.Descriptor instead.
 func (*ExecutionStart) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{20}
+	return file_common_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ExecutionStart) GetConfig() []byte {
@@ -1898,7 +2072,8 @@ func (x *ExecutionStart) GetHarnessVersion() string {
 	return ""
 }
 
-// Event is the shared journal/stream content unit; EXECUTION_START is emitted only by the host.
+// Event is the shared journal/stream content unit; EXECUTION_START, APPROVAL_REQUEST and
+// APPROVAL_RESULT are host-owned journal entries. PARKED is transport only, never journaled.
 // Ordering (seq) and integrity (prev_hash /
 // content_hash) are host-assigned and live on LogRecord — the harness, which does not know
 // seq/prev, emits a hash-free Event, so there is no circular hashing. Streaming deltas are
@@ -1922,6 +2097,7 @@ type Event struct {
 	//	*Event_End
 	//	*Event_Error
 	//	*Event_ExecutionStart
+	//	*Event_Parked
 	Body          isEvent_Body `protobuf_oneof:"body"`
 	Actor         *IdentityRef `protobuf:"bytes,18,opt,name=actor,proto3" json:"actor,omitempty"` // emitter principal -> provenance
 	unknownFields protoimpl.UnknownFields
@@ -1930,7 +2106,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_common_proto_msgTypes[21]
+	mi := &file_common_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1942,7 +2118,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[21]
+	mi := &file_common_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1955,7 +2131,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{21}
+	return file_common_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Event) GetExecutionId() string {
@@ -2092,6 +2268,15 @@ func (x *Event) GetExecutionStart() *ExecutionStart {
 	return nil
 }
 
+func (x *Event) GetParked() *ApprovalRef {
+	if x != nil {
+		if x, ok := x.Body.(*Event_Parked); ok {
+			return x.Parked
+		}
+	}
+	return nil
+}
+
 func (x *Event) GetActor() *IdentityRef {
 	if x != nil {
 		return x.Actor
@@ -2147,6 +2332,11 @@ type Event_ExecutionStart struct {
 	ExecutionStart *ExecutionStart `protobuf:"bytes,19,opt,name=execution_start,json=executionStart,proto3,oneof"`
 }
 
+type Event_Parked struct {
+	// EVENT_PARKED echoes the park reference; Event.execution_id must match its execution_id.
+	Parked *ApprovalRef `protobuf:"bytes,20,opt,name=parked,proto3,oneof"`
+}
+
 func (*Event_Message) isEvent_Body() {}
 
 func (*Event_Model) isEvent_Body() {}
@@ -2169,6 +2359,8 @@ func (*Event_Error) isEvent_Body() {}
 
 func (*Event_ExecutionStart) isEvent_Body() {}
 
+func (*Event_Parked) isEvent_Body() {}
+
 // LogRecord is the host's durable, ordered wrapper around an Event. The host assigns seq,
 // links the hash-chain (content_hash = H(prev_hash || seq || canonical(event)); at a fork
 // child.first.prev_hash = parent@R.content_hash), and records the incarnation fence token.
@@ -2187,7 +2379,7 @@ type LogRecord struct {
 
 func (x *LogRecord) Reset() {
 	*x = LogRecord{}
-	mi := &file_common_proto_msgTypes[22]
+	mi := &file_common_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2199,7 +2391,7 @@ func (x *LogRecord) String() string {
 func (*LogRecord) ProtoMessage() {}
 
 func (x *LogRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_common_proto_msgTypes[22]
+	mi := &file_common_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2212,7 +2404,7 @@ func (x *LogRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogRecord.ProtoReflect.Descriptor instead.
 func (*LogRecord) Descriptor() ([]byte, []int) {
-	return file_common_proto_rawDescGZIP(), []int{22}
+	return file_common_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *LogRecord) GetSeq() int64 {
@@ -2349,7 +2541,7 @@ const file_common_proto_rawDesc = "" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12+\n" +
 	"\x04args\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x04args\x129\n" +
 	"\tmediation\x18\x04 \x01(\x0e2\x1b.agentsessions.v1.MediationR\tmediation\x12'\n" +
-	"\x0fidempotency_key\x18\x05 \x01(\tR\x0eidempotencyKey\"\xf4\x01\n" +
+	"\x0fidempotency_key\x18\x05 \x01(\tR\x0eidempotencyKey\"\xd8\x03\n" +
 	"\n" +
 	"ToolResult\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12/\n" +
@@ -2359,16 +2551,32 @@ const file_common_proto_rawDesc = "" +
 	"\routput_digest\x18\x06 \x01(\tR\foutputDigest\x12\x19\n" +
 	"\bis_error\x18\x04 \x01(\bR\aisError\x12\x14\n" +
 	"\x05error\x18\x05 \x01(\tR\x05error\x120\n" +
-	"\acontent\x18\a \x03(\v2\x16.agentsessions.v1.PartR\acontent\"K\n" +
+	"\acontent\x18\a \x03(\v2\x16.agentsessions.v1.PartR\acontent\x125\n" +
+	"\x04code\x18\b \x01(\x0e2!.agentsessions.v1.ToolResult.CodeR\x04code\x120\n" +
+	"\x14approval_request_seq\x18\t \x01(\x03R\x12approvalRequestSeq\x122\n" +
+	"\x15approval_decision_seq\x18\n" +
+	" \x01(\x03R\x13approvalDecisionSeq\"E\n" +
+	"\x04Code\x12\x14\n" +
+	"\x10CODE_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fAPPROVAL_DENIED\x10\x01\x12\x12\n" +
+	"\x0eEXECUTOR_ERROR\x10\x02\"K\n" +
 	"\x0fApprovalRequest\x12 \n" +
 	"\ftool_call_id\x18\x01 \x01(\tR\n" +
 	"toolCallId\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"f\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"\x87\x01\n" +
 	"\x0eApprovalResult\x12 \n" +
 	"\ftool_call_id\x18\x01 \x01(\tR\n" +
 	"toolCallId\x12\x1a\n" +
 	"\bapproved\x18\x02 \x01(\bR\bapproved\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"=\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x1f\n" +
+	"\vrequest_seq\x18\x04 \x01(\x03R\n" +
+	"requestSeq\"s\n" +
+	"\vApprovalRef\x12!\n" +
+	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12 \n" +
+	"\ftool_call_id\x18\x02 \x01(\tR\n" +
+	"toolCallId\x12\x1f\n" +
+	"\vrequest_seq\x18\x03 \x01(\x03R\n" +
+	"requestSeq\"=\n" +
 	"\x05Error\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x05R\x04code\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\"Q\n" +
@@ -2397,7 +2605,7 @@ const file_common_proto_rawDesc = "" +
 	"inputCount\x88\x01\x01\x12\x18\n" +
 	"\aharness\x18\x04 \x01(\tR\aharness\x12'\n" +
 	"\x0fharness_version\x18\x05 \x01(\tR\x0eharnessVersionB\x0e\n" +
-	"\f_input_count\"\xff\x06\n" +
+	"\f_input_count\"\xb8\a\n" +
 	"\x05Event\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12*\n" +
 	"\x02ts\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x02ts\x12%\n" +
@@ -2414,7 +2622,8 @@ const file_common_proto_rawDesc = "" +
 	"\tlifecycle\x18\x0f \x01(\v2\x1b.agentsessions.v1.LifecycleH\x00R\tlifecycle\x120\n" +
 	"\x03end\x18\x10 \x01(\v2\x1c.agentsessions.v1.HarnessEndH\x00R\x03end\x12/\n" +
 	"\x05error\x18\x11 \x01(\v2\x17.agentsessions.v1.ErrorH\x00R\x05error\x12K\n" +
-	"\x0fexecution_start\x18\x13 \x01(\v2 .agentsessions.v1.ExecutionStartH\x00R\x0eexecutionStart\x123\n" +
+	"\x0fexecution_start\x18\x13 \x01(\v2 .agentsessions.v1.ExecutionStartH\x00R\x0eexecutionStart\x127\n" +
+	"\x06parked\x18\x14 \x01(\v2\x1d.agentsessions.v1.ApprovalRefH\x00R\x06parked\x123\n" +
 	"\x05actor\x18\x12 \x01(\v2\x1d.agentsessions.v1.IdentityRefR\x05actorB\x06\n" +
 	"\x04bodyJ\x04\b\x01\x10\x02J\x04\b\x05\x10\x06J\x04\b\x06\x10\a\"\xa2\x01\n" +
 	"\tLogRecord\x12\x10\n" +
@@ -2427,7 +2636,7 @@ const file_common_proto_rawDesc = "" +
 	"\x15MEDIATION_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dMEDIATION_IN_HARNESS_REPORTED\x10\x01\x12!\n" +
 	"\x1dMEDIATION_CONTROLLER_MEDIATED\x10\x02\x12\x1f\n" +
-	"\x1bMEDIATION_REQUIRES_APPROVAL\x10\x03*\xa4\x02\n" +
+	"\x1bMEDIATION_REQUIRES_APPROVAL\x10\x03*\xb6\x02\n" +
 	"\tEventKind\x12\x1a\n" +
 	"\x16EVENT_KIND_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vEVENT_INPUT\x10\x01\x12\x14\n" +
@@ -2442,7 +2651,8 @@ const file_common_proto_rawDesc = "" +
 	"\tEVENT_END\x10\n" +
 	"\x12\x0f\n" +
 	"\vEVENT_ERROR\x10\v\x12\x19\n" +
-	"\x15EVENT_EXECUTION_START\x10\fB<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
+	"\x15EVENT_EXECUTION_START\x10\f\x12\x10\n" +
+	"\fEVENT_PARKED\x10\rB<Z:github.com/aramase/agentsessions/api/genpb;agentsessionsv1b\x06proto3"
 
 var (
 	file_common_proto_rawDescOnce sync.Once
@@ -2456,86 +2666,90 @@ func file_common_proto_rawDescGZIP() []byte {
 	return file_common_proto_rawDescData
 }
 
-var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_common_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_common_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_common_proto_goTypes = []any{
 	(Mediation)(0),                // 0: agentsessions.v1.Mediation
 	(EventKind)(0),                // 1: agentsessions.v1.EventKind
 	(ToolChoice_Mode)(0),          // 2: agentsessions.v1.ToolChoice.Mode
-	(Lifecycle_Kind)(0),           // 3: agentsessions.v1.Lifecycle.Kind
-	(*ResourceMetadata)(nil),      // 4: agentsessions.v1.ResourceMetadata
-	(*Part)(nil),                  // 5: agentsessions.v1.Part
-	(*TextPart)(nil),              // 6: agentsessions.v1.TextPart
-	(*FilePart)(nil),              // 7: agentsessions.v1.FilePart
-	(*DataPart)(nil),              // 8: agentsessions.v1.DataPart
-	(*ReasoningPart)(nil),         // 9: agentsessions.v1.ReasoningPart
-	(*Message)(nil),               // 10: agentsessions.v1.Message
-	(*IdentityRef)(nil),           // 11: agentsessions.v1.IdentityRef
-	(*Origin)(nil),                // 12: agentsessions.v1.Origin
-	(*ModelCall)(nil),             // 13: agentsessions.v1.ModelCall
-	(*ToolDefinition)(nil),        // 14: agentsessions.v1.ToolDefinition
-	(*ToolChoice)(nil),            // 15: agentsessions.v1.ToolChoice
-	(*Usage)(nil),                 // 16: agentsessions.v1.Usage
-	(*ToolCall)(nil),              // 17: agentsessions.v1.ToolCall
-	(*ToolResult)(nil),            // 18: agentsessions.v1.ToolResult
-	(*ApprovalRequest)(nil),       // 19: agentsessions.v1.ApprovalRequest
-	(*ApprovalResult)(nil),        // 20: agentsessions.v1.ApprovalResult
-	(*Error)(nil),                 // 21: agentsessions.v1.Error
-	(*HarnessEnd)(nil),            // 22: agentsessions.v1.HarnessEnd
-	(*Lifecycle)(nil),             // 23: agentsessions.v1.Lifecycle
-	(*ExecutionStart)(nil),        // 24: agentsessions.v1.ExecutionStart
-	(*Event)(nil),                 // 25: agentsessions.v1.Event
-	(*LogRecord)(nil),             // 26: agentsessions.v1.LogRecord
-	nil,                           // 27: agentsessions.v1.Origin.AttributesEntry
-	nil,                           // 28: agentsessions.v1.ModelCall.ParamsEntry
-	(*timestamppb.Timestamp)(nil), // 29: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),       // 30: google.protobuf.Struct
+	(ToolResult_Code)(0),          // 3: agentsessions.v1.ToolResult.Code
+	(Lifecycle_Kind)(0),           // 4: agentsessions.v1.Lifecycle.Kind
+	(*ResourceMetadata)(nil),      // 5: agentsessions.v1.ResourceMetadata
+	(*Part)(nil),                  // 6: agentsessions.v1.Part
+	(*TextPart)(nil),              // 7: agentsessions.v1.TextPart
+	(*FilePart)(nil),              // 8: agentsessions.v1.FilePart
+	(*DataPart)(nil),              // 9: agentsessions.v1.DataPart
+	(*ReasoningPart)(nil),         // 10: agentsessions.v1.ReasoningPart
+	(*Message)(nil),               // 11: agentsessions.v1.Message
+	(*IdentityRef)(nil),           // 12: agentsessions.v1.IdentityRef
+	(*Origin)(nil),                // 13: agentsessions.v1.Origin
+	(*ModelCall)(nil),             // 14: agentsessions.v1.ModelCall
+	(*ToolDefinition)(nil),        // 15: agentsessions.v1.ToolDefinition
+	(*ToolChoice)(nil),            // 16: agentsessions.v1.ToolChoice
+	(*Usage)(nil),                 // 17: agentsessions.v1.Usage
+	(*ToolCall)(nil),              // 18: agentsessions.v1.ToolCall
+	(*ToolResult)(nil),            // 19: agentsessions.v1.ToolResult
+	(*ApprovalRequest)(nil),       // 20: agentsessions.v1.ApprovalRequest
+	(*ApprovalResult)(nil),        // 21: agentsessions.v1.ApprovalResult
+	(*ApprovalRef)(nil),           // 22: agentsessions.v1.ApprovalRef
+	(*Error)(nil),                 // 23: agentsessions.v1.Error
+	(*HarnessEnd)(nil),            // 24: agentsessions.v1.HarnessEnd
+	(*Lifecycle)(nil),             // 25: agentsessions.v1.Lifecycle
+	(*ExecutionStart)(nil),        // 26: agentsessions.v1.ExecutionStart
+	(*Event)(nil),                 // 27: agentsessions.v1.Event
+	(*LogRecord)(nil),             // 28: agentsessions.v1.LogRecord
+	nil,                           // 29: agentsessions.v1.Origin.AttributesEntry
+	nil,                           // 30: agentsessions.v1.ModelCall.ParamsEntry
+	(*timestamppb.Timestamp)(nil), // 31: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),       // 32: google.protobuf.Struct
 }
 var file_common_proto_depIdxs = []int32{
-	29, // 0: agentsessions.v1.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
-	29, // 1: agentsessions.v1.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
-	6,  // 2: agentsessions.v1.Part.text:type_name -> agentsessions.v1.TextPart
-	7,  // 3: agentsessions.v1.Part.file:type_name -> agentsessions.v1.FilePart
-	8,  // 4: agentsessions.v1.Part.data:type_name -> agentsessions.v1.DataPart
-	9,  // 5: agentsessions.v1.Part.reasoning:type_name -> agentsessions.v1.ReasoningPart
-	17, // 6: agentsessions.v1.Part.tool_call:type_name -> agentsessions.v1.ToolCall
-	18, // 7: agentsessions.v1.Part.tool_result:type_name -> agentsessions.v1.ToolResult
-	30, // 8: agentsessions.v1.DataPart.data:type_name -> google.protobuf.Struct
-	5,  // 9: agentsessions.v1.ReasoningPart.summary:type_name -> agentsessions.v1.Part
-	5,  // 10: agentsessions.v1.Message.parts:type_name -> agentsessions.v1.Part
-	27, // 11: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
-	28, // 12: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
-	10, // 13: agentsessions.v1.ModelCall.messages:type_name -> agentsessions.v1.Message
-	14, // 14: agentsessions.v1.ModelCall.tools:type_name -> agentsessions.v1.ToolDefinition
-	15, // 15: agentsessions.v1.ModelCall.tool_choice:type_name -> agentsessions.v1.ToolChoice
-	30, // 16: agentsessions.v1.ToolDefinition.input_schema:type_name -> google.protobuf.Struct
+	31, // 0: agentsessions.v1.ResourceMetadata.create_time:type_name -> google.protobuf.Timestamp
+	31, // 1: agentsessions.v1.ResourceMetadata.update_time:type_name -> google.protobuf.Timestamp
+	7,  // 2: agentsessions.v1.Part.text:type_name -> agentsessions.v1.TextPart
+	8,  // 3: agentsessions.v1.Part.file:type_name -> agentsessions.v1.FilePart
+	9,  // 4: agentsessions.v1.Part.data:type_name -> agentsessions.v1.DataPart
+	10, // 5: agentsessions.v1.Part.reasoning:type_name -> agentsessions.v1.ReasoningPart
+	18, // 6: agentsessions.v1.Part.tool_call:type_name -> agentsessions.v1.ToolCall
+	19, // 7: agentsessions.v1.Part.tool_result:type_name -> agentsessions.v1.ToolResult
+	32, // 8: agentsessions.v1.DataPart.data:type_name -> google.protobuf.Struct
+	6,  // 9: agentsessions.v1.ReasoningPart.summary:type_name -> agentsessions.v1.Part
+	6,  // 10: agentsessions.v1.Message.parts:type_name -> agentsessions.v1.Part
+	29, // 11: agentsessions.v1.Origin.attributes:type_name -> agentsessions.v1.Origin.AttributesEntry
+	30, // 12: agentsessions.v1.ModelCall.params:type_name -> agentsessions.v1.ModelCall.ParamsEntry
+	11, // 13: agentsessions.v1.ModelCall.messages:type_name -> agentsessions.v1.Message
+	15, // 14: agentsessions.v1.ModelCall.tools:type_name -> agentsessions.v1.ToolDefinition
+	16, // 15: agentsessions.v1.ModelCall.tool_choice:type_name -> agentsessions.v1.ToolChoice
+	32, // 16: agentsessions.v1.ToolDefinition.input_schema:type_name -> google.protobuf.Struct
 	2,  // 17: agentsessions.v1.ToolChoice.mode:type_name -> agentsessions.v1.ToolChoice.Mode
-	30, // 18: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
+	32, // 18: agentsessions.v1.ToolCall.args:type_name -> google.protobuf.Struct
 	0,  // 19: agentsessions.v1.ToolCall.mediation:type_name -> agentsessions.v1.Mediation
-	30, // 20: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
-	5,  // 21: agentsessions.v1.ToolResult.content:type_name -> agentsessions.v1.Part
-	21, // 22: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
-	3,  // 23: agentsessions.v1.Lifecycle.kind:type_name -> agentsessions.v1.Lifecycle.Kind
-	29, // 24: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
-	1,  // 25: agentsessions.v1.Event.kind:type_name -> agentsessions.v1.EventKind
-	10, // 26: agentsessions.v1.Event.message:type_name -> agentsessions.v1.Message
-	13, // 27: agentsessions.v1.Event.model:type_name -> agentsessions.v1.ModelCall
-	17, // 28: agentsessions.v1.Event.tool:type_name -> agentsessions.v1.ToolCall
-	18, // 29: agentsessions.v1.Event.result:type_name -> agentsessions.v1.ToolResult
-	19, // 30: agentsessions.v1.Event.approval:type_name -> agentsessions.v1.ApprovalRequest
-	20, // 31: agentsessions.v1.Event.approval_result:type_name -> agentsessions.v1.ApprovalResult
-	16, // 32: agentsessions.v1.Event.usage:type_name -> agentsessions.v1.Usage
-	23, // 33: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
-	22, // 34: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
-	21, // 35: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
-	24, // 36: agentsessions.v1.Event.execution_start:type_name -> agentsessions.v1.ExecutionStart
-	11, // 37: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
-	25, // 38: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
-	39, // [39:39] is the sub-list for method output_type
-	39, // [39:39] is the sub-list for method input_type
-	39, // [39:39] is the sub-list for extension type_name
-	39, // [39:39] is the sub-list for extension extendee
-	0,  // [0:39] is the sub-list for field type_name
+	32, // 20: agentsessions.v1.ToolResult.output:type_name -> google.protobuf.Struct
+	6,  // 21: agentsessions.v1.ToolResult.content:type_name -> agentsessions.v1.Part
+	3,  // 22: agentsessions.v1.ToolResult.code:type_name -> agentsessions.v1.ToolResult.Code
+	23, // 23: agentsessions.v1.HarnessEnd.error:type_name -> agentsessions.v1.Error
+	4,  // 24: agentsessions.v1.Lifecycle.kind:type_name -> agentsessions.v1.Lifecycle.Kind
+	31, // 25: agentsessions.v1.Event.ts:type_name -> google.protobuf.Timestamp
+	1,  // 26: agentsessions.v1.Event.kind:type_name -> agentsessions.v1.EventKind
+	11, // 27: agentsessions.v1.Event.message:type_name -> agentsessions.v1.Message
+	14, // 28: agentsessions.v1.Event.model:type_name -> agentsessions.v1.ModelCall
+	18, // 29: agentsessions.v1.Event.tool:type_name -> agentsessions.v1.ToolCall
+	19, // 30: agentsessions.v1.Event.result:type_name -> agentsessions.v1.ToolResult
+	20, // 31: agentsessions.v1.Event.approval:type_name -> agentsessions.v1.ApprovalRequest
+	21, // 32: agentsessions.v1.Event.approval_result:type_name -> agentsessions.v1.ApprovalResult
+	17, // 33: agentsessions.v1.Event.usage:type_name -> agentsessions.v1.Usage
+	25, // 34: agentsessions.v1.Event.lifecycle:type_name -> agentsessions.v1.Lifecycle
+	24, // 35: agentsessions.v1.Event.end:type_name -> agentsessions.v1.HarnessEnd
+	23, // 36: agentsessions.v1.Event.error:type_name -> agentsessions.v1.Error
+	26, // 37: agentsessions.v1.Event.execution_start:type_name -> agentsessions.v1.ExecutionStart
+	22, // 38: agentsessions.v1.Event.parked:type_name -> agentsessions.v1.ApprovalRef
+	12, // 39: agentsessions.v1.Event.actor:type_name -> agentsessions.v1.IdentityRef
+	27, // 40: agentsessions.v1.LogRecord.event:type_name -> agentsessions.v1.Event
+	41, // [41:41] is the sub-list for method output_type
+	41, // [41:41] is the sub-list for method input_type
+	41, // [41:41] is the sub-list for extension type_name
+	41, // [41:41] is the sub-list for extension extendee
+	0,  // [0:41] is the sub-list for field type_name
 }
 
 func init() { file_common_proto_init() }
@@ -2559,8 +2773,8 @@ func file_common_proto_init() {
 		(*ReasoningPart_OpaqueBytes)(nil),
 		(*ReasoningPart_OpaqueUri)(nil),
 	}
-	file_common_proto_msgTypes[20].OneofWrappers = []any{}
-	file_common_proto_msgTypes[21].OneofWrappers = []any{
+	file_common_proto_msgTypes[21].OneofWrappers = []any{}
+	file_common_proto_msgTypes[22].OneofWrappers = []any{
 		(*Event_Message)(nil),
 		(*Event_Model)(nil),
 		(*Event_Tool)(nil),
@@ -2572,14 +2786,15 @@ func file_common_proto_init() {
 		(*Event_End)(nil),
 		(*Event_Error)(nil),
 		(*Event_ExecutionStart)(nil),
+		(*Event_Parked)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_common_proto_rawDesc), len(file_common_proto_rawDesc)),
-			NumEnums:      4,
-			NumMessages:   25,
+			NumEnums:      5,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

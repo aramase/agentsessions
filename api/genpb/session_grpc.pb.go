@@ -30,6 +30,7 @@ const (
 	Sessions_DeleteSession_FullMethodName = "/agentsessions.v1.Sessions/DeleteSession"
 	Sessions_Exec_FullMethodName          = "/agentsessions.v1.Sessions/Exec"
 	Sessions_Replay_FullMethodName        = "/agentsessions.v1.Sessions/Replay"
+	Sessions_Approve_FullMethodName       = "/agentsessions.v1.Sessions/Approve"
 	Sessions_Cancel_FullMethodName        = "/agentsessions.v1.Sessions/Cancel"
 	Sessions_Suspend_FullMethodName       = "/agentsessions.v1.Sessions/Suspend"
 	Sessions_Resume_FullMethodName        = "/agentsessions.v1.Sessions/Resume"
@@ -50,12 +51,33 @@ type SessionsClient interface {
 	// ephemeral Deltas; Replay re-delivers committed records only (read-only).
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecUpdate], error)
 	Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogRecord], error)
+	// Implemented durable approval decisions for STATELESS_REPLAY executions.
+	// OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
+	// approved value, reason and identity returns the existing decision, even after resolution.
+	// A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite.
+	// INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
+	// approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
+	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
+	// for a non-stateless execution; Approve does not Describe or resolve a harness.
+	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
+	// after reading the session. Identity is provenance only; this method provides no authorization,
+	// policy hook, expiry, implicit Resume, or Cancel behavior.
+	Approve(ctx context.Context, in *ApproveRequest, opts ...grpc.CallOption) (*ApproveResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns
 	// UNIMPLEMENTED.
 	Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*Session, error)
 	// Compute-layer durability. There is no warm Pause: no Runtime backend implements a
 	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
+	// Suspend routes an unreceipted approval to its recorded harness; ordinary sessions use
+	// their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback.
 	Suspend(ctx context.Context, in *SuspendRequest, opts ...grpc.CallOption) (*Session, error)
+	// An unresolved owned approval returns its current paused Session without runtime IO.
+	// A call-only cut repairs the request; neither outcome proves cold compute. After a decision,
+	// recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without
+	// RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves
+	// the decision recoverable. Approved executor failures are durable EXECUTOR_ERROR receipts,
+	// available to the harness for continuation, not transport failures. Snapshots and unresolved
+	// requests are retained indefinitely; there is no approval expiry or automatic decision.
 	Resume(ctx context.Context, in *ResumeRequest, opts ...grpc.CallOption) (*Session, error)
 	// The differentiator: branch a session at a sequence into one or more children. Forking a
 	// REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event
@@ -149,6 +171,16 @@ func (c *sessionsClient) Replay(ctx context.Context, in *ReplayRequest, opts ...
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Sessions_ReplayClient = grpc.ServerStreamingClient[LogRecord]
 
+func (c *sessionsClient) Approve(ctx context.Context, in *ApproveRequest, opts ...grpc.CallOption) (*ApproveResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApproveResponse)
+	err := c.cc.Invoke(ctx, Sessions_Approve_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sessionsClient) Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*Session, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Session)
@@ -203,12 +235,33 @@ type SessionsServer interface {
 	// ephemeral Deltas; Replay re-delivers committed records only (read-only).
 	Exec(*ExecRequest, grpc.ServerStreamingServer[ExecUpdate]) error
 	Replay(*ReplayRequest, grpc.ServerStreamingServer[LogRecord]) error
+	// Implemented durable approval decisions for STATELESS_REPLAY executions.
+	// OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
+	// approved value, reason and identity returns the existing decision, even after resolution.
+	// A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite.
+	// INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
+	// approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
+	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
+	// for a non-stateless execution; Approve does not Describe or resolve a harness.
+	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
+	// after reading the session. Identity is provenance only; this method provides no authorization,
+	// policy hook, expiry, implicit Resume, or Cancel behavior.
+	Approve(context.Context, *ApproveRequest) (*ApproveResponse, error)
 	// In-flight control: cancel the running execution. Not implemented: the server returns
 	// UNIMPLEMENTED.
 	Cancel(context.Context, *CancelRequest) (*Session, error)
 	// Compute-layer durability. There is no warm Pause: no Runtime backend implements a
 	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
+	// Suspend routes an unreceipted approval to its recorded harness; ordinary sessions use
+	// their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback.
 	Suspend(context.Context, *SuspendRequest) (*Session, error)
+	// An unresolved owned approval returns its current paused Session without runtime IO.
+	// A call-only cut repairs the request; neither outcome proves cold compute. After a decision,
+	// recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without
+	// RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves
+	// the decision recoverable. Approved executor failures are durable EXECUTOR_ERROR receipts,
+	// available to the harness for continuation, not transport failures. Snapshots and unresolved
+	// requests are retained indefinitely; there is no approval expiry or automatic decision.
 	Resume(context.Context, *ResumeRequest) (*Session, error)
 	// The differentiator: branch a session at a sequence into one or more children. Forking a
 	// REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event
@@ -241,6 +294,9 @@ func (UnimplementedSessionsServer) Exec(*ExecRequest, grpc.ServerStreamingServer
 }
 func (UnimplementedSessionsServer) Replay(*ReplayRequest, grpc.ServerStreamingServer[LogRecord]) error {
 	return status.Errorf(codes.Unimplemented, "method Replay not implemented")
+}
+func (UnimplementedSessionsServer) Approve(context.Context, *ApproveRequest) (*ApproveResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Approve not implemented")
 }
 func (UnimplementedSessionsServer) Cancel(context.Context, *CancelRequest) (*Session, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Cancel not implemented")
@@ -369,6 +425,24 @@ func _Sessions_Replay_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Sessions_ReplayServer = grpc.ServerStreamingServer[LogRecord]
 
+func _Sessions_Approve_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApproveRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionsServer).Approve(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Sessions_Approve_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionsServer).Approve(ctx, req.(*ApproveRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Sessions_Cancel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CancelRequest)
 	if err := dec(in); err != nil {
@@ -463,6 +537,10 @@ var Sessions_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteSession",
 			Handler:    _Sessions_DeleteSession_Handler,
+		},
+		{
+			MethodName: "Approve",
+			Handler:    _Sessions_Approve_Handler,
 		},
 		{
 			MethodName: "Cancel",

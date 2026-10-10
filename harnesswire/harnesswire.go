@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
@@ -47,8 +48,7 @@ func (s *Server) Describe(ctx context.Context, _ *v1.DescribeRequest) (*v1.Harne
 	return DescriptorToProto(d), nil
 }
 
-// Connect drives one execution: it reads the Start frame, runs the harness with a streaming sink,
-// and terminates the stream with an END event.
+// Connect drives one execution, ending with END or a transport-only PARKED acknowledgement.
 func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 	first, err := stream.Recv()
 	if err != nil {
@@ -64,30 +64,47 @@ func (s *Server) Connect(stream v1.Harness_ConnectServer) error {
 	}
 
 	results := make(chan *v1.ControllerFrame, 1)
-	go func() {
-		for {
-			f, err := stream.Recv()
-			if err != nil {
-				close(results)
-				return
-			}
-			results <- f
-		}
-	}()
+	done := make(chan struct{})
+	go receiveFrames(stream, results, done)
 
-	sink := &streamSink{stream: stream, results: results, executionID: executionID}
+	sink := &streamSink{stream: stream, results: results, executionID: executionID, session: first.GetSession(), done: done}
 	runStart := startFromProto(start)
 	runStart.ExecutionID = executionID
-	if err := s.harness.Run(stream.Context(), runStart, sink); err != nil {
+	runStart.SessionUID = first.GetSession()
+	runErr := s.harness.Run(stream.Context(), runStart, sink)
+	// Interrupt an in-flight await before taking the effect lock. Never wait for
+	// Recv: gRPC cancels the stream context after this handler returns.
+	close(done)
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	sink.closed = true
+	if sink.parked != nil {
+		if runErr != nil && !isParkUnwind(runErr, sink.parked.Ref) {
+			return runErr
+		}
+		return stream.Send(&v1.Event{
+			ExecutionId: executionID,
+			Kind:        v1.EventKind_EVENT_PARKED,
+			Body: &v1.Event_Parked{Parked: &v1.ApprovalRef{
+				ExecutionId: sink.parked.Ref.ExecutionID,
+				ToolCallId:  sink.parked.Ref.ToolCallID,
+				RequestSeq:  sink.parked.Ref.RequestSeq,
+			}},
+		})
+	}
+	if sink.failure != nil {
+		runErr = sink.failure
+	}
+	if runErr != nil {
 		_ = stream.Send(&v1.Event{
 			ExecutionId: executionID,
 			Kind:        v1.EventKind_EVENT_END,
 			Body: &v1.Event_End{End: &v1.HarnessEnd{
 				State: "FAILED",
-				Error: &v1.Error{Description: err.Error()},
+				Error: &v1.Error{Description: runErr.Error()},
 			}},
 		})
-		return err
+		return runErr
 	}
 	return stream.Send(&v1.Event{
 		ExecutionId: executionID,
@@ -102,15 +119,92 @@ type streamSink struct {
 	stream      v1.Harness_ConnectServer
 	results     <-chan *v1.ControllerFrame
 	executionID string
+	session     string
+	done        <-chan struct{}
+	// Serialize sends and request/reply pairs. Park and protocol failures stay
+	// sticky even when a harness handles (or ignores) a sink error.
+	mu      sync.Mutex
+	closed  bool
+	parked  *api.ApprovalParkedError
+	failure error
+}
+
+func receiveFrames(stream v1.Harness_ConnectServer, results chan<- *v1.ControllerFrame, done <-chan struct{}) {
+	defer close(results)
+	for {
+		select {
+		case <-done:
+			return
+		case <-stream.Context().Done():
+			return
+		default:
+		}
+		frame, err := stream.Recv()
+		if err != nil {
+			return
+		}
+		select {
+		case results <- frame:
+		case <-done:
+			return
+		case <-stream.Context().Done():
+			return
+		}
+	}
+}
+
+var errSinkClosed = errors.New("harnesswire: sink closed")
+
+// check is called with mu held; it never acquires the effect lock recursively.
+func (s *streamSink) check(ctx context.Context) error {
+	if s.parked != nil {
+		return s.parked
+	}
+	if s.failure != nil {
+		return s.failure
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.closed {
+		return errSinkClosed
+	}
+	select {
+	case <-s.done:
+		return errSinkClosed
+	default:
+		return nil
+	}
+}
+
+func (s *streamSink) fail(err error) error {
+	// Run closure rejects background operations without changing Run's outcome.
+	// Only the exact private shutdown signal is synthetic; operative causes stay sticky.
+	if err == errSinkClosed {
+		return err
+	}
+	if s.failure == nil {
+		s.failure = err
+	}
+	return s.failure
 }
 
 // awaitResult blocks for the host's reply frame, honoring cancellation. The ctx arm is what stops a
 // harness hanging forever on a host that never replies: without it a dead or wedged controller
 // leaves the harness parked on a channel receive with no way out.
 func (s *streamSink) awaitResult(ctx context.Context) (*v1.ControllerFrame, error) {
+	if err := s.check(ctx); err != nil {
+		return nil, err
+	}
 	select {
 	case frame, ok := <-s.results:
+		if err := s.check(ctx); err != nil {
+			return nil, err
+		}
 		if !ok {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			return nil, io.EOF
 		}
 		if frame.GetExecutionId() != s.executionID {
@@ -120,10 +214,20 @@ func (s *streamSink) awaitResult(ctx context.Context) (*v1.ControllerFrame, erro
 		return frame, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case <-s.done:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, errSinkClosed
 	}
 }
 
 func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.ModelResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.check(ctx); err != nil {
+		return api.ModelResponse{}, err
+	}
 	choice, err := wire.ToolChoiceToProto(req.ToolChoice)
 	if err != nil {
 		return api.ModelResponse{}, fmt.Errorf("harnesswire: model call: %w", err)
@@ -164,7 +268,12 @@ func (s *streamSink) Model(ctx context.Context, req api.ModelRequest) (api.Model
 	return api.ModelResponse{Message: msg}, nil
 }
 
-func (s *streamSink) Output(_ context.Context, delta string) error {
+func (s *streamSink) Output(ctx context.Context, delta string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.check(ctx); err != nil {
+		return err
+	}
 	return s.stream.Send(&v1.Event{
 		ExecutionId: s.executionID,
 		Kind:        v1.EventKind_EVENT_OUTPUT,
@@ -177,6 +286,11 @@ func (s *streamSink) Output(_ context.Context, delta string) error {
 // host — not the harness — executes and records the tool (record-before-effect, §3), exactly as it
 // mediates a model call, so the load-bearing rule holds across the process boundary.
 func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.check(ctx); err != nil {
+		return api.ToolResult{}, err
+	}
 	call := tc
 	if err := s.stream.Send(&v1.Event{
 		ExecutionId: s.executionID,
@@ -187,27 +301,66 @@ func (s *streamSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 	}
 	frame, err := s.awaitResult(ctx)
 	if err != nil {
-		return api.ToolResult{}, err
+		return api.ToolResult{}, s.fail(err)
+	}
+	if frame.GetSession() != s.session {
+		return api.ToolResult{}, s.fail(errors.New("harnesswire: tool result session mismatch"))
+	}
+	var approval *api.ApprovalResult
+	if call.Mediation == api.MediationRequiresApproval {
+		if s.session == "" || call.ID == "" {
+			return api.ToolResult{}, s.fail(errors.New("harnesswire: approval requires session and call id"))
+		}
+		if park := frame.GetPark(); park != nil {
+			if park.GetExecutionId() != s.executionID || park.GetToolCallId() != call.ID || park.GetRequestSeq() <= 0 {
+				return api.ToolResult{}, s.fail(errors.New("harnesswire: park correlation mismatch"))
+			}
+			s.parked = &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: s.executionID, ToolCallID: call.ID, RequestSeq: park.GetRequestSeq()}}
+			return api.ToolResult{}, s.parked
+		}
+		decision := frame.GetApproval()
+		if decision == nil || decision.GetToolCallId() != call.ID || decision.GetRequestSeq() <= 0 {
+			return api.ToolResult{}, s.fail(errors.New("harnesswire: expected correlated approval before ToolResult"))
+		}
+		approval = &api.ApprovalResult{ToolCallID: decision.GetToolCallId(), Approved: decision.GetApproved(), Reason: decision.GetReason(), RequestSeq: decision.GetRequestSeq()}
+		frame, err = s.awaitResult(ctx)
+		if err != nil {
+			return api.ToolResult{}, s.fail(err)
+		}
+		if frame.GetSession() != s.session {
+			return api.ToolResult{}, s.fail(errors.New("harnesswire: tool result session mismatch"))
+		}
 	}
 	tr := frame.GetTool()
 	if tr == nil {
-		return api.ToolResult{}, errors.New("harnesswire: expected a ToolResult frame")
+		return api.ToolResult{}, s.fail(errors.New("harnesswire: expected a ToolResult frame"))
 	}
 	res := wire.ToolResultFromProto(tr)
-	if res == nil {
-		return api.ToolResult{}, nil
-	}
-	// Correlate the reply to the call we emitted (symmetric to model_call_id): the host stamps the
-	// result's ID to the call's ID, so a mismatch means a wrong/reordered reply — fail loud.
 	if res.ID != call.ID {
-		return api.ToolResult{}, fmt.Errorf("harnesswire: tool result correlation mismatch: got %q, want %q", res.ID, call.ID)
+		return api.ToolResult{}, s.fail(fmt.Errorf("harnesswire: tool result correlation mismatch: got %q, want %q", res.ID, call.ID))
+	}
+	if approval != nil {
+		if err := validateApprovalReceipt(call.ID, approval, *res); err != nil {
+			return api.ToolResult{}, s.fail(err)
+		}
+		res.Approval = approval
+	} else if err := rejectApprovalReport(*res); err != nil {
+		return api.ToolResult{}, s.fail(err)
 	}
 	return *res, nil
 }
 
 // Report records the result of a tool the harness executed in-sandbox (IN_HARNESS_REPORTED): it
 // emits an EVENT_TOOL_RESULT the host records, mirroring the in-process liveSink.Report.
-func (s *streamSink) Report(_ context.Context, tr api.ToolResult) error {
+func (s *streamSink) Report(ctx context.Context, tr api.ToolResult) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.check(ctx); err != nil {
+		return err
+	}
+	if err := rejectApprovalReport(tr); err != nil {
+		return s.fail(err)
+	}
 	res := tr
 	return s.stream.Send(&v1.Event{
 		ExecutionId: s.executionID,
@@ -215,7 +368,12 @@ func (s *streamSink) Report(_ context.Context, tr api.ToolResult) error {
 		Body:        &v1.Event_Result{Result: wire.ToolResultToProto(&res)},
 	})
 }
-func (s *streamSink) Usage(_ context.Context, u api.Usage) error {
+func (s *streamSink) Usage(ctx context.Context, u api.Usage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.check(ctx); err != nil {
+		return err
+	}
 	return s.stream.Send(&v1.Event{ExecutionId: s.executionID, Kind: v1.EventKind_EVENT_USAGE, Body: &v1.Event_Usage{Usage: &v1.Usage{
 		Model: u.Model, InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, ReasoningTokens: u.ReasoningTokens,
 	}}})
@@ -255,6 +413,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 		return err
 	}
 	if err := stream.Send(&v1.ControllerFrame{
+		Session:     start.SessionUID,
 		ExecutionId: start.ExecutionID,
 		Frame:       &v1.ControllerFrame_Start{Start: startToProto(start)},
 	}); err != nil {
@@ -290,6 +449,7 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 				return err
 			}
 			if err := stream.Send(&v1.ControllerFrame{
+				Session:     start.SessionUID,
 				ExecutionId: start.ExecutionID,
 				Frame: &v1.ControllerFrame_Model{Model: &v1.ModelResult{
 					Message:     wire.MessageToProto(&resp.Message),
@@ -309,11 +469,45 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			if tc == nil {
 				return errors.New("harnesswire: EVENT_TOOL_CALL missing its payload")
 			}
+			if tc.Mediation == api.MediationRequiresApproval && (start.SessionUID == "" || tc.ID == "") {
+				return errors.New("harnesswire: approval requires session and call id")
+			}
 			res, err := sink.ToolCall(ctx, *tc)
 			if err != nil {
+				var parked *api.ApprovalParkedError
+				if errors.As(err, &parked) && parked != nil {
+					if tc.Mediation != api.MediationRequiresApproval || start.SessionUID == "" || tc.ID == "" || parked.Ref.ExecutionID != start.ExecutionID || parked.Ref.ToolCallID != tc.ID || parked.Ref.RequestSeq <= 0 {
+						return errors.New("harnesswire: invalid host park correlation")
+					}
+					if handoffErr := exchangePark(ctx, stream, start, parked.Ref); handoffErr != nil {
+						return handoffErr
+					}
+					return err
+				}
+				if errors.Is(err, api.ErrApprovalParked) {
+					return errors.New("harnesswire: host park missing correlation")
+				}
+				return err
+			}
+			if tc.Mediation == api.MediationRequiresApproval {
+				if err := validateApprovalReceipt(tc.ID, res.Approval, res); err != nil {
+					return err
+				}
+				decision := *res.Approval
+				if err := stream.Send(&v1.ControllerFrame{
+					Session: start.SessionUID, ExecutionId: start.ExecutionID,
+					Frame: &v1.ControllerFrame_Approval{Approval: &v1.ApprovalResult{
+						ToolCallId: decision.ToolCallID, RequestSeq: decision.RequestSeq,
+						Approved: decision.Approved, Reason: decision.Reason,
+					}},
+				}); err != nil {
+					return err
+				}
+			} else if err := rejectApprovalReport(res); err != nil {
 				return err
 			}
 			if err := stream.Send(&v1.ControllerFrame{
+				Session:     start.SessionUID,
 				ExecutionId: start.ExecutionID,
 				Frame:       &v1.ControllerFrame_Tool{Tool: wire.ToolResultToProto(&res)},
 			}); err != nil {
@@ -321,6 +515,9 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 			}
 		case v1.EventKind_EVENT_TOOL_RESULT:
 			if tr := wire.ToolResultFromProto(ev.GetResult()); tr != nil {
+				if err := rejectApprovalReport(*tr); err != nil {
+					return err
+				}
 				if err := sink.Report(ctx, *tr); err != nil {
 					return err
 				}
@@ -336,10 +533,88 @@ func (h *ClientHarness) Run(ctx context.Context, start *api.Start, sink api.Even
 					return err
 				}
 			}
+		case v1.EventKind_EVENT_APPROVAL_REQUEST, v1.EventKind_EVENT_APPROVAL_RESULT, v1.EventKind_EVENT_EXECUTION_START, v1.EventKind_EVENT_PARKED:
+			return fmt.Errorf("harnesswire: harness emitted host-owned control event %s", ev.GetKind())
 		case v1.EventKind_EVENT_END:
 			return endError(ev.GetEnd())
 		}
 	}
+}
+
+// A wrapped park is a normal unwind, but a joined independent Run failure must
+// not be hidden by finding the park somewhere in its error tree.
+func isParkUnwind(err error, ref api.ApprovalRef) bool {
+	var parked *api.ApprovalParkedError
+	if !errors.As(err, &parked) || parked == nil || parked.Ref != ref {
+		return false
+	}
+	for err != nil {
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, cause := range joined.Unwrap() {
+				if !isParkUnwind(cause, ref) {
+					return false
+				}
+			}
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return true
+}
+
+// exchangePark accepts only the transport acknowledgement followed by actual
+// clean closure. Nothing received here is dispatched to the journal sink.
+func exchangePark(ctx context.Context, stream v1.Harness_ConnectClient, start *api.Start, ref api.ApprovalRef) error {
+	if err := stream.Send(&v1.ControllerFrame{
+		Session: start.SessionUID, ExecutionId: start.ExecutionID,
+		Frame: &v1.ControllerFrame_Park{Park: &v1.ApprovalRef{
+			ExecutionId: ref.ExecutionID, ToolCallId: ref.ToolCallID, RequestSeq: ref.RequestSeq,
+		}},
+	}); err != nil {
+		return err
+	}
+	ack, err := stream.Recv()
+	if err != nil {
+		return fmt.Errorf("harnesswire: park acknowledgement: %w", err)
+	}
+	park := ack.GetParked()
+	if ack.GetKind() != v1.EventKind_EVENT_PARKED || ack.GetExecutionId() != start.ExecutionID || park == nil || park.GetExecutionId() != ref.ExecutionID || park.GetToolCallId() != ref.ToolCallID || park.GetRequestSeq() != ref.RequestSeq {
+		return errors.New("harnesswire: park acknowledgement correlation mismatch")
+	}
+	if ev, err := stream.Recv(); err != io.EOF {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("harnesswire: expected stream closure after park acknowledgement, got %s", ev.GetKind())
+	}
+	return ctx.Err()
+}
+
+func validateApprovalReceipt(callID string, decision *api.ApprovalResult, receipt api.ToolResult) error {
+	if decision == nil || callID == "" || decision.ToolCallID != callID || decision.RequestSeq <= 0 {
+		return errors.New("harnesswire: invalid approval correlation")
+	}
+	if receipt.ID != callID {
+		return errors.New("harnesswire: tool result correlation mismatch")
+	}
+	if receipt.ApprovalRequestSeq != decision.RequestSeq || receipt.ApprovalDecisionSeq <= 0 {
+		return errors.New("harnesswire: invalid approval receipt sequences")
+	}
+	if !decision.Approved {
+		if receipt.Code == api.ToolResultCodeApprovalDenied && receipt.IsError {
+			return nil
+		}
+	} else if receipt.Code == api.ToolResultCodeUnspecified && !receipt.IsError || receipt.Code == api.ToolResultCodeExecutorError && receipt.IsError {
+		return nil
+	}
+	return errors.New("harnesswire: approval receipt status conflicts with decision")
+}
+
+func rejectApprovalReport(receipt api.ToolResult) error {
+	if receipt.Approval != nil || receipt.ApprovalRequestSeq != 0 || receipt.ApprovalDecisionSeq != 0 || receipt.Code == api.ToolResultCodeApprovalDenied {
+		return errors.New("harnesswire: harness report or ordinary reply contains host-owned approval receipt")
+	}
+	return nil
 }
 
 // endError maps a terminal HarnessEnd into a Go error. COMPLETED is the only success; a FAILED (or

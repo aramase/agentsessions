@@ -49,7 +49,8 @@ so the existing operator-controlled endpoint/replica limitation still applies.
 The recorded executing name is the host's resolved registry name, not necessarily `Descriptor.ID`.
 A per-turn override is resumed through that same registry entry (backend/model/executor); removing
 it or serving a different known version yields `FAILED_PRECONDITION`. Missing legacy names fall
-back to session metadata. Completed Resume and other lifecycle routing are unchanged. Raw
+back to session metadata. Completed Resume and ordinary lifecycle routing are unchanged; Suspend
+of an unreceipted approval uses its recorded route too. Raw
 `Sessions.Replay` remains readable even when the recorded implementation is not served.
 
 `Capabilities` is the important part, because the host uses it to place your harness on a compatible
@@ -296,8 +297,9 @@ original receipt rather than repeat the effect. Keep that receipt/dedup state du
 restarts; an in-memory cache is insufficient. Direct controller users must configure
 `controller.WithSessionUID(uid)` with a nonempty UID; `controller.New` returns
 `controller.ErrMissingSessionUID` for an unscoped non-nil executor without advancing the log's fence.
-Journaling alone does not provide exactly-once external delivery. `REQUIRES_APPROVAL` still fails
-closed because its approval gate is unimplemented. The stock daemon does not configure a tool executor.
+Journaling alone does not provide exactly-once external delivery. `REQUIRES_APPROVAL` uses the same
+executor after a durable decision, for `STATELESS_REPLAY` only. The stock daemon does not configure a
+tool executor; approval does not supply one or complete general tool/provider integration.
 
 For the same recorded call, re-emit the same `ToolCall.ID`, tool name, arguments, mediation and key.
 Replay and recorded-prefix recovery compare that identity before serving a result or re-driving an
@@ -312,9 +314,44 @@ is rejected before recording intent. If the next recorded `TOOL_CALL` has a diff
 and recorded-prefix recovery reproduce that rejection without consuming the next call, so a
 handled rejection can fall back to a distinct-ID `CONTROLLER_MEDIATED` call. Same-ID mismatches
 and malformed recorded evidence remain fatal; identity checks on the actual fallback are unchanged.
-An executor Go error still leaves no failure receipt, so an immediately following reported result
-remains ambiguous under the existing correlation rules. Over `Harness.Connect`, a tool-call error
-ends the turn; this direct-sink fallback does not add a handle-and-continue wire protocol.
+For ordinary `CONTROLLER_MEDIATED` calls, an executor Go error still leaves no failure receipt, so
+an immediately following reported result remains ambiguous under the existing correlation rules.
+Over `Harness.Connect`, an ordinary sink tool-call error ends the turn; this direct-sink fallback
+does not add a general handle-and-continue wire protocol. Approved gated calls instead record an
+`EXECUTOR_ERROR` receipt, which can be passed to the model for continuation.
+
+#### Approval-gated calls
+
+Set `MediationRequiresApproval` and a nonempty call ID/idempotency key before `sink.ToolCall`. Never run
+the gated effect inside the harness. The stateless host owns `TOOL_CALL`, `APPROVAL_REQUEST`, the later
+`APPROVAL_RESULT`, and the receipt. Memory-snapshot harnesses are refused before the effect. An
+unresolved call returns a typed `*api.ApprovalParkedError`: stop Run and propagate it, with no END or
+later model/tool/sink operation. The Go bridge validates the host's session/execution/call/request
+control tuple, sends exactly one correlated `EVENT_PARKED` acknowledgement, and closes without END;
+raw peers must implement that exchange. The host requires actual ACK/EOF and connection closure
+before an external snapshot and durable `SUSPEND` make the live pause successful. Transport/snapshot/
+append failures leave the request recoverable and retain the actual error, not a fake successful park.
+
+On decided Resume, rebuild the same call from the original inputs/config and keep its identity/key.
+The bridge delivers the committed decision before the correlated receipt, even when that receipt is
+already journaled. A denial supplies `APPROVAL_DENIED` with `IsError=true` and never invokes the
+executor. An approved call can return success or a durable `EXECUTOR_ERROR` receipt, not an unrecorded
+executor Go error. Feed that receipt back as the tool result the model saw; do not forge approval
+request/decision or host receipt fields with `sink.Report`. A missing executor is a recoverable host
+precondition, not an executor-failure receipt.
+
+The gate serializes sink operations across decision/effect/receipt handling. Observer/model/executor
+callbacks must not re-enter the same sink: re-entry can deadlock the serialized operation. Recorded
+prefix identity, argument, mediation, key and receipt-correlation mismatches remain sticky divergence;
+catching such an error cannot permit a later live effect or mark the reconstructed execution complete.
+Ordinary tool/model argument normalization and default mediation remain unchanged; gating does not
+add a general sink-concurrency or tool-validation contract.
+
+Clients discover the pending tuple from Session metadata, commit a decision using RPC/SDK Approve,
+then Resume explicitly. Both CLI `approve` and `deny` do those steps. Identity is provenance only,
+not policy/authentication, and there is no authorization hook, approval timeout or expiry. Snapshots
+and unresolved requests are retained indefinitely; Cancel/DeleteSession remain unavailable. See
+[client examples](interaction-model.md#approval-decisions-and-recovery) and [security.md](security.md).
 
 ### Rule 5: pass reasoning parts back verbatim
 
@@ -342,7 +379,9 @@ request from the recorded completion exactly as you did live. A changed definiti
 fails the I0 check.
 
 The bundled OpenAI-compatible adapter (`model/openai`) does not map tools yet. It refuses a request that
-carries tools, a tool choice, or a tool part instead of sending less than the log records.
+carries tools, a tool choice, or a tool part instead of sending less than the log records. Approval
+mediation does not add provider tool mapping or a complete application tool loop: a custom harness,
+model adapter and durably deduplicating host executor still supply those parts.
 
 ## Reference harness 1: stateless replay (`harness/echoagent`)
 
