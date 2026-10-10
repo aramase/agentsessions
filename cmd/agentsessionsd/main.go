@@ -1,8 +1,6 @@
-// Command agentsessionsd serves the Sessions API over TCP.
-//
-// Until now the Sessions service was only ever registered inside agentctl, on a per-process unix
-// socket torn down when the command exits, so agentctl's --server flag had nothing to dial and a
-// non-Go client had no way to reach a session at all. This is that missing entry point.
+// Command agentsessionsd serves the Sessions API over TCP. With -registry-addr it also serves
+// HarnessRegistry on a separate literal-loopback operator listener. The admin API is never
+// registered on the Sessions port; neither listener provides authentication or TLS.
 //
 // This binary serves the reference echo harness by default and adds the conversational chat harness
 // when -model is set, each on its own filesystem-only local backend. -harness name=address registers
@@ -15,9 +13,9 @@
 // echo model, so the quickstart runs with no key. The API key comes from the environment rather
 // than a flag, because a flag would put the credential in the process list and shell history.
 //
-// It is plaintext and unauthenticated: there is no authn, no authz, and no TLS anywhere in the
-// reference implementation, and project is a filter rather than a tenancy boundary. Do not expose
-// it to an untrusted network. See SECURITY.md.
+// Both listeners are plaintext and unauthenticated; project is a filter, not a tenancy boundary.
+// A local or same-pod process can administer the operator listener. Do not expose it to an
+// untrusted network. See docs/security.md.
 package main
 
 import (
@@ -65,6 +63,7 @@ func main() {
 
 func run() error {
 	addr := flag.String("addr", "127.0.0.1:8080", "address to serve the Sessions API on")
+	registryAddr := flag.String("registry-addr", "", "optional literal loopback IP:port for the plaintext, unauthenticated HarnessRegistry operator API")
 	journal := flag.String("journal", "agentsessions.db", "sqlite journal path")
 	project := flag.String("project", sqlitelog.DefaultProject, "default project (tenant)")
 	model := flag.String("model", "", "model id for an OpenAI-compatible endpoint; empty uses the built-in echo model")
@@ -86,6 +85,15 @@ func run() error {
 	if err := checkRemotes(*model, remotes); err != nil {
 		return err
 	}
+	if *registryAddr != "" {
+		port, err := checkRegistryAddress(*registryAddr)
+		if err != nil {
+			return err
+		}
+		if err := checkListenerPorts(*addr, port); err != nil {
+			return err
+		}
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -106,26 +114,61 @@ func run() error {
 	}
 	defer closeBackends()
 
+	// Load registrations even with the operator listener off: retired harnesses still run
+	// existing sessions, and a listener setting must not alter session routing on restart.
+	operator, err := session.NewHarnessRegistry(store, registry, registeredPlacer(*model, modelFn, streamFn, logger))
+	if err != nil {
+		return fmt.Errorf("load harness registrations: %w", err)
+	}
+	defer operator.Close()
+
 	svc, err := sessionService(store, registry, logger, *project)
 	if err != nil {
 		return err
 	}
-	srv := grpc.NewServer(
+	serverOptions := []grpc.ServerOption{
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
-	)
+	}
+	srv := grpc.NewServer(serverOptions...)
 	v1.RegisterSessionsServer(srv, svc)
 
+	var operatorServer *grpc.Server
+	if *registryAddr != "" {
+		operatorServer = grpc.NewServer(serverOptions...)
+		v1.RegisterHarnessRegistryServer(operatorServer, operator)
+	}
+
+	// Bind both sockets before either server accepts a request. In particular, a failed
+	// operator bind must not leave a Sessions server running with a half-configured admin API.
 	lis, err := net.Listen("tcp", *addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", *addr, err)
+	}
+	defer lis.Close()
+	var operatorLis net.Listener
+	if operatorServer != nil {
+		operatorLis, err = net.Listen("tcp", *registryAddr)
+		if err != nil {
+			return fmt.Errorf("listen on registry %s: %w", *registryAddr, err)
+		}
+		defer operatorLis.Close()
+		if lis.Addr().(*net.TCPAddr).Port == operatorLis.Addr().(*net.TCPAddr).Port {
+			return fmt.Errorf("-registry-addr and -addr cannot share TCP port %d", lis.Addr().(*net.TCPAddr).Port)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	serveErr := make(chan error, 1)
+	serveErr := make(chan error, 2)
 	go func() { serveErr <- srv.Serve(lis) }()
+	servers := 1
+	if operatorServer != nil {
+		servers++
+		go func() { serveErr <- operatorServer.Serve(operatorLis) }()
+		logger.Info("agentsessionsd operator registry listening (plaintext, unauthenticated)", "addr", operatorLis.Addr().String())
+	}
 
 	logger.Info("agentsessionsd listening",
 		"version", version.Get().Version,
@@ -137,17 +180,28 @@ func run() error {
 		"model", modelDesc,
 	)
 
+	var result error
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down")
-		srv.GracefulStop()
-		return nil
 	case err := <-serveErr:
+		servers--
 		if err != nil && !errors.Is(err, grpc.ErrServerStopped) {
-			return fmt.Errorf("serve: %w", err)
+			result = fmt.Errorf("serve: %w", err)
 		}
-		return nil
 	}
+	// Drain operator requests first, then in-flight Sessions turns. Keep the store and
+	// registered/local backends alive until both servers and their handlers have finished.
+	if operatorServer != nil {
+		operatorServer.GracefulStop()
+	}
+	srv.GracefulStop()
+	for i := 0; i < servers; i++ {
+		if err := <-serveErr; err != nil && !errors.Is(err, grpc.ErrServerStopped) && result == nil {
+			result = fmt.Errorf("serve: %w", err)
+		}
+	}
+	return result
 }
 
 // remoteHarnesses collects repeated -harness name=address flags. Registering a harness this way is
@@ -423,9 +477,8 @@ func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.M
 }
 
 // sessionService builds the Sessions service, after reserving this host's harness names in the
-// journal. This host does not serve the registry, but a Go host that does may share the journal,
-// and its static names can differ: a registration named "echo" would otherwise mean a second
-// harness under the built-in name. Reserving refuses a journal that already holds such a
+// journal. Other hosts may share the journal and have different static names: a registration named
+// "echo" would otherwise mean a second harness under the built-in name. Reserving refuses a journal that already holds such a
 // registration, and makes the other host refuse one made later.
 func sessionService(store *sqlitelog.Store, registry *placement.Registry, logger *slog.Logger, project string) (*session.Service, error) {
 	if err := session.ReserveStaticHarnessNames(store, registry); err != nil {

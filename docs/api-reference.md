@@ -898,7 +898,10 @@ refused. Retiring a harness refuses new sessions on it while every existing sess
 running, resuming and forking. Registering the identical spec again reactivates it.
 
 This service decides what the host dials and pays model calls for, so it is an operator
-surface, not a client one. agentsessionsd does not serve it; see docs/security.md.
+surface, not a client one. agentsessionsd serves it only on a separate optional literal-loopback
+listener (-registry-addr); Sessions never serves this API. Both listeners are plaintext and
+unauthenticated. Every local or same-pod process that can reach the operator port can administer
+registrations. See docs/security.md.
 
 
 <a name="agentsessions-v1-GetHarnessRequest"></a>
@@ -1124,7 +1127,27 @@ returns FAILED_PRECONDITION.
 ### HarnessRegistry
 HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
 that can register a harness decides where the host sends session history and whose model calls it
-pays for.
+pays for. agentsessionsd serves this service only when -registry-addr is set to a literal loopback
+IP:port (for example 127.0.0.1:8081), on a separate gRPC server from Sessions. There is no TLS or
+authentication on either listener. Any process that can reach this port can administer it.
+
+CLI usage (pass --server on every operator command; no embedded registry):
+
+```sh
+agentctl harness register --server 127.0.0.1:8081 --name mine --spec spec.json
+agentctl harness get --server 127.0.0.1:8081 --name mine --observe
+agentctl harness list --server 127.0.0.1:8081 --include-retired --page-size 50
+agentctl harness retire --server 127.0.0.1:8081 --name mine --reason maintenance
+```
+
+spec.json is strict HarnessSpec proto-JSON, for example:
+
+```json
+{&#34;remote&#34;:{&#34;address&#34;:&#34;127.0.0.1:9000&#34;},&#34;capabilities&#34;:{&#34;resumability&#34;:&#34;RESUMABILITY_STATELESS_REPLAY&#34;},&#34;descriptor_id&#34;:&#34;echo&#34;}
+```
+
+Remote registrations require agentsessionsd -model; substrate placements are not supported by
+this daemon. The CLI prints the full proto-JSON response, including digest and lifecycle state.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|

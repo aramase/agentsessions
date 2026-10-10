@@ -670,7 +670,7 @@ func serveHarness(t *testing.T, h api.Harness) string {
 	return addr
 }
 
-// The daemon does not serve the registry, but it refuses a journal in which another host registered
+// The daemon refuses a journal in which another host registered
 // one of its built-in names, active or retired, chat even when it is not configured, or a name
 // given with -harness.
 func TestSessionServiceRefusesRegistrationCollision(t *testing.T) {

@@ -60,11 +60,14 @@ there; the local one has none.
 
 **A harness registered by address is whatever answers there.** `runtime/remote` (`agentsessionsd
 --harness name=address`) dials the operator-configured address over cleartext h2c with no
-authentication of either side. Clients cannot supply an address; only the operator can, at startup.
+authentication of either side. Sessions clients cannot supply an address; operators can configure
+one at startup or register one through the separate operator listener when enabled.
 Anything that can listen on that address, or sit on the network path to it, is the harness: it
 writes every event the session journals, chooses which model calls the host makes and pays for with
 its credential, and sees the full history the host sends each turn. The chain makes later tampering
-with the journal detectable; it cannot tell a forged harness from the real one. Bind the harness to
+with the journal detectable; it cannot tell a forged harness from the real one. The optional operator
+registry can also register a remote address at runtime; unlike the startup `--harness` flag, this
+requires access to the separate operator port. Bind the harness to
 loopback or a unix socket on the host, or keep the hop on a network you trust entirely. For a unix
 socket, "can listen on that address" means "can write to the socket's directory", so put it in a
 directory only the harness's user can write, not a shared one such as `/tmp`. `cmd/harnessnode`
@@ -85,12 +88,57 @@ answer there declares the same resumability.
 **Registering a harness is an admin action.** A caller that can register a harness chooses what the
 host dials, which means where it sends every session's history and whose model credential pays for
 that harness's calls. The `HarnessRegistry` API therefore has no place on the Sessions port, which
-anyone who can reach it can call. `agentsessionsd` does not serve it at all in this release; it is
-wired in-process only, for tests and Go embedders. An embedder that serves it must put it on a
-listener only an operator can reach, never beside the Sessions service. A registered remote harness
+anyone who can reach it can call. `agentsessionsd` only serves it when `--registry-addr` is set to
+a **literal loopback IP:port** (for example `127.0.0.1:8081`); wildcard, hostnames including
+`localhost`, and non-loopback IPs are refused. The listener is separate from Sessions, off by
+default, plaintext and **unauthenticated**. Sessions remains plaintext and unauthenticated too; it
+never serves registry RPCs. Loopback limits network reachability, **not identity**: any local process,
+including another container in the same Kubernetes pod (which shares its network namespace), can
+administer registrations. It is not per-user isolation. An embedder that serves the API must keep
+it off the Sessions listener and control access to it. A registered remote harness
 is whatever answers at its address, as above. `HarnessSpec.descriptor_id` makes the host refuse a
 turn when the harness there reports another descriptor id, which catches a misdirected address; the
 id is what the harness says about itself, so it does not authenticate the harness.
+
+## Operator access
+
+For a local host with a remote harness, run the daemon with a real model and listen only on
+loopback (the operator port is optional; Sessions still uses its existing `-addr` setting):
+
+```sh
+MODEL_API_KEY=... agentsessionsd -addr 127.0.0.1:8080 -registry-addr 127.0.0.1:8081 \
+  -journal agentsessions.db -model your-model -model-base-url https://trusted-model.example/v1
+agentctl harness register --server 127.0.0.1:8081 --name mine --spec spec.json
+agentctl harness get --server 127.0.0.1:8081 --name mine --observe
+agentctl harness list --server 127.0.0.1:8081 --include-retired --page-size 50
+agentctl harness retire --server 127.0.0.1:8081 --name mine --reason maintenance
+```
+
+`spec.json` is a strict proto-JSON `HarnessSpec`, for example
+`{"remote":{"address":"127.0.0.1:9000"},"capabilities":{"resumability":"RESUMABILITY_STATELESS_REPLAY"},"descriptor_id":"echo"}`.
+A new remote registration needs `-model` (and a model key when that endpoint requires one), so
+model calls cannot silently use the built-in echo stub. Static inspection, listing and retirement
+do not require `-model`. This reference daemon does not serve substrate placements. Registry
+responses print proto-JSON, including `spec_digest` and lifecycle state.
+
+The checked-in [Kubernetes manifest](../deploy/kubernetes/agentsessionsd.yaml) pins v0.1.2,
+which does **not** support `-registry-addr`: use a registry-capable daemon build/image and configure
+it to listen on `-registry-addr 127.0.0.1:8081` first. The manifest does not expose the operator
+port through a Service. For that upgraded deployment, an operator with **pods/portforward RBAC**
+may open a local tunnel, then use the CLI against its local endpoint:
+
+```sh
+kubectl -n agentsessions port-forward --address 127.0.0.1 deployment/agentsessionsd 18081:8081
+# In another terminal:
+agentctl harness list --server 127.0.0.1:18081 --include-retired
+```
+
+Explicitly bind kubectl's local endpoint to `127.0.0.1` with `--address`, not `0.0.0.0`. Grant
+`pods/portforward` narrowly: that RBAC controls who can open a port-forward, **not** authorization
+for processes already inside the pod. Do not expose the registry through a Kubernetes Service or
+Ingress. The daemon's operator port has no independent token or TLS; authentication and TLS for
+**both** listeners are follow-up work when Sessions gains those controls. Anyone who can reach
+this port can change destinations for session history and spend the host's model budget.
 
 ## Deploying it
 

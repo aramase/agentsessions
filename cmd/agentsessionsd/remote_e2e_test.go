@@ -180,11 +180,11 @@ func TestRemoteHarnessEndToEnd(t *testing.T) {
 	}
 }
 
-// buildBinaries builds agentsessionsd and harnessnode from this module into a temp dir.
+// buildBinaries builds agentsessionsd, harnessnode and agentctl from this module into a temp dir.
 func buildBinaries(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	for _, pkg := range []string{"../agentsessionsd", "../harnessnode"} {
+	for _, pkg := range []string{"../agentsessionsd", "../harnessnode", "../agentctl"} {
 		cmd := exec.Command("go", "build", "-o", dir, pkg)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("go build %s: %v\n%s", pkg, err, out)
