@@ -152,8 +152,19 @@ it snapshots externally and commits `SUSPEND`. The Exec stream ends successfully
 A handoff/snapshot/append failure remains an RPC error with the durable request available for recovery;
 use `Suspend` to retry the recorded route's cold transition when needed.
 
-`GetSession` and `ListSessions` expose the decision tuple after a restart. Each tuple is derived only
-through that response's `last_seq`, not a mutable flag or a local SDK cache. `Approve` requires the
+`GetSession` and `ListSessions` expose valid owned pending decision tuples after a restart. Each tuple
+is derived only through that response's `last_seq`, not a mutable flag or a local SDK cache.
+Decodable legacy/handwritten or malformed approval evidence remains readable in Get/List and Fork
+response metadata, but confers no actionable `pending_approval` reference. Malformed historical
+approval evidence can withhold a reference even for a valid latest request: strict inspection
+validates all approval-bearing executions through the captured cursor. Database/read failures and
+undecodable journal or metadata values still return `INTERNAL`. This rendering tolerance does not
+relax command validation or grant admission authority.
+
+Host `APPROVAL_REQUEST` and `APPROVAL_RESULT` writes alone do not imply live compute. They preserve
+NONE/COLD; only actual execution or lifecycle evidence moves that independent durable projection.
+
+`Approve` requires the
 session UID, execution ID, tool call ID, positive request sequence, and explicit approved presence:
 `false` is denial, not an omitted choice. It commits only `APPROVAL_RESULT` and returns that record plus
 the current Session, without resolving a harness, describing compute, or running a tool. Identical
@@ -297,7 +308,8 @@ Real today, and worth knowing before you build on it:
   time, which is fine for demos and does not scale to long sessions.
 - **Execution status is not admission authority.** An owned unresolved host approval is narrowly
   projected as `EXEC_AWAITING`; ordinary/legacy interrupted turns still use metadata's `COMPLETED`
-  fallback. A decided call with no receipt has no pending reference and is not reported awaiting,
+  fallback. Legacy/malformed approval evidence also retains that fallback without an actionable
+  reference. A decided call with no receipt has no pending reference and is not reported awaiting,
   but that fallback does not prove completion or unlock new input. Recovery/admission use the journal,
   not the status enum. Compute status is an independent durable projection, not a live probe.
 - **`Capabilities.streaming` is declared but unused.** Streaming comes from the model provider, not

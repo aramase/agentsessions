@@ -82,7 +82,13 @@ provide.
 - `EXEC_AWAITING` is a narrow valid owned-host-request projection, not a general ordinary/legacy
   query reducer. A decided call without a receipt has no pending reference; the existing metadata
   `COMPLETED` fallback does not prove completion or allow new input. Compute status independently
-  reflects durable lifecycle metadata, not a live backend probe. Raw Replay is unchanged.
+  reflects durable lifecycle metadata, not a live backend probe. Host approval request/decision
+  writes alone do not imply LIVE compute: NONE/COLD remains unchanged. Raw Replay is unchanged.
+- Decodable legacy/handwritten or malformed approval evidence remains readable through Get/List
+  and Fork response metadata, but confers no actionable `pending_approval` reference. Strict
+  approval validation can withhold even a valid latest reference when historical approval evidence
+  is malformed. Database/read failures and undecodable journal or metadata values still return
+  `INTERNAL`; rendering tolerance does not relax Approve, Exec, Resume or Suspend validation.
 - Approval requests and suspended snapshots/handles are retained indefinitely, without expiry,
   automatic decision or reclamation. Cancel and DeleteSession remain `UNIMPLEMENTED`; decisions
   provide no cancellation/teardown, policy hook, approval timeout or authorization. Identity is

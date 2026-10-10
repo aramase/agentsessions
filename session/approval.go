@@ -17,14 +17,27 @@ import (
 	"github.com/aramase/agentsessions/wire"
 )
 
-// pendingSession decorates the existing renderer at its captured cursor. This is a narrow
+// pendingSession decorates the metadata renderer at its captured cursor. This is a narrow
 // host-gate projection, not a general reducer for ordinary or legacy execution states.
 func (s *Service) pendingSession(info sqlitelog.SessionInfo) (*v1.Session, error) {
 	out, err := sessionProto(info)
-	if err != nil || info.LastSeq == 0 {
-		return out, err
+	if err != nil {
+		return nil, err
+	}
+	return s.withPendingApproval(info, out)
+}
+
+// withPendingApproval adds only strictly validated host-gate correlation to a rendered response.
+// Legacy/handwritten or corrupt evidence remains readable but confers no actionable reference.
+// Commands validate independently through the controller/Registry; rendering is not admission authority.
+func (s *Service) withPendingApproval(info sqlitelog.SessionInfo, out *v1.Session) (*v1.Session, error) {
+	if info.LastSeq == 0 {
+		return out, nil
 	}
 	state, err := controller.InspectApproval(s.store.Session(info.UID), info.LastSeq)
+	if errors.Is(err, controller.ErrInvalidExecutionLog) || errors.Is(err, controller.ErrReplayDiverged) {
+		return out, nil
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "session %q approval projection: %v", info.UID, err)
 	}
