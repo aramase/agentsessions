@@ -1,24 +1,24 @@
 # Dependabot keeps the two Go modules and the workflow actions current.
 #
-# integrations/substrate is a SEPARATE module: the root gomod entry does not reach it, so it needs
-# its own directory entry or its dependencies would silently go stale.
+# integrations/substrate consumes the root module through `replace ../..`, so a
+# root bump also changes its go.mod/go.sum. One entry with one group over both
+# directories turns such a bump into a single PR that updates both modules; /
+# is listed first so the nested module is updated against the bumped root.
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /
+    directories:
+      - /
+      - /integrations/substrate
     schedule:
       interval: weekly
     groups:
       go-dependencies:
         patterns: ["*"]
-
-  - package-ecosystem: gomod
-    directory: /integrations/substrate
-    schedule:
-      interval: weekly
-    groups:
-      go-dependencies:
-        patterns: ["*"]
+    ignore:
+      # Pinned to a commit and bumped by hand together with the adapter changes
+      # its API breaks need; a Dependabot bump alone does not build.
+      - dependency-name: github.com/agent-substrate/substrate
 
   - package-ecosystem: github-actions
     directory: /
