@@ -104,18 +104,26 @@ func TestRegistryResumeGuardDrainsAfterRoutingErrors(t *testing.T) {
 		name        string
 		event       *api.Event
 		defaultName string
+		unavailable bool
 		want        error
 	}{
-		{"incomplete invocation", &api.Event{Kind: api.EventExecutionStart, ExecutionID: "pending", ExecutionStart: &api.ExecutionStart{InputCount: &one}}, "default", controller.ErrIncompleteInvocation},
-		{"unserved recorded name", &api.Event{Kind: api.EventExecutionStart, ExecutionID: "pending", ExecutionStart: &api.ExecutionStart{InputCount: &zero, Harness: "unserved"}}, "default", ErrRecordedHarnessNotServed},
-		{"unknown stored default", nil, "unserved", ErrUnknownHarness},
-		{"invalid journal", &api.Event{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: &zero}}, "default", controller.ErrInvalidExecutionLog},
+		{"incomplete invocation", &api.Event{Kind: api.EventExecutionStart, ExecutionID: "pending", ExecutionStart: &api.ExecutionStart{InputCount: &one}}, "default", false, controller.ErrIncompleteInvocation},
+		{"unserved recorded name", &api.Event{Kind: api.EventExecutionStart, ExecutionID: "pending", ExecutionStart: &api.ExecutionStart{InputCount: &zero, Harness: "unserved"}}, "default", false, ErrRecordedHarnessNotServed},
+		{"unknown stored default", nil, "unserved", false, ErrUnknownHarness},
+		{"unservable recorded name", &api.Event{Kind: api.EventExecutionStart, ExecutionID: "pending", ExecutionStart: &api.ExecutionStart{InputCount: &zero, Harness: "unserved"}}, "default", true, ErrHarnessUnservable},
+		{"unservable stored default", nil, "unserved", true, ErrHarnessUnservable},
+		{"invalid journal", &api.Event{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: &zero}}, "default", false, controller.ErrInvalidExecutionLog},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := New(nil, nil)
 			r, err := NewRegistry("default", map[string]*Placer{"default": p})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tc.unavailable {
+				if err := r.MarkUnavailable("unserved", errors.New("cannot load stored spec")); err != nil {
+					t.Fatal(err)
+				}
 			}
 			log := eventlog.AsStore(eventlog.New())
 			if tc.event != nil {

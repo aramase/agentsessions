@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -892,14 +893,23 @@ func TestRegisterHarnessRefusesNilPlacer(t *testing.T) {
 	}
 	reg.Close()
 
-	if _, _, err := store.RegisterHarness(sqlitelog.HarnessRecord{Name: "h", UID: "u", Spec: "{}", SpecDigest: "d"}); err != nil {
+	if _, _, err := store.RegisterHarness(sqlitelog.HarnessRecord{Name: "h", UID: "u", Spec: `{"remote":{"address":"a:1"},"capabilities":{"resumability":"RESUMABILITY_STATELESS_REPLAY"}}`, SpecDigest: "d"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.NewHarnessRegistry(store, newRegistry(), nilFactory); err == nil {
-		t.Fatal("startup accepted a factory that returned no placer for a stored registration")
+	r, err := session.NewHarnessRegistry(store, newRegistry(), nilFactory)
+	if err != nil {
+		t.Fatalf("startup must isolate a factory returning no placer: %v", err)
+	}
+	got, err := r.GetHarness(ctx, &v1.GetHarnessRequest{Name: "h"})
+	if err != nil || !strings.Contains(got.GetUnservableReason(), "no placer") {
+		t.Fatalf("factory failure status = %v, %v", got, err)
 	}
 	if got := released.Load(); got != 2 {
-		t.Fatalf("release called %d times after a failed startup, want 2", got)
+		t.Fatalf("release called %d times after failed startup load, want 2", got)
+	}
+	r.Close()
+	if got := released.Load(); got != 2 {
+		t.Fatalf("Close released failed factory resources again: %d", got)
 	}
 }
 

@@ -146,6 +146,31 @@ func TestRegistryAdd(t *testing.T) {
 	}
 }
 
+// An incompatible stored registration remains a known, reserved name; it must never fall through
+// to the unknown-name path or be replaced by a newly constructed Placer.
+func TestRegistryUnavailableName(t *testing.T) {
+	r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": newPlacer(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("unsupported placement")
+	if err := r.MarkUnavailable("old", cause); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Has("old") || !slices.Equal(r.Names(), []string{"echo", "old"}) {
+		t.Fatalf("unavailable name not reserved: Has=%t Names=%v", r.Has("old"), r.Names())
+	}
+	if _, err := r.For("old"); !errors.Is(err, placement.ErrHarnessUnservable) || !errors.Is(err, cause) || errors.Is(err, placement.ErrUnknownHarness) {
+		t.Fatalf("For(old)=%v, want unservable wrapping cause (not unknown)", err)
+	}
+	if err := r.Add("old", newPlacer(t)); !errors.Is(err, placement.ErrHarnessExists) {
+		t.Fatalf("Add(old)=%v, want ErrHarnessExists", err)
+	}
+	if _, err := r.For("missing"); !errors.Is(err, placement.ErrUnknownHarness) {
+		t.Fatalf("For(missing)=%v, want ErrUnknownHarness", err)
+	}
+}
+
 // Lookups run concurrently with Add on a live host; -race checks the locking.
 func TestRegistryAddIsSafeAlongsideLookups(t *testing.T) {
 	r, err := placement.NewRegistry("echo", map[string]*placement.Placer{"echo": newPlacer(t)})

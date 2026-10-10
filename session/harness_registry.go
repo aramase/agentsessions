@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sync"
 	"time"
@@ -27,9 +28,9 @@ import (
 
 // PlacerFactory builds the Placer for a registered harness, and a release func that frees whatever
 // it built (nil if nothing). It is where the host decides which placements it can serve and checks
-// a placement's address forms: an error is reported as FailedPrecondition and nothing is stored. It
-// must not dial or provision anything, because it also runs at startup for every stored
-// registration, and a harness that is down must not keep the host from starting.
+// a placement's address forms: an error for a new registration is FailedPrecondition and nothing
+// is stored. At startup, an error marks only that stored registration unservable. It must not dial
+// or provision anything: a harness that is down must not keep the host from starting.
 //
 // The Placer must be built with placement.WithDescriptorID(spec.GetDescriptorId()), so that every
 // Exec, Resume and Fork refuses a harness that reports another descriptor id. HarnessRegistry
@@ -61,13 +62,15 @@ type HarnessRegistry struct {
 	releases []func()
 }
 
-// NewHarnessRegistry builds the service and makes every stored registration resolvable, retired
-// ones included, because existing sessions on a retired harness still run. It first reserves the
-// registry's static and reserved names in the store, as ReserveStaticHarnessNames does, so a stored
-// registration under one of them refuses startup rather than letting one name mean two harnesses.
+// NewHarnessRegistry builds the service, retaining every stored name (including retired ones)
+// and resolving each usable registration to a Placer. Existing sessions on a retired harness still
+// run. Per-registration spec, factory and descriptor failures leave only that name unservable;
+// store enumeration/reservation errors and static-name collisions still refuse startup. It first
+// reserves the registry's static and reserved names in the store, as ReserveStaticHarnessNames does,
+// rather than letting one name mean two harnesses.
 //
-// Registrations are loaded once, here. A registration another process makes in a shared database
-// is served by this one after it restarts.
+// Registrations are loaded at startup. A registration another process makes in a shared database
+// is served after this host restarts, or if RegisterHarness loads its identical compatible spec.
 func NewHarnessRegistry(store *sqlitelog.Store, registry *placement.Registry, factory PlacerFactory) (*HarnessRegistry, error) {
 	if store == nil || registry == nil || factory == nil {
 		return nil, errors.New("session: NewHarnessRegistry needs a store, a registry and a factory")
@@ -124,19 +127,36 @@ func forEachRegistration(store *sqlitelog.Store, fn func(sqlitelog.HarnessRecord
 }
 
 func (h *HarnessRegistry) load(rec sqlitelog.HarnessRecord) error {
-	spec, err := decodeSpec(rec.Spec)
+	spec, err := storedSpec(rec.Spec)
 	if err != nil {
-		return fmt.Errorf("session: harness %q: stored spec: %w", rec.Name, err)
+		return h.unavailable(rec.Name, err)
 	}
 	p, release, err := h.factory(rec.Name, spec)
+	if err == nil {
+		err = checkPlacer(p, spec)
+	}
 	if err != nil {
-		return fmt.Errorf("session: harness %q: %w", rec.Name, err)
+		if release != nil {
+			release()
+		}
+		return h.unavailable(rec.Name, err)
+	}
+	if err := h.registry.Add(rec.Name, p); err != nil {
+		if release != nil {
+			release()
+		}
+		return err
 	}
 	h.keep(release)
-	if err := checkPlacer(p, spec); err != nil {
-		return fmt.Errorf("session: harness %q: %w", rec.Name, err)
+	return nil
+}
+
+func (h *HarnessRegistry) unavailable(name string, cause error) error {
+	if err := h.registry.MarkUnavailable(name, cause); err != nil {
+		return err
 	}
-	return h.registry.Add(rec.Name, p)
+	slog.Warn("stored harness cannot be served on this host", "harness", name, "error", cause)
+	return nil
 }
 
 // checkPlacer refuses what a PlacerFactory returned when it cannot serve the spec as registered: no
@@ -196,6 +216,19 @@ func decodeSpec(s string) (*v1.HarnessSpec, error) {
 	spec := &v1.HarnessSpec{}
 	if err := protojson.Unmarshal([]byte(s), spec); err != nil {
 		return nil, err
+	}
+	return spec, nil
+}
+
+// storedSpec never returns a partially decoded or unsupported stored spec. Unknown fields and enum
+// values can be written by a newer host sharing this journal and must fail closed on this one.
+func storedSpec(s string) (*v1.HarnessSpec, error) {
+	spec, err := decodeSpec(s)
+	if err == nil {
+		err = validateSpec(spec)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("stored spec cannot be decoded or validated (possible host/schema version skew; upgrade this host or restart with a compatible version): %w", err)
 	}
 	return spec, nil
 }
@@ -313,6 +346,9 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 	var release func()
 	if !h.registry.Has(name) {
 		if placer, release, err = h.factory(name, spec); err != nil {
+			if release != nil {
+				release()
+			}
 			return nil, status.Errorf(codes.FailedPrecondition, "harness %q: %v", name, err)
 		}
 		if err := checkPlacer(placer, spec); err != nil {
@@ -340,16 +376,15 @@ func (h *HarnessRegistry) RegisterHarness(ctx context.Context, req *v1.RegisterH
 		return nil, status.Errorf(codes.Internal, "register: %v", err)
 	}
 	if placer != nil {
-		h.keep(release)
 		if err := h.registry.Add(name, placer); err != nil {
+			if release != nil {
+				release()
+			}
 			return nil, status.Errorf(codes.Internal, "register: %v", err)
 		}
+		h.keep(release)
 	}
-	out, err := registrationProto(rec)
-	if err != nil {
-		return nil, err
-	}
-	return &v1.RegisterHarnessResponse{Harness: out, Outcome: registerOutcome(result)}, nil
+	return &v1.RegisterHarnessResponse{Harness: h.registrationProto(rec), Outcome: registerOutcome(result)}, nil
 }
 
 func registerOutcome(r sqlitelog.RegisterResult) v1.RegisterOutcome {
@@ -381,9 +416,7 @@ func (h *HarnessRegistry) GetHarness(ctx context.Context, req *v1.GetHarnessRequ
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "get: %v", err)
 		}
-		if out, err = registrationProto(rec); err != nil {
-			return nil, err
-		}
+		out = h.registrationProto(rec)
 	}
 	if req.GetObserve() {
 		h.observe(ctx, out)
@@ -396,10 +429,6 @@ func (h *HarnessRegistry) GetHarness(ctx context.Context, req *v1.GetHarnessRequ
 // the point of asking.
 func (h *HarnessRegistry) observe(ctx context.Context, out *v1.HarnessRegistration) {
 	name := out.GetMetadata().GetName()
-	if !h.registry.Has(name) {
-		out.ObserveError = "harness is not loaded on this host"
-		return
-	}
 	p, err := h.registry.For(name)
 	if err != nil {
 		out.ObserveError = err.Error()
@@ -434,7 +463,7 @@ func (h *HarnessRegistry) RetireHarness(ctx context.Context, req *v1.RetireHarne
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "retire: %v", err)
 	}
-	return registrationProto(rec)
+	return h.registrationProto(rec), nil
 }
 
 // ListHarnesses lists static and registered harnesses together in name order. Paging is keyset on
@@ -471,11 +500,7 @@ func (h *HarnessRegistry) ListHarnesses(ctx context.Context, req *v1.ListHarness
 			static = static[1:]
 			continue
 		}
-		r, err := registrationProto(recs[0])
-		if err != nil {
-			return nil, err
-		}
-		out.Harnesses = append(out.Harnesses, r)
+		out.Harnesses = append(out.Harnesses, h.registrationProto(recs[0]))
 		recs = recs[1:]
 	}
 	if len(out.Harnesses) > size {
@@ -508,11 +533,8 @@ func staticProto(name string) *v1.HarnessRegistration {
 	}
 }
 
-func registrationProto(rec sqlitelog.HarnessRecord) (*v1.HarnessRegistration, error) {
-	spec, err := decodeSpec(rec.Spec)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "harness %q: stored spec: %v", rec.Name, err)
-	}
+func (h *HarnessRegistry) registrationProto(rec sqlitelog.HarnessRecord) *v1.HarnessRegistration {
+	spec, specErr := storedSpec(rec.Spec)
 	out := &v1.HarnessRegistration{
 		Metadata: &v1.ResourceMetadata{
 			Name:       rec.Name,
@@ -530,5 +552,14 @@ func registrationProto(rec sqlitelog.HarnessRecord) (*v1.HarnessRegistration, er
 		out.RetireTime = timestamppb.New(rec.RetiredAt)
 		out.RetireReason = rec.RetireReason
 	}
-	return out, nil
+	if specErr != nil {
+		out.UnservableReason = specErr.Error()
+	} else if _, err := h.registry.For(rec.Name); err != nil {
+		if errors.Is(err, placement.ErrHarnessUnservable) {
+			out.UnservableReason = err.Error()
+		} else {
+			out.UnservableReason = "registration is not loaded on this host; restart this host or register the identical compatible spec locally to serve it"
+		}
+	}
+	return out
 }

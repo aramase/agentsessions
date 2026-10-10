@@ -57,6 +57,16 @@ provide.
 
 ### Compatibility
 
+- An unsupported stored harness registration (unknown spec fields or enum values, or a local
+  placement/factory failure) no longer prevents other harnesses from starting. Its name stays
+  reserved, and Get/List/Retire retain its metadata, original digest and ACTIVE/RETIRED state.
+  `HarnessRegistration.unservable_reason` explains this host's inability to run it; an undecodable
+  spec is unset, not partially returned. Existing sessions on a registration isolated during this
+  host's startup load and new attempts to use it fail `FAILED_PRECONDITION` until a compatible host
+  serves it. A registration added to a shared journal after this host started remains visible but
+  is unknown to this host's Sessions routing: Create and auto-create Exec selecting it remain
+  `INVALID_ARGUMENT` (a pending recorded Resume retains its `FAILED_PRECONDITION` recovery rule)
+  until this host restarts or loads it through `RegisterHarness` with the identical compatible spec.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is
