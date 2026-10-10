@@ -142,16 +142,17 @@ func (c *Client) ListSessionsPage(ctx context.Context, project string, pageSize 
 type ExecOptions struct {
 	// Session to run against. Empty creates one, whose uid comes back on TurnResult.Session.
 	Session string
-	// Inputs for this turn. Empty re-drives an interrupted execution with no new input.
+	// Inputs for this turn. Empty recovers a current approval-bearing invocation using its
+	// recorded inputs/config/route; unrelated inputless Exec retains server behavior.
 	Inputs []string
 	// Harness overrides the session's configured harness for this turn.
 	Harness string
 	// ExpectedLastSeq opts into the single-writer compare-and-swap. Nil appends at the current
 	// head. A stale value comes back as codes.Aborted rather than interleaving silently.
 	ExpectedLastSeq *int64
-	// OnSession is called when the session frame arrives, which is before the turn runs. A caller
-	// that created its session implicitly learns the uid here rather than after the turn, which
-	// matters when the turn is long or fails partway.
+	// OnSession is called for each session frame: the initial frame before the turn runs,
+	// and the final current frame after approval parking or recovery. The initial UID remains
+	// available even when the execution subsequently fails.
 	OnSession func(*v1.Session)
 	// OnRecord is called for each committed record as it arrives, for callers that want to react
 	// during the turn rather than after it.
@@ -161,10 +162,10 @@ type ExecOptions struct {
 	OnDelta func(*v1.Delta)
 }
 
-// TurnResult is one completed turn.
+// TurnResult is one completed or approval-paused turn.
 type TurnResult struct {
-	// Session as reported by the stream's first frame. For a turn that created its session, this
-	// is where the uid comes from.
+	// Session is the latest session frame. For an approval pause/recovery it carries the final
+	// cursor and pending approval; the initial frame supplies the UID even on failure.
 	Session *v1.Session
 	// Records committed by this turn, in order.
 	Records []*v1.LogRecord
@@ -212,6 +213,9 @@ func (c *Client) Exec(ctx context.Context, opts ExecOptions) (*TurnResult, error
 		switch {
 		case update.GetSession() != nil:
 			result.Session = update.GetSession()
+			if result.Session.GetLastSeq() > result.LastSeq {
+				result.LastSeq = result.Session.GetLastSeq()
+			}
 			if opts.OnSession != nil {
 				opts.OnSession(result.Session)
 			}
@@ -236,9 +240,6 @@ func (c *Client) Exec(ctx context.Context, opts ExecOptions) (*TurnResult, error
 		}
 	}
 	result.Output = output
-	if result.LastSeq == 0 {
-		result.LastSeq = result.Session.GetLastSeq()
-	}
 	return result, nil
 }
 
@@ -291,6 +292,17 @@ func (c *Client) Fork(ctx context.Context, uid string, opts ForkOptions) ([]*v1.
 // Suspend frees the session's compute, recording the transition on its chain.
 func (c *Client) Suspend(ctx context.Context, uid string) (*v1.Session, error) {
 	return c.stub.Suspend(ctx, &v1.SuspendRequest{Session: uid})
+}
+
+// Approve commits only a decision, returning the original decision record on an exact retry.
+// It never resumes compute; call Resume separately to continue. Identity is provenance, not
+// authorization. ApprovalDecision represents a supplied bool, including an explicit denial.
+func (c *Client) Approve(ctx context.Context, uid string, decision api.ApprovalDecision) (*v1.ApproveResponse, error) {
+	actor := wire.EventToProto(api.Event{Actor: decision.Identity}).GetActor()
+	return c.stub.Approve(ctx, &v1.ApproveRequest{
+		Session: uid, ExecutionId: decision.ExecutionID, ToolCallId: decision.ToolCallID,
+		RequestSeq: decision.RequestSeq, Approved: &decision.Approved, Reason: decision.Reason, Identity: actor,
+	})
 }
 
 // Resume brings a suspended session back. boot cold-boots and replays instead of restoring a

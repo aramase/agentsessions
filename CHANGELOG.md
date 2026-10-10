@@ -27,6 +27,11 @@ provide.
 
 ### Added
 
+- Durable `REQUIRES_APPROVAL` gates for stateless-replay harnesses. Sessions RPC and Go SDK
+  `Approve` commit an explicit approval or denial only; callers Resume separately. `agentctl approve`
+  and `deny` discover a pending tuple or accept complete explicit correlation, record optional
+  reason/identity provenance, then Resume. A recovery failure exits unsuccessfully and says the
+  decision is committed, without retracting it.
 - The chat harness accepts a per-execution `system_prompt` in its JSON config, prepended before
   conversation history and current inputs.
 - `agentsessionsd --harness name=address` registers a harness that is already running, over TCP
@@ -57,11 +62,46 @@ provide.
 
 ### Compatibility
 
+- Approval is stateless only: memory-snapshot harnesses cannot use this gate. Requests and decisions
+  are host-owned journal events; exact retries return the original decision record, including after
+  a receipt or later turn. Get/List and successful paused/recovery Exec streams expose correlation
+  at their captured cursor. Exec sends an initial Session and, after a successful gate pause or
+  approval-bearing no-input recovery, a final current Session. SDK `TurnResult.Session` and
+  `OnSession` use the latest frame; `LastSeq` includes Session cursors even on query-only recovery
+  and error paths. Clients must drain the stream, not treat its first frame as the outcome.
+- For an existing current approval-bearing execution, no-input Exec uses recorded recovery rather
+  than creating a new invocation: original inputs/config/harness/version/cursor and host routing
+  rules win over request overrides. Explicit CAS is checked under the Registry guard before repair
+  or provisioning, and the request deadline bounds recovery. New inputs are refused until an owned
+  call has a receipt, even after a decision clears `pending_approval`. Ordinary inputless Exec is
+  unchanged; use Resume for general interrupted-turn recovery. Pending/repair Resume has no runtime
+  IO and does not prove compute cold; actual live park success requires ACK, EOF, connection closure,
+  external snapshot and a durable SUSPEND. A second gate does not append RESUME. Suspend of an
+  unreceipted approval uses its recorded route, not a fallback session default, with existing
+  registered pins/static collision checks; retired registrations still serve existing sessions.
+- `EXEC_AWAITING` is a narrow valid owned-host-request projection, not a general ordinary/legacy
+  query reducer. A decided call without a receipt has no pending reference; the existing metadata
+  `COMPLETED` fallback does not prove completion or allow new input. Compute status independently
+  reflects durable lifecycle metadata, not a live backend probe. Raw Replay is unchanged.
+- Approval requests and suspended snapshots/handles are retained indefinitely, without expiry,
+  automatic decision or reclamation. Cancel and DeleteSession remain `UNIMPLEMENTED`; decisions
+  provide no cancellation/teardown, policy hook, approval timeout or authorization. Identity is
+  recorded on the decision as caller-supplied provenance only. Hosts still need an external executor
+  with durable deduplication on session UID plus idempotency key. The stock daemon has no executor,
+  and provider tool mapping/application tool loops are not supplied by this gate. Approved executor
+  failures become durable `EXECUTOR_ERROR` receipts for continuation; a missing executor instead
+  leaves the decision recoverable with `FAILED_PRECONDITION`. Denial never invokes the executor.
+- Gate sink operations are serialized, and observer/model/executor callbacks must not re-enter the
+  same sink. Recorded-prefix identity/correlation mismatches remain sticky divergence even if the
+  harness catches the error; they cannot authorize later effects or complete recovery. Ordinary
+  mediation defaults and argument normalization are unchanged. Populated approval request/decision
+  sequences and receipt fields require a verifier that understands them; zero-valued legacy
+  canonical forms and literal digest vectors are preserved, with no SQLite migration or rewrite.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is
   `FAILED_PRECONDITION`. Session metadata and later default Exec selection are unchanged, as are
-  completed Resume and Suspend/Fork routing. Older markers without a name fall back to session
+  completed Resume and ordinary Suspend/Fork routing. Older markers without a name fall back to session
   metadata; missing/empty recorded versions keep existing unversioned behavior. New Exec still
   accepts unversioned harnesses. Nonempty recorded versions must exactly match the served version,
   including rejection of served empty. Controller Replay preflights all completed invocations
@@ -84,9 +124,11 @@ provide.
   start markers and non-legacy kinds are invalid. Once a modern start marker or ID-bearing
   execution event appears, later ID-less execution events still fail closed. Remaining invalid-log
   refusals are FAILED_PRECONDITION. Inherited-tool safety checks and rollback restrictions remain.
-- Overlapping `Exec`, `Suspend`, and `Resume` calls for one session across all Placers in one Registry
-  now return gRPC `ABORTED` without changing compute or the journal. Retry after the in-flight operation
-  finishes; other sessions remain independent. Direct Placer calls return `placement.ErrSessionBusy`.
+- Operations that reach the Registry's shared session guard return gRPC `ABORTED` on local overlap:
+  `Exec`, `Suspend`, `Resume`, and `Approve` for one session across all its Placers. New-input Exec
+  against an owned unreceipted approval is an admission `FAILED_PRECONDITION` before that guard.
+  Refused calls do not change compute or the journal. Retry after the in-flight operation finishes;
+  other sessions remain independent. Direct Placer calls return `placement.ErrSessionBusy`.
   Standalone Placers have private guards; separate Registries or hosts are not fenced by this guard.
   Construct the Registry before using its Placers; registering already-used Placers or sharing them
   between Registries is unsupported. Idle session guard entries are reclaimed.

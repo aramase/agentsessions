@@ -110,11 +110,11 @@ func TestApproveDecisionPresenceAndGeneratedStub(t *testing.T) {
 			t.Fatalf("decision presence/tuple lost: %v, want %v", &got, want)
 		}
 	}
-	// Task 1 declares the RPC but adds no gate implementation to Service.
-	var service v1.SessionsServer = &session.Service{}
+	// The generated server contract is implemented at the public validation boundary.
+	var service v1.SessionsServer = session.NewService(nil, nil)
 	_, err := service.Approve(context.Background(), &v1.ApproveRequest{})
-	if status.Code(err) != codes.Unimplemented {
-		t.Fatalf("Approve = %v, want inherited Unimplemented", err)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Approve = %v, want InvalidArgument for an absent decision tuple", err)
 	}
 }
 

@@ -51,14 +51,15 @@ type SessionsClient interface {
 	// ephemeral Deltas; Replay re-delivers committed records only (read-only).
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecUpdate], error)
 	Replay(ctx context.Context, in *ReplayRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogRecord], error)
-	// Declared approval contract; the current server returns UNIMPLEMENTED. The durable gate
-	// implementation must provide the following semantics when this method is supported:
+	// Implemented durable approval decisions for STATELESS_REPLAY executions.
 	// OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
 	// approved value, reason and identity returns the existing decision, even after resolution.
 	// A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite.
 	// INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
 	// approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
-	// tuple, or a non-stateless execution. ABORTED: local contention or append-CAS conflict; retry
+	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
+	// for a non-stateless execution; Approve does not Describe or resolve a harness.
+	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
 	// after reading the session. Identity is provenance only; this method provides no authorization,
 	// policy hook, expiry, implicit Resume, or Cancel behavior.
 	Approve(ctx context.Context, in *ApproveRequest, opts ...grpc.CallOption) (*ApproveResponse, error)
@@ -67,7 +68,16 @@ type SessionsClient interface {
 	Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*Session, error)
 	// Compute-layer durability. There is no warm Pause: no Runtime backend implements a
 	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
+	// Suspend routes an unreceipted approval to its recorded harness; ordinary sessions use
+	// their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback.
 	Suspend(ctx context.Context, in *SuspendRequest, opts ...grpc.CallOption) (*Session, error)
+	// An unresolved owned approval returns its current paused Session without runtime IO.
+	// A call-only cut repairs the request; neither outcome proves cold compute. After a decision,
+	// recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without
+	// RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves
+	// the decision recoverable. Approved executor failures are durable EXECUTOR_ERROR receipts,
+	// available to the harness for continuation, not transport failures. Snapshots and unresolved
+	// requests are retained indefinitely; there is no approval expiry or automatic decision.
 	Resume(ctx context.Context, in *ResumeRequest, opts ...grpc.CallOption) (*Session, error)
 	// The differentiator: branch a session at a sequence into one or more children. Forking a
 	// REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event
@@ -225,14 +235,15 @@ type SessionsServer interface {
 	// ephemeral Deltas; Replay re-delivers committed records only (read-only).
 	Exec(*ExecRequest, grpc.ServerStreamingServer[ExecUpdate]) error
 	Replay(*ReplayRequest, grpc.ServerStreamingServer[LogRecord]) error
-	// Declared approval contract; the current server returns UNIMPLEMENTED. The durable gate
-	// implementation must provide the following semantics when this method is supported:
+	// Implemented durable approval decisions for STATELESS_REPLAY executions.
 	// OK commits only a decision; the caller must Resume to continue. An exact retry of the tuple,
 	// approved value, reason and identity returns the existing decision, even after resolution.
 	// A changed decision/reason/identity for that request is FAILED_PRECONDITION, never an overwrite.
 	// INVALID_ARGUMENT: missing session/execution/tool-call tuple, non-positive request_seq, or absent
 	// approved. NOT_FOUND: unknown session. FAILED_PRECONDITION: stale, inherited, or wrong request
-	// tuple, or a non-stateless execution. ABORTED: local contention or append-CAS conflict; retry
+	// tuple, changed decision, or invalid recorded approval evidence. The gate cannot be created
+	// for a non-stateless execution; Approve does not Describe or resolve a harness.
+	// ABORTED: local contention, append-CAS conflict or superseded fence; retry
 	// after reading the session. Identity is provenance only; this method provides no authorization,
 	// policy hook, expiry, implicit Resume, or Cancel behavior.
 	Approve(context.Context, *ApproveRequest) (*ApproveResponse, error)
@@ -241,7 +252,16 @@ type SessionsServer interface {
 	Cancel(context.Context, *CancelRequest) (*Session, error)
 	// Compute-layer durability. There is no warm Pause: no Runtime backend implements a
 	// node-local warm checkpoint, so a session goes straight from live to a cold snapshot.
+	// Suspend routes an unreceipted approval to its recorded harness; ordinary sessions use
+	// their stored default. An unserved recorded name is FAILED_PRECONDITION, with no fallback.
 	Suspend(context.Context, *SuspendRequest) (*Session, error)
+	// An unresolved owned approval returns its current paused Session without runtime IO.
+	// A call-only cut repairs the request; neither outcome proves cold compute. After a decision,
+	// recovery uses the recorded invocation and SnapshotRef. It may park at another gate (without
+	// RESUME), or finish and commit RESUME. A missing executor is FAILED_PRECONDITION and leaves
+	// the decision recoverable. Approved executor failures are durable EXECUTOR_ERROR receipts,
+	// available to the harness for continuation, not transport failures. Snapshots and unresolved
+	// requests are retained indefinitely; there is no approval expiry or automatic decision.
 	Resume(context.Context, *ResumeRequest) (*Session, error)
 	// The differentiator: branch a session at a sequence into one or more children. Forking a
 	// REQUIRES_MEMORY_SNAPSHOT harness first checkpoints the parent (it suspends, and a SUSPEND event

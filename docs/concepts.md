@@ -71,17 +71,25 @@ enumerate a tenant it did not ask for. Results are newest first and paged with a
 the last `(create time, uid)` seen, so a session created while a caller walks pages neither skips
 nor duplicates a row.
 
-Two fields are derived rather than stored:
+The cursor and lifecycle status are derived rather than caller-writable:
 
 - `last_seq` is `MAX(seq)` over the log, so the cursor a listing reports is always the log's own.
 - `compute_state` is a projection maintained in the same transaction that appends an event, since an
   event body is an opaque blob no query can filter on. It records **what the log implies about
-  compute**, not a live probe of the backend. Any ordinary event moves a session to `LIVE`, because
-  something had to be running to produce it; `SUSPEND` and `FORK` land it `COLD`, and `RESUME`
+  compute**, not a live probe of the backend. Execution activity implies `LIVE`; `SUSPEND` and
+  `FORK` land it `COLD`, and `RESUME`
   returns it to `LIVE`. A session that has been created but never run stays `NONE`, which is what
   makes it visible in a listing before it has any compute. `LIVE` goes stale if the process behind
   it later died. A backend that can enumerate its own incarnations is the thing that would make this
-  exact; reconciling against the runtime is not implemented.
+  exact; reconciling against the runtime is not implemented. Approval requests/decisions do not
+  themselves move compute: a request repair or pending query cannot prove that a snapshot committed.
+- `pending_approval` is the tuple of an owned, unresolved host request in a stateless execution,
+  inspected through this response's positive `last_seq`. Later decisions do not change an earlier
+  captured response. It is output-only, not a metadata-table flag. Such a pending host request is
+  narrowly reported `EXEC_AWAITING`; a decision clears the reference, but an unreceipted owned call
+  still blocks new input. Ordinary/legacy interrupted turns retain the metadata-only `COMPLETED`
+  fallback, so that status is not proof of completion or admission. Execution and compute axes are
+  independent; recovery uses the journal rather than trusting an enum.
 
 A fork inherits the parent's `project`, `harness` and `model`, because those define the workload and
 a branch of a run is still that run. It does **not** inherit the parent's name. A name is a label the
@@ -117,7 +125,7 @@ cost, audit, and tool approval are first-class rather than parsed out of text af
 | `MODEL_CALL` | A call to a model was made (records the model, params, and an input hash for the replay check). |
 | `OUTPUT` | Assistant output (a delta or a full message). |
 | `TOOL_CALL` / `TOOL_RESULT` | A tool invocation and its outcome. Aligned with an MCP tool call. |
-| `APPROVAL_REQUEST` / `APPROVAL_RESULT` | A human or policy approval gate around a tool. |
+| `APPROVAL_REQUEST` / `APPROVAL_RESULT` | A host-owned request and explicit caller decision around a stateless tool call. |
 | `USAGE` | Per-call token and cost accounting. |
 | `LIFECYCLE` | A compute or session transition (`SUSPEND`, `RESUME`, `FORK`, `BASELINE`, `CANCEL`). |
 | `END` | The terminal state of one execution (`COMPLETED` / `FAILED` / `CANCELED`). |
@@ -156,9 +164,12 @@ fails closed. `Sessions.Replay` still streams stored records without running or 
 `Sessions.Resume` routes an interrupted turn to its recorded registry entry, including that entry's
 backend, model and tool executor. An unserved recorded name or mismatched version is
 `FAILED_PRECONDITION`, never fallback to another harness. Restore the recorded entry/version before
-retrying. A new Exec can supersede an interrupted turn and records its own invocation identity.
+retrying. A new Exec can supersede an ordinary interrupted turn and records its own invocation
+identity; an owned approval call blocks new inputs until its receipt commits.
 An override is still per-turn: session metadata is unchanged and a later Exec with no override uses
-the stored default. Completed Resume, Suspend and Fork retain their existing session-default routing.
+the stored default. Completed Resume, ordinary Suspend and Fork retain their existing session-default
+routing. An unreceipted approval's Suspend uses its recorded invocation route, including retry after
+a failed automatic snapshot or append.
 
 Older start markers without a name fall back to the session's stored harness; those without a
 version retain unversioned behavior. These rules apply independently if only one field is missing,
