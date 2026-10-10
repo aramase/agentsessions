@@ -75,9 +75,10 @@ type SessionPage struct {
 // eventComputeState maps a committed event to the compute state it implies, reporting false for
 // events that say nothing about the incarnation.
 //
-// A non-lifecycle event is evidence that compute was running: only a live incarnation produces a
-// turn's input and output records. This is load-bearing rather than incidental. Placer.Exec appends
-// no lifecycle marker of its own — RESUME is written only by Placer.Resume (placement.go:304) — so
+// Except for host-only approval request/decision writes, a non-lifecycle event is evidence that
+// compute was running: a live incarnation produces a turn's input and output records. Host repair
+// and decision writes may happen while compute is cold. This is load-bearing rather than incidental.
+// Placer.Exec appends no lifecycle marker of its own — RESUME is written only by Placer.Resume — so
 // a session that has only ever been Exec'd, which is every session before its first suspend, would
 // otherwise sit at NONE forever and never look live to a caller.
 //
@@ -87,6 +88,9 @@ type SessionPage struct {
 // truthful state: a child begins from its parent's fork-point snapshot with no compute of its own,
 // and is placed on its first Exec.
 func eventComputeState(ev api.Event) (api.ComputeState, bool) {
+	if ev.Kind == api.EventApprovalRequest || ev.Kind == api.EventApprovalResult {
+		return api.ComputeNone, false
+	}
 	if ev.Kind != api.EventLifecycle {
 		return api.ComputeLive, true
 	}
