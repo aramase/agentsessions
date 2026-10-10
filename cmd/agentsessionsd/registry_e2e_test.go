@@ -146,7 +146,7 @@ func TestOperatorListenerIsolation(t *testing.T) {
 					t.Fatalf("reflection v1 on Sessions = %v", err)
 				}
 			}
-			for _, req := range []*reflectionalpha.ServerReflectionRequest{
+			for _, req := range []*reflectionalpha.ServerReflectionRequest{ //nolint:staticcheck // Probe deprecated v1alpha reflection to verify Sessions refuses it.
 				{MessageRequest: &reflectionalpha.ServerReflectionRequest_ListServices{ListServices: ""}},
 				{MessageRequest: &reflectionalpha.ServerReflectionRequest_FileContainingSymbol{FileContainingSymbol: "agentsessions.v1.HarnessRegistry"}},
 			} {

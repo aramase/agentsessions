@@ -1140,11 +1140,8 @@ agentctl harness list --server 127.0.0.1:8081 --include-retired --page-size 50
 agentctl harness retire --server 127.0.0.1:8081 --name mine --reason maintenance
 ```
 
-spec.json is strict HarnessSpec proto-JSON, for example:
-
-```json
-{&#34;remote&#34;:{&#34;address&#34;:&#34;127.0.0.1:9000&#34;},&#34;capabilities&#34;:{&#34;resumability&#34;:&#34;RESUMABILITY_STATELESS_REPLAY&#34;},&#34;descriptor_id&#34;:&#34;echo&#34;}
-```
+spec.json uses strict HarnessSpec proto-JSON; see the copyable spec and operator setup example
+in [operator access](security.md#operator-access).
 
 Remote registrations require agentsessionsd -model; substrate placements are not supported by
 this daemon. The CLI prints the full proto-JSON response, including digest and lifecycle state.

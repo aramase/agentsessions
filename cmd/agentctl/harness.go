@@ -123,6 +123,8 @@ func cmdHarness(args []string) error {
 	if err != nil {
 		return fmt.Errorf("encode harness response: %w", err)
 	}
-	fmt.Println(string(data))
+	if _, err := fmt.Fprintln(os.Stdout, string(data)); err != nil {
+		return fmt.Errorf("harness %s RPC succeeded but writing JSON response to stdout failed: %w", op, err)
+	}
 	return nil
 }

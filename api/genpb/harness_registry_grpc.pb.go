@@ -57,11 +57,8 @@ const (
 // agentctl harness retire --server 127.0.0.1:8081 --name mine --reason maintenance
 // ```
 //
-// spec.json is strict HarnessSpec proto-JSON, for example:
-//
-// ```json
-// {"remote":{"address":"127.0.0.1:9000"},"capabilities":{"resumability":"RESUMABILITY_STATELESS_REPLAY"},"descriptor_id":"echo"}
-// ```
+// spec.json uses strict HarnessSpec proto-JSON; see the copyable spec and operator setup example
+// in [operator access](security.md#operator-access).
 //
 // Remote registrations require agentsessionsd -model; substrate placements are not supported by
 // this daemon. The CLI prints the full proto-JSON response, including digest and lifecycle state.
@@ -145,11 +142,8 @@ func (c *harnessRegistryClient) RetireHarness(ctx context.Context, in *RetireHar
 // agentctl harness retire --server 127.0.0.1:8081 --name mine --reason maintenance
 // ```
 //
-// spec.json is strict HarnessSpec proto-JSON, for example:
-//
-// ```json
-// {"remote":{"address":"127.0.0.1:9000"},"capabilities":{"resumability":"RESUMABILITY_STATELESS_REPLAY"},"descriptor_id":"echo"}
-// ```
+// spec.json uses strict HarnessSpec proto-JSON; see the copyable spec and operator setup example
+// in [operator access](security.md#operator-access).
 //
 // Remote registrations require agentsessionsd -model; substrate placements are not supported by
 // this daemon. The CLI prints the full proto-JSON response, including digest and lifecycle state.
