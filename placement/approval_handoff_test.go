@@ -3,6 +3,7 @@ package placement_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -340,7 +341,7 @@ func TestPlacementApprovalAutoHandoffContention(t *testing.T) {
 				ctl := newSuspendControl()
 				log := &approvalFaultLog{Store: newSuspendStore(t).Session("s")}
 				cause := errors.New(outcome)
-				var want error = api.ErrApprovalParked
+				want := api.ErrApprovalParked
 				phases := []string{"close", "snapshot", "append"}
 				switch outcome {
 				case "close failure":
@@ -521,7 +522,7 @@ func TestPlacementApprovalAutoHandoffContention(t *testing.T) {
 				if closes != 1 || b.stops != 0 || log.fences != 1 {
 					t.Fatalf("close=%d stop=%d operation fences=%d", closes, b.stops, log.fences)
 				}
-				after, err := log.Store.Read(before + 1)
+				after, err := log.Read(before + 1)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -563,6 +564,257 @@ func TestPlacementApprovalAutoHandoffContention(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPlacementApprovalJoinedRunFailureIsNotHandoff(t *testing.T) {
+	for _, outer := range []string{"Exec", "Resume repark"} {
+		for _, outcome := range []string{"wrapped park", "joined parks", "joined sentinel", "wrapped joined status"} {
+			t.Run(outer+"/"+outcome, func(t *testing.T) {
+				log := newSuspendStore(t).Session("s")
+				ctl := newSuspendControl()
+				cause := errors.New("independent Run failure")
+				if outcome == "wrapped joined status" {
+					cause = status.Error(codes.Unavailable, "independent transport failure")
+				}
+				var runFailure error
+				har := placementGateHarness{run: func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+					call := placementGateCall()
+					_, err := sink.ToolCall(ctx, call)
+					if err == nil && outer == "Resume repark" {
+						call.ID, call.IdempotencyKey = "c2", "key2"
+						_, err = sink.ToolCall(ctx, call)
+					}
+					if !errors.Is(err, api.ErrApprovalParked) {
+						if err != nil {
+							return err
+						}
+						return sink.Output(ctx, "recovered")
+					}
+					switch outcome {
+					case "wrapped park":
+						runFailure = fmt.Errorf("Run unwind: %w", err)
+					case "joined parks":
+						runFailure = errors.Join(err, fmt.Errorf("Run unwind: %w", err))
+					case "joined sentinel":
+						runFailure = errors.Join(err, cause)
+					case "wrapped joined status":
+						runFailure = fmt.Errorf("Run failed: %w", errors.Join(err, cause))
+					}
+					return runFailure
+				}}
+				desc, _ := har.Describe(t.Context())
+				b := &approvalBackend{Backend: substrate.New(ctl, "space", substrate.ObjectRef{Name: "gate"}, desc)}
+				closes, effects := 0, 0
+				p := placement.New(b, nil, placement.WithDialer(func(string) (api.Harness, func() error, error) {
+					return har, func() error { closes++; return nil }, nil
+				}), placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					effects++
+					return api.ToolResult{}, nil
+				}))
+				if outer == "Resume repark" {
+					if _, err := b.Backend.Create(t.Context(), &api.SessionSpec{SessionUID: "s"}); err != nil {
+						t.Fatal(err)
+					}
+					seedPlacementApproval(t, log, "gate", api.EventApprovalResult)
+				}
+				var err error
+				if outer == "Exec" {
+					_, err = p.Exec(t.Context(), log, "s", nil, 0)
+				} else {
+					err = p.Resume(t.Context(), log, "s", placement.WithResumeHarness("gate"))
+				}
+				independent := outcome == "joined sentinel" || outcome == "wrapped joined status"
+				if independent {
+					if err != runFailure || !errors.Is(err, cause) || !errors.Is(err, api.ErrApprovalParked) {
+						t.Errorf("joined failure lost actual cause/tree: got=%v want=%v", err, runFailure)
+					}
+					if outcome == "wrapped joined status" && status.Code(err) != codes.Unavailable {
+						t.Errorf("independent status lost: %v", err)
+					}
+				} else if !errors.Is(err, api.ErrApprovalParked) || errors.Is(err, cause) {
+					t.Errorf("pure park unwind=%v", err)
+				}
+				state, scanErr := controller.InspectApproval(log, 0)
+				if scanErr != nil || state == nil || state.Request == nil || state.Decision != nil || state.Receipt != nil {
+					t.Fatalf("pending evidence lost: %+v,%v", state, scanErr)
+				}
+				var park *api.ApprovalParkedError
+				if !errors.As(err, &park) || park.Ref != (api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: state.Request.Seq}) {
+					t.Fatalf("lost park correlation: %v", err)
+				}
+				wantSnapshots, wantEffects := 1, 0
+				if independent {
+					wantSnapshots = 0
+				}
+				if outer == "Resume repark" {
+					wantEffects = 1
+				}
+				if closes != 1 || b.snapshots != wantSnapshots || b.stops != 0 || effects != wantEffects {
+					t.Errorf("close=%d snapshots=%d stop=%d effects=%d", closes, b.snapshots, b.stops, effects)
+				}
+				for _, rec := range suspendRecords(t, log) {
+					if rec.Event.Kind == api.EventEnd || rec.Event.Kind == api.EventError || rec.Event.Kind == api.EventParked ||
+						rec.Event.Kind == api.EventLifecycle && (independent || rec.Event.Lifecycle.Kind != api.LifecycleSuspend) {
+						t.Errorf("false successful handoff/terminal record: %+v", rec)
+					}
+				}
+				if err := log.Verify(); err != nil {
+					t.Fatal(err)
+				}
+				before := suspendRecords(t, log)
+				if err := p.Resume(t.Context(), log, "s"); !errors.Is(err, api.ErrApprovalParked) {
+					t.Fatalf("pending retry=%v", err)
+				}
+				if closes != 1 || b.snapshots != wantSnapshots || !reflect.DeepEqual(before, suspendRecords(t, log)) {
+					t.Fatal("pending retry did IO or changed journal")
+				}
+				if _, err := controller.Approve(log, api.ApprovalDecision{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: state.Request.Seq, Approved: true}); err != nil {
+					t.Fatal(err)
+				}
+				if err := p.Resume(t.Context(), log, "s", placement.WithResumeHarness("gate")); err != nil {
+					t.Fatalf("decision continuation=%v", err)
+				}
+				if effects != wantEffects+1 || closes != 2 || b.snapshots != wantSnapshots {
+					t.Fatal("recovery redrove completed gate or repeated handoff")
+				}
+				c, err := controller.New(log, nil, controller.WithSessionUID("s"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := c.Replay(t.Context(), har); err != nil {
+					t.Fatalf("completed Replay=%v", err)
+				}
+				if effects != wantEffects+1 {
+					t.Fatal("Replay invoked effect")
+				}
+			})
+		}
+	}
+}
+
+func TestPlacementApprovalWireReportCollisionRetainsValidRecovery(t *testing.T) {
+	log := newSuspendStore(t).Session("s")
+	seedPlacementApproval(t, log, "gate", api.EventApprovalResult)
+	reject := true
+	har := placementGateHarness{run: func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+		if _, err := sink.ToolCall(ctx, placementGateCall()); err != nil {
+			return err
+		}
+		if reject {
+			return sink.Report(ctx, api.ToolResult{ID: "c1"})
+		}
+		if err := sink.Report(ctx, api.ToolResult{ID: "ordinary"}); err != nil {
+			return err
+		}
+		return sink.Output(ctx, "recovered")
+	}}
+	runtime := local.New(har)
+	t.Cleanup(func() { _ = runtime.Close() })
+	b := &approvalBackend{Backend: runtime}
+	effects := 0
+	p := placement.New(b, nil, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+		effects++
+		return api.ToolResult{}, nil
+	}))
+	if err := p.Resume(t.Context(), log, "s", placement.WithResumeHarness("gate")); !errors.Is(err, controller.ErrApprovalReceiptReport) {
+		t.Errorf("Harness.Connect report collision=%v", err)
+	}
+	state, err := controller.InspectApproval(log, 0)
+	if err != nil || state == nil || state.Receipt == nil || state.Completed {
+		t.Fatalf("wire collision poisoned recovery: %+v,%v", state, err)
+	}
+	assertNoApprovalLifecycle(t, log)
+	if effects != 1 || b.snapshots != 0 || b.stops != 0 {
+		t.Fatalf("wire rejection effects=%d snapshots=%d stops=%d", effects, b.snapshots, b.stops)
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatal(err)
+	}
+	reject = false
+	if err := p.Resume(t.Context(), log, "s", placement.WithResumeHarness("gate")); err != nil {
+		t.Fatalf("next wire Resume=%v", err)
+	}
+	if effects != 1 {
+		t.Fatal("wire recovery redrove completed effect")
+	}
+	state, err = controller.InspectApproval(log, 0)
+	if err != nil || state == nil || !state.Completed {
+		t.Fatalf("completed wire journal=%+v,%v", state, err)
+	}
+}
+
+func TestPlacementApprovalWireRecordedReportCollision(t *testing.T) {
+	log := newSuspendStore(t).Session("s")
+	seedPlacementApproval(t, log, "gate", api.EventApprovalResult)
+	fence, err := log.NewFence()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []api.Event{
+		{Kind: api.EventToolResult, Result: &api.ToolResult{ID: "c1", ApprovalRequestSeq: 3, ApprovalDecisionSeq: 4}},
+		{Kind: api.EventToolResult, Result: &api.ToolResult{ID: "ordinary-B"}},
+		{Kind: api.EventOutput, Message: api.TextMessage("assistant", "recorded continuation")},
+	} {
+		ev.ExecutionID = "e1"
+		head, err := log.Head()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := log.Append(head, fence, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := controller.InspectApproval(log, 0); err != nil {
+		t.Fatalf("invalid wire fixture: %v", err)
+	}
+	reject := true
+	har := placementGateHarness{run: func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+		if _, err := sink.ToolCall(ctx, placementGateCall()); err != nil {
+			return err
+		}
+		id := "ordinary-B"
+		if reject {
+			id = "c1"
+		}
+		if err := sink.Report(ctx, api.ToolResult{ID: id}); err != nil {
+			return err // the actual wire bridge terminates on sink error
+		}
+		return sink.Output(ctx, "recorded continuation")
+	}}
+	runtime := local.New(har)
+	t.Cleanup(func() { _ = runtime.Close() })
+	b := &approvalBackend{Backend: runtime}
+	effects := 0
+	p := placement.New(b, nil, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+		effects++
+		return api.ToolResult{}, nil
+	}))
+	head, _ := log.Head()
+	if err := p.Resume(t.Context(), log, "s", placement.WithResumeHarness("gate")); !errors.Is(err, controller.ErrReplayDiverged) || !errors.Is(err, controller.ErrApprovalReceiptReport) {
+		t.Errorf("wire recorded collision=%v, want gated-ID divergence", err)
+	}
+	if effects != 0 || b.snapshots != 0 {
+		t.Fatal("wire recorded collision executed or handed off")
+	}
+	after, err := log.Read(head + 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range after {
+		if rec.Event.Kind != api.EventError {
+			t.Errorf("wire collision wrote continuation: %s", rec.Event.Kind)
+		}
+	}
+	reject = false
+	if err := p.Resume(t.Context(), log, "s", placement.WithResumeHarness("gate")); err != nil {
+		t.Fatalf("original B wire continuation=%v", err)
+	}
+	if err := log.Verify(); err != nil {
+		t.Fatal(err)
+	}
+	if effects != 0 {
+		t.Fatal("wire recovery redrove completed receipt")
 	}
 }
 

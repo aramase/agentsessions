@@ -88,7 +88,7 @@ func (p *approvalWirePeer) Connect(s v1.Harness_ConnectServer) error {
 		if tr.GetCode() != v1.ToolResult_APPROVAL_DENIED || !tr.GetIsError() {
 			return errors.New("invalid denial status")
 		}
-	} else if !(tr.GetCode() == v1.ToolResult_CODE_UNSPECIFIED && !tr.GetIsError() || tr.GetCode() == v1.ToolResult_EXECUTOR_ERROR && tr.GetIsError()) {
+	} else if (tr.GetCode() != v1.ToolResult_CODE_UNSPECIFIED || tr.GetIsError()) && (tr.GetCode() != v1.ToolResult_EXECUTOR_ERROR || !tr.GetIsError()) {
 		return errors.New("invalid approval status")
 	}
 	p.frames <- []*v1.ControllerFrame{control, receipt}

@@ -99,10 +99,16 @@ provide.
   leaves the decision recoverable with `FAILED_PRECONDITION`. Denial never invokes the executor.
 - Gate sink operations are serialized, and observer/model/executor callbacks must not re-enter the
   same sink. Recorded-prefix identity/correlation mismatches remain sticky divergence even if the
-  harness catches the error; they cannot authorize later effects or complete recovery. Ordinary
-  mediation defaults and argument normalization are unchanged. Populated approval request/decision
-  sequences and receipt fields require a verifier that understands them; zero-valued legacy
-  canonical forms and literal digest vectors are preserved, with no SQLite migration or rewrite.
+  harness catches the error; they cannot authorize later effects or complete recovery. Changing a
+  recorded gate to keyless controller mediation also diverges; historical keyless ordinary fallback
+  remains handleable. In-harness reports cannot reuse a gated call ID within the invocation, even
+  without approval fields: rejection seals the sink before append, preserving the completed receipt
+  for recovery. A Run error joining a park with an independent failure retains the actual error and
+  pending request without a successful SUSPEND; Sessions returns the normal Exec/Resume failure,
+  not a successful pause or final Session frame. Wrapped or joined matching parks still hand off.
+  Ordinary mediation defaults and argument normalization are unchanged. Populated approval
+  request/decision sequences and receipt fields require a verifier that understands them; zero-valued
+  legacy canonical forms and literal digest vectors are preserved, with no SQLite migration or rewrite.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

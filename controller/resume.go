@@ -300,10 +300,13 @@ func (s *resumeSink) ToolCall(ctx context.Context, tc api.ToolCall) (api.ToolRes
 	if s.failure != nil {
 		return api.ToolResult{}, s.failure
 	}
-	// A keyless live rejection has no intent in the prefix. Reproduce it without consuming
-	// another call's evidence, just as on replay.
+	// Preserve historical keyless ordinary rejections without consuming fallback evidence.
+	// A same-ID gated intent must still validate identity before recovery can execute it.
 	if tc.Mediation == api.MediationControllerMediated && tc.IdempotencyKey == "" {
-		return api.ToolResult{}, ErrMissingIdempotencyKey
+		if s.i >= len(s.stream) || s.stream[s.i].Kind != api.EventToolCall || s.stream[s.i].ToolCall == nil ||
+			s.stream[s.i].ToolCall.ID != tc.ID || s.stream[s.i].ToolCall.Mediation != api.MediationRequiresApproval {
+			return api.ToolResult{}, ErrMissingIdempotencyKey
+		}
 	}
 	if s.i < len(s.stream) {
 		// Preserve a distinct fallback's intent while reproducing a pre-intent rejection.
@@ -373,6 +376,13 @@ func (s *resumeSink) Report(ctx context.Context, tr api.ToolResult) error {
 	}
 	if s.failure != nil {
 		return s.failure
+	}
+	if s.live.calls[tr.ID] {
+		if s.i < len(s.stream) {
+			return s.diverged(ErrApprovalReceiptReport)
+		}
+		s.live.guard.stop = ErrApprovalReceiptReport
+		return s.live.guard.stop
 	}
 	if err := approvalReportError(tr); err != nil {
 		return err

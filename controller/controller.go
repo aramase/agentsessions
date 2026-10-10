@@ -392,7 +392,7 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 	for _, execution := range selected {
 		legacy := execution.legacyEnd > 0
 		effectCount += len(execution.stream)
-		sink := &replaySink{stream: execution.stream, legacy: legacy, guard: &sinkGuard{}, approvals: approvalEvidence(scan, execution.id)}
+		sink := &replaySink{stream: execution.stream, legacy: legacy, guard: &sinkGuard{}, approvals: approvalEvidence(scan, execution.id), calls: make(map[string]bool)}
 		history := events[:execution.start]
 		invocationID := execution.id
 		if legacy {
@@ -423,7 +423,7 @@ func (c *Controller) Replay(ctx context.Context, har api.Harness) (outputs []str
 			ResumeFromSeq: execution.resumeFromSeq,
 		}
 		runErr := har.Run(ctx, start, sink)
-		sink.guard.close()
+		_ = sink.guard.close()
 		if sink.failure != nil {
 			return nil, sink.failure
 		}

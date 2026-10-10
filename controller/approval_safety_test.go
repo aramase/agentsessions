@@ -173,6 +173,109 @@ func TestApprovalRecordedIdentityDivergenceIsSticky(t *testing.T) {
 	}
 }
 
+func TestApprovalKeylessMediationMismatchCannotRetryGate(t *testing.T) {
+	for _, path := range []string{"resume decided", "resume receipt", "replay"} {
+		t.Run(path, func(t *testing.T) {
+			log := approvalLog(t, "sqlite")
+			cut := api.EventApprovalResult
+			switch path {
+			case "resume receipt":
+				cut = api.EventToolResult
+			case "replay":
+				cut = api.EventEnd
+			}
+			approvalSeed(t, log, true, cut)
+			head, _ := log.Head()
+			effects := 0
+			c, err := controller.New(log, echoModel, controller.WithSessionUID("session"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				effects++
+				return api.ToolResult{}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := gateHarness(func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+				changed := gatedCall()
+				changed.Mediation, changed.IdempotencyKey = api.MediationControllerMediated, ""
+				_, err := sink.ToolCall(ctx, changed)
+				if !errors.Is(err, controller.ErrReplayDiverged) {
+					t.Errorf("changed gate=%v, want ErrReplayDiverged", err)
+				}
+				_, err = sink.ToolCall(ctx, gatedCall())
+				if !errors.Is(err, controller.ErrReplayDiverged) {
+					t.Errorf("retry original gate=%v, want sticky divergence", err)
+				}
+				for _, err := range gateSinkCalls(ctx, sink) {
+					if !errors.Is(err, controller.ErrReplayDiverged) {
+						t.Errorf("continuation=%v, want sticky divergence", err)
+					}
+				}
+				return nil
+			})
+			if path == "replay" {
+				_, err = c.Replay(t.Context(), h)
+			} else {
+				_, err = c.Resume(t.Context(), h)
+			}
+			if !errors.Is(err, controller.ErrReplayDiverged) || effects != 0 || c.ModelInvocations() != 0 {
+				t.Errorf("run=%v effects=%d models=%d", err, effects, c.ModelInvocations())
+			}
+			records, err := log.Read(head + 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, rec := range records {
+				if rec.Event.Kind != api.EventError {
+					t.Errorf("divergence wrote continuation: %s", rec.Event.Kind)
+				}
+			}
+			if err := log.Verify(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := controller.InspectApproval(log, 0); err != nil {
+				t.Fatalf("divergence poisoned journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestApprovalHistoricalKeylessOrdinarySameIDFallback(t *testing.T) {
+	for _, path := range []string{"resume", "replay"} {
+		t.Run(path, func(t *testing.T) {
+			log := approvalLog(t, "memory")
+			call := recordedToolCall()
+			appendToolEvidence(t, log, []api.Event{
+				{Kind: api.EventToolCall, ToolCall: &call},
+				{Kind: api.EventToolResult, Result: &api.ToolResult{ID: call.ID}},
+				{Kind: api.EventOutput, Message: api.TextMessage("assistant", "ordinary fallback")},
+			}, path == "replay")
+			c, err := controller.New(log, nil, controller.WithSessionUID("session"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := gateHarness(func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+				keyless := call
+				keyless.IdempotencyKey = ""
+				if _, err := sink.ToolCall(ctx, keyless); !errors.Is(err, controller.ErrMissingIdempotencyKey) || errors.Is(err, controller.ErrReplayDiverged) {
+					t.Errorf("historical ordinary rejection=%v", err)
+				}
+				if result, err := sink.ToolCall(ctx, call); err != nil || result.ID != call.ID {
+					t.Fatalf("same-ID ordinary fallback=%+v,%v", result, err)
+				}
+				return sink.Output(ctx, "ordinary fallback")
+			})
+			if path == "replay" {
+				_, err = c.Replay(t.Context(), h)
+			} else {
+				_, err = c.Resume(t.Context(), h)
+			}
+			if err != nil || c.ToolInvocations() != 0 {
+				t.Fatalf("historical ordinary continuation=%v effects=%d", err, c.ToolInvocations())
+			}
+		})
+	}
+}
+
 func TestApprovalCorruptCorrelationPreflight(t *testing.T) {
 	for _, path := range []string{"resume", "resume complete", "replay"} {
 		for _, corruption := range []struct {
@@ -357,6 +460,236 @@ func TestApprovalCallIDCannotBeReused(t *testing.T) {
 				t.Fatalf("duplicate intent count=%d", calls)
 			}
 		})
+	}
+}
+
+func TestApprovalReportCannotReuseCompletedGateID(t *testing.T) {
+	for _, cut := range []api.EventKind{api.EventApprovalResult, api.EventToolResult} {
+		t.Run(string(cut), func(t *testing.T) {
+			log := approvalLog(t, "sqlite")
+			approvalSeed(t, log, true, cut)
+			effects := 0
+			c, err := controller.New(log, echoModel, controller.WithSessionUID("session"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+				effects++
+				return api.ToolResult{}, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := gateHarness(func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+				if _, err := sink.ToolCall(ctx, gatedCall()); err != nil {
+					return err
+				}
+				head, _ := log.Head()
+				err := sink.Report(ctx, api.ToolResult{ID: "c1"})
+				if !errors.Is(err, controller.ErrApprovalReceiptReport) {
+					t.Errorf("colliding Report=%v, want ErrApprovalReceiptReport", err)
+				}
+				for _, err := range gateSinkCalls(ctx, sink) {
+					if !errors.Is(err, controller.ErrApprovalReceiptReport) {
+						t.Errorf("handled collision continuation=%v", err)
+					}
+				}
+				after, _ := log.Head()
+				if after != head {
+					t.Errorf("collision/continuation appended: head=%d after=%d", head, after)
+				}
+				return nil
+			})
+			if resumed, err := c.Resume(t.Context(), h); !resumed || !errors.Is(err, controller.ErrApprovalReceiptReport) {
+				t.Errorf("Resume=%t,%v", resumed, err)
+			}
+			wantEffects := 0
+			if cut == api.EventApprovalResult {
+				wantEffects = 1
+			}
+			if effects != wantEffects || c.ModelInvocations() != 0 {
+				t.Errorf("effects after rejection=%d models=%d", effects, c.ModelInvocations())
+			}
+			state, err := controller.InspectApproval(log, 0)
+			if err != nil || state == nil || state.Receipt == nil || state.Completed {
+				t.Fatalf("collision poisoned journal or completed turn: %+v,%v", state, err)
+			}
+			if err := log.Verify(); err != nil {
+				t.Fatal(err)
+			}
+			continuation := gateHarness(func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+				if _, err := sink.ToolCall(ctx, gatedCall()); err != nil {
+					return err
+				}
+				if err := sink.Report(ctx, api.ToolResult{ID: "ordinary"}); err != nil {
+					return err
+				}
+				return sink.Output(ctx, "recovered")
+			})
+			if resumed, err := c.Resume(t.Context(), continuation); !resumed || err != nil {
+				t.Fatalf("next Resume=%t,%v", resumed, err)
+			}
+			if _, err := c.Replay(t.Context(), continuation); err != nil {
+				t.Fatalf("recovered Replay=%v", err)
+			}
+			if effects != wantEffects {
+				t.Fatal("completed gate redriven")
+			}
+			head, _ := log.Head()
+			ordinary := gateHarness(func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+				for _, id := range []string{"c1", "c1", ""} {
+					if err := sink.Report(ctx, api.ToolResult{ID: id}); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			if err := c.Exec(t.Context(), ordinary, nil, head); err != nil {
+				t.Fatalf("ordinary Report behavior broadened across invocation: %v", err)
+			}
+			if _, err := controller.InspectApproval(log, 0); err != nil {
+				t.Fatalf("next Exec journal invalid: %v", err)
+			}
+		})
+	}
+}
+
+func TestApprovalRecordedReportCollisionIsSticky(t *testing.T) {
+	for _, path := range []string{"resume", "replay"} {
+		for _, retry := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/retry=%t", path, retry), func(t *testing.T) {
+				log := approvalLog(t, "sqlite")
+				approvalSeed(t, log, true, api.EventToolResult)
+				approvalAppend(t, log, 0,
+					api.Event{ExecutionID: "e1", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "ordinary-B"}},
+					api.Event{ExecutionID: "e1", Kind: api.EventOutput, Message: api.TextMessage("assistant", "recorded continuation")})
+				if path == "replay" {
+					approvalAppend(t, log, 0, api.Event{ExecutionID: "e1", Kind: api.EventEnd})
+				}
+				if _, err := controller.InspectApproval(log, 0); err != nil {
+					t.Fatalf("fixture is not a valid journal: %v", err)
+				}
+				head, _ := log.Head()
+				effects := 0
+				c, err := controller.New(log, echoModel, controller.WithSessionUID("session"), controller.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					effects++
+					return api.ToolResult{}, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				h := gateHarness(func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+					if _, err := sink.ToolCall(ctx, gatedCall()); err != nil {
+						return err
+					}
+					collision := sink.Report(ctx, api.ToolResult{ID: "c1"})
+					if !errors.Is(collision, controller.ErrReplayDiverged) || !errors.Is(collision, controller.ErrApprovalReceiptReport) {
+						t.Errorf("recorded Report collision=%v, want sticky gated-ID divergence", collision)
+					}
+					if retry {
+						if got := sink.Report(ctx, api.ToolResult{ID: "ordinary-B"}); got != collision {
+							t.Errorf("retry B=%v, want original sticky error %v", got, collision)
+						}
+					}
+					if got := sink.Output(ctx, "recorded continuation"); got != collision {
+						t.Errorf("recorded continuation=%v, want original sticky error %v", got, collision)
+					}
+					if path == "resume" {
+						for _, got := range gateSinkCalls(ctx, sink) {
+							if got != collision {
+								t.Errorf("live continuation=%v, want original sticky error %v", got, collision)
+							}
+						}
+					}
+					return nil // even a swallowed collision must fail the invocation
+				})
+				if path == "replay" {
+					_, err = c.Replay(t.Context(), h)
+				} else {
+					_, err = c.Resume(t.Context(), h)
+				}
+				if !errors.Is(err, controller.ErrReplayDiverged) || !errors.Is(err, controller.ErrApprovalReceiptReport) || effects != 0 || c.ModelInvocations() != 0 {
+					t.Errorf("Run=%v effects=%d models=%d", err, effects, c.ModelInvocations())
+				}
+				records, err := log.Read(head + 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, rec := range records {
+					if rec.Event.Kind != api.EventError {
+						t.Errorf("handled recorded collision wrote %s", rec.Event.Kind)
+					}
+				}
+				positive := gateHarness(func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+					if _, err := sink.ToolCall(ctx, gatedCall()); err != nil {
+						return err
+					}
+					if err := sink.Report(ctx, api.ToolResult{ID: "ordinary-B"}); err != nil {
+						return err
+					}
+					return sink.Output(ctx, "recorded continuation")
+				})
+				if path == "resume" {
+					if resumed, err := c.Resume(t.Context(), positive); !resumed || err != nil {
+						t.Fatalf("original B continuation=%t,%v", resumed, err)
+					}
+				}
+				if _, err := c.Replay(t.Context(), positive); err != nil {
+					t.Fatalf("original B replay=%v", err)
+				}
+				if err := log.Verify(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+func TestApprovalRecordedReportsKeepOrdinaryKindOnlySemantics(t *testing.T) {
+	for _, path := range []string{"resume", "replay"} {
+		for _, marked := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/marked=%t", path, marked), func(t *testing.T) {
+				log := approvalLog(t, "sqlite")
+				if marked {
+					approvalAppend(t, log, 0, api.Event{ExecutionID: "e1", Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "recorded", HarnessVersion: "v1", InputCount: inputCount(0)}})
+				}
+				// This ID belongs to a gate only later in the same invocation. Scanned approvals
+				// must not reject a report before that gate has actually matched.
+				approvalAppend(t, log, 0, api.Event{ExecutionID: "e1", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "c1"}})
+				approvalSeed(t, log, false, api.EventToolResult)
+				approvalAppend(t, log, 0,
+					api.Event{ExecutionID: "e1", Kind: api.EventToolResult, Result: &api.ToolResult{ID: "ordinary-B"}},
+					api.Event{ExecutionID: "e1", Kind: api.EventOutput, Message: api.TextMessage("assistant", "ordinary continuation")})
+				if path == "replay" {
+					approvalAppend(t, log, 0, api.Event{ExecutionID: "e1", Kind: api.EventEnd})
+				}
+				if _, err := controller.InspectApproval(log, 0); err != nil {
+					t.Fatalf("invalid preservation fixture: %v", err)
+				}
+				c, err := controller.New(log, nil, controller.WithSessionUID("session"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				h := gateHarness(func(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+					if err := sink.Report(ctx, api.ToolResult{ID: "c1"}); err != nil {
+						return err
+					}
+					if _, err := sink.ToolCall(ctx, gatedCall()); err != nil {
+						return err
+					}
+					// Ordinary report ID differences are historical kind-only behavior, not
+					// gated receipt collisions, and must remain accepted in recorded prefixes.
+					if err := sink.Report(ctx, api.ToolResult{ID: "ordinary-changed"}); err != nil {
+						return err
+					}
+					return sink.Output(ctx, "ordinary continuation")
+				})
+				if path == "resume" {
+					_, err = c.Resume(t.Context(), h)
+				} else {
+					_, err = c.Replay(t.Context(), h)
+				}
+				if err != nil || c.ToolInvocations() != 0 {
+					t.Fatalf("ordinary recorded semantics changed: %v effects=%d", err, c.ToolInvocations())
+				}
+			})
+		}
 	}
 }
 

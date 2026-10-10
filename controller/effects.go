@@ -157,6 +157,10 @@ func (s *liveSink) Report(ctx context.Context, tr api.ToolResult) error {
 }
 
 func (s *liveSink) report(_ context.Context, tr api.ToolResult) error {
+	if s.calls[tr.ID] {
+		s.guard.stop = ErrApprovalReceiptReport
+		return s.guard.stop
+	}
 	if err := approvalReportError(tr); err != nil {
 		return err
 	}
@@ -191,6 +195,7 @@ type replaySink struct {
 	failure   error // Tool evidence rejection remains fatal even if the harness handles the error.
 	guard     *sinkGuard
 	approvals map[string]*ApprovalState
+	calls     map[string]bool // gated IDs matched during this invocation, not all scanned history
 }
 
 var _ api.EventSink = (*replaySink)(nil)
@@ -275,10 +280,13 @@ func (s *replaySink) ToolCall(_ context.Context, tc api.ToolCall) (api.ToolResul
 	if s.failure != nil {
 		return api.ToolResult{}, s.failure
 	}
-	// Live rejects keyless calls before recording intent. Do not consume a later valid call
-	// while reproducing that handleable rejection.
+	// Historical keyless ordinary rejections have no intent. A same-ID gated intent instead
+	// requires identity validation, so changing mediation and dropping its key cannot hide it.
 	if tc.Mediation == api.MediationControllerMediated && tc.IdempotencyKey == "" {
-		return api.ToolResult{}, ErrMissingIdempotencyKey
+		if s.i >= len(s.stream) || s.stream[s.i].Kind != api.EventToolCall || s.stream[s.i].ToolCall == nil ||
+			s.stream[s.i].ToolCall.ID != tc.ID || s.stream[s.i].ToolCall.Mediation != api.MediationRequiresApproval {
+			return api.ToolResult{}, ErrMissingIdempotencyKey
+		}
 	}
 	// A rejected pre-intent call must not consume a distinct fallback's recorded intent.
 	if s.i < len(s.stream) {
@@ -303,6 +311,7 @@ func (s *replaySink) ToolCall(_ context.Context, tc api.ToolCall) (api.ToolResul
 	}
 	var state *ApprovalState
 	if call.ToolCall.Mediation == api.MediationRequiresApproval {
+		s.calls[call.ToolCall.ID] = true
 		state = s.approvals[call.ToolCall.ID]
 		if err := consumeApprovalPrefix(s.stream, &s.i, state); err != nil {
 			s.failure = err
@@ -333,6 +342,9 @@ func (s *replaySink) Report(_ context.Context, tr api.ToolResult) error {
 	}
 	if s.failure != nil {
 		return s.failure
+	}
+	if s.calls[tr.ID] {
+		return s.diverged(ErrApprovalReceiptReport)
 	}
 	if err := approvalReportError(tr); err != nil {
 		return err

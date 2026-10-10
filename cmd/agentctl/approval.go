@@ -38,7 +38,7 @@ func approval(args []string, approved bool) error {
 	fs.StringVar(&subject, "identity-subject", "", "identity subject recorded as provenance")
 	fs.BoolVar(&jsonOutput, "json", false, "print the original committed decision and resumed session as protobuf JSON")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: agentctl %s [flags] <session UID>\nCommits a decision, then calls Resume. A recovery failure leaves the decision committed.\n", which)
+		_, _ = fmt.Fprintf(fs.Output(), "usage: agentctl %s [flags] <session UID>\nCommits a decision, then calls Resume. A recovery failure leaves the decision committed.\n", which)
 		fs.PrintDefaults()
 	}
 	// The standard flag parser stops at a positional argument; allow the common UID-first

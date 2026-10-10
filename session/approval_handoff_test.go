@@ -2,9 +2,12 @@ package session_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,10 +18,238 @@ import (
 
 	"github.com/aramase/agentsessions/api"
 	v1 "github.com/aramase/agentsessions/api/genpb"
+	"github.com/aramase/agentsessions/controller"
 	"github.com/aramase/agentsessions/placement"
+	"github.com/aramase/agentsessions/runtime/local"
 	"github.com/aramase/agentsessions/runtime/remote"
 	"github.com/aramase/agentsessions/wire"
 )
+
+type joinedPublicParkHarness struct {
+	publicGateHarness
+	cause error
+	pure  string
+}
+
+func (h *joinedPublicParkHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	if _, err := sink.ToolCall(ctx, publicGateCall("call")); err != nil {
+		return h.unwind(err)
+	}
+	if h.second {
+		if _, err := sink.ToolCall(ctx, publicGateCall("second")); err != nil {
+			return h.unwind(err)
+		}
+	}
+	return sink.Output(ctx, "recovered")
+}
+
+func (h *joinedPublicParkHarness) unwind(err error) error {
+	if h.pure == "wrapped park" {
+		return fmt.Errorf("Run unwind: %w", err)
+	}
+	if h.pure == "joined parks" {
+		return errors.Join(err, fmt.Errorf("Run unwind: %w", err))
+	}
+	return fmt.Errorf("Run failed: %w", errors.Join(err, h.cause))
+}
+
+func TestPublicApprovalJoinedRunFailureIsNotSuccessfulPark(t *testing.T) {
+	for _, operation := range []string{"Exec", "Resume repark", "no-input Exec repark"} {
+		for _, outcome := range []string{"joined sentinel", "joined status", "wrapped park", "joined parks"} {
+			t.Run(operation+"/"+outcome, func(t *testing.T) {
+				store := openStore(t, ":memory:")
+				cause := errors.New("independent Run failure")
+				if outcome == "joined status" {
+					cause = status.Error(codes.Unavailable, "independent Run failure")
+				}
+				h := &joinedPublicParkHarness{cause: cause, pure: outcome}
+				independent := outcome == "joined sentinel" || outcome == "joined status"
+				h.second = operation != "Exec"
+				b := &publicGateBackend{Backend: local.New(h)}
+				t.Cleanup(func() { _ = b.Close() })
+				var closes, effects atomic.Int32
+				p := placement.New(b, nil, placement.WithDialer(func(string) (api.Harness, func() error, error) {
+					return h, func() error { closes.Add(1); return nil }, nil
+				}), placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					effects.Add(1)
+					return api.ToolResult{}, nil
+				}))
+				r, err := placement.NewRegistry("gate", map[string]*placement.Placer{"gate": p})
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := serveRegistry(t, store, r)
+				uid := mustCreate(t, c)
+				log := store.Session(uid)
+				if h.second {
+					seedPublicGate(t, log, "gate", api.EventApprovalRequest)
+					q := publicDecision(uid)
+					q.Approved = proto.Bool(true)
+					if _, err := c.Approve(t.Context(), q); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if operation == "Resume repark" {
+					_, err = c.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
+				} else {
+					var frames []*v1.ExecUpdate
+					frames, err = collectPublicExec(c, &v1.ExecRequest{Session: uid})
+					if len(frames) == 0 || (frames[len(frames)-1].GetSession() != nil) == independent {
+						t.Errorf("final Session success=%t, independent=%t: %v", len(frames) > 0 && frames[len(frames)-1].GetSession() != nil, independent, frames)
+					}
+				}
+				if independent {
+					if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), "independent Run failure") {
+						t.Errorf("joined Run failure became park success: %v, want existing Run Internal classification", err)
+					}
+				} else if err != nil {
+					t.Errorf("pure matching park no longer succeeds: %v", err)
+				}
+				state, err := controller.InspectApproval(log, 0)
+				if err != nil || state == nil || state.Request == nil || state.Decision != nil || state.Receipt != nil {
+					t.Fatalf("lost pending request: %+v,%v", state, err)
+				}
+				wantEffects := int32(0)
+				if h.second {
+					wantEffects = 1
+				}
+				wantSnapshots := int32(1)
+				if independent {
+					wantSnapshots = 0
+				}
+				if closes.Load() != 1 || effects.Load() != wantEffects || b.snapshots.Load() != wantSnapshots {
+					t.Fatalf("close=%d effects=%d snapshots=%d", closes.Load(), effects.Load(), b.snapshots.Load())
+				}
+				for _, rec := range routingRecords(t, log) {
+					if rec.Event.Kind == api.EventEnd || rec.Event.Kind == api.EventError || rec.Event.Kind == api.EventLifecycle && (independent || rec.Event.Lifecycle.Kind != api.LifecycleSuspend) {
+						t.Fatalf("unexpected terminal/audit/lifecycle: %+v", rec)
+					}
+				}
+				before := b.ioCounts()
+				if pending, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); err != nil || pending.PendingApproval == nil {
+					t.Fatalf("pending retry=%v,%v", pending, err)
+				}
+				if closes.Load() != 1 || b.ioCounts() != before {
+					t.Fatal("pending retry did runtime IO")
+				}
+				if _, err := c.Approve(t.Context(), &v1.ApproveRequest{Session: uid, ExecutionId: state.ExecutionID, ToolCallId: state.Call.ID, RequestSeq: state.Request.Seq, Approved: proto.Bool(true)}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); err != nil {
+					t.Fatalf("decision recovery=%v", err)
+				}
+				if effects.Load() != wantEffects+1 || closes.Load() != 2 {
+					t.Fatal("recovery repeated completed effects")
+				}
+				if err := log.Verify(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
+type publicGateSafetyHarness struct {
+	publicGateHarness
+	mode   string
+	reject atomic.Bool
+}
+
+func (h *publicGateSafetyHarness) Run(ctx context.Context, _ *api.Start, sink api.EventSink) error {
+	call := publicGateCall("call")
+	if h.reject.Load() && h.mode == "keyless identity" {
+		call.Mediation, call.IdempotencyKey = api.MediationControllerMediated, ""
+	}
+	if _, err := sink.ToolCall(ctx, call); err != nil {
+		return err // Harness.Connect ends the turn on a host sink error; no remote retry promise.
+	}
+	if h.reject.Load() {
+		return sink.Report(ctx, api.ToolResult{ID: "call"})
+	}
+	if err := sink.Report(ctx, api.ToolResult{ID: "ordinary"}); err != nil {
+		return err
+	}
+	return sink.Output(ctx, "recovered")
+}
+
+func TestPublicApprovalIdentityAndReportSafetyAcrossHarnessConnect(t *testing.T) {
+	for _, mode := range []string{"keyless identity", "report collision"} {
+		for _, operation := range []string{"Resume", "no-input Exec"} {
+			t.Run(mode+"/"+operation, func(t *testing.T) {
+				store := openStore(t, ":memory:")
+				h := &publicGateSafetyHarness{mode: mode}
+				h.reject.Store(true)
+				b := &publicGateBackend{Backend: local.New(h)}
+				t.Cleanup(func() { _ = b.Close() })
+				var effects atomic.Int32
+				p := placement.New(b, nil, placement.WithToolExecutor(func(context.Context, controller.ToolCallContext, api.ToolCall) (api.ToolResult, error) {
+					effects.Add(1)
+					return api.ToolResult{}, nil
+				}))
+				r, err := placement.NewRegistry("gate", map[string]*placement.Placer{"gate": p})
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := serveRegistry(t, store, r)
+				uid := mustCreate(t, c)
+				log := store.Session(uid)
+				seedPublicGate(t, log, "gate", api.EventApprovalRequest)
+				q := publicDecision(uid)
+				q.Approved = proto.Bool(true)
+				if _, err := c.Approve(t.Context(), q); err != nil {
+					t.Fatal(err)
+				}
+				if operation == "Resume" {
+					_, err = c.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
+				} else {
+					var frames []*v1.ExecUpdate
+					frames, err = collectPublicExec(c, &v1.ExecRequest{Session: uid})
+					if len(frames) == 0 || frames[len(frames)-1].GetSession() != nil {
+						t.Errorf("rejection sent successful final Session: %v", frames)
+					}
+				}
+				wantCode, wantEffects := codes.Internal, int32(0)
+				wantErr := controller.ErrReplayDiverged
+				if mode == "report collision" {
+					wantCode, wantEffects, wantErr = codes.FailedPrecondition, 1, controller.ErrApprovalReceiptReport
+				}
+				if status.Code(err) != wantCode || !strings.Contains(err.Error(), wantErr.Error()) {
+					t.Errorf("public rejection=%v, want %v / %v", err, wantCode, wantErr)
+				}
+				state, err := controller.InspectApproval(log, 0)
+				if err != nil || state == nil || state.Completed || (state.Receipt != nil) != (mode == "report collision") {
+					t.Fatalf("rejection poisoned approval evidence: %+v,%v", state, err)
+				}
+				if effects.Load() != wantEffects || b.snapshots.Load() != 0 {
+					t.Fatal("rejection executed extra effects or handed off")
+				}
+				for _, rec := range routingRecords(t, log) {
+					if rec.Event.Kind == api.EventEnd || rec.Event.Kind == api.EventLifecycle || rec.Event.Kind == api.EventOutput ||
+						rec.Event.Kind == api.EventToolResult && (mode == "keyless identity" || rec.Event.Result.ApprovalRequestSeq == 0) {
+						t.Fatalf("rejection wrote continuation: %+v", rec)
+					}
+				}
+				if err := log.Verify(); err != nil {
+					t.Fatal(err)
+				}
+				h.reject.Store(false)
+				if _, err := c.Resume(t.Context(), &v1.ResumeRequest{Session: uid}); err != nil {
+					t.Fatalf("next public Resume=%v", err)
+				}
+				if effects.Load() != 1 {
+					t.Fatal("completed gate redriven")
+				}
+				ctl, err := controller.New(log, nil, controller.WithSessionUID(uid))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := ctl.Replay(t.Context(), h); err != nil {
+					t.Fatalf("public recovered Replay=%v", err)
+				}
+			})
+		}
+	}
+}
 
 // Advance the real SQLite journal between the snapshot and automatic SUSPEND append.
 // Both CAS and superseded-fence failures remain errors, not successful approval pauses.

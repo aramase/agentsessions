@@ -183,7 +183,7 @@ func runApprovalSession(t *testing.T, ctx context.Context, runtime *approvalRunt
 	}
 	approvalEffectCount(t, effects, uid, 0)
 	if live {
-		if state, err := runtime.Backend.Status(ctx, api.Incarnation{ID: uid}); err != nil || state != api.ComputeCold {
+		if state, err := runtime.Status(ctx, api.Incarnation{ID: uid}); err != nil || state != api.ComputeCold {
 			t.Fatalf("real actor status=%s %v", state, err)
 		}
 	}
@@ -353,7 +353,7 @@ func runApprovalSession(t *testing.T, ctx context.Context, runtime *approvalRunt
 }
 
 // This is an observing decorator, not a fake: every counted call delegates to the real runtime.
-// Status observations bypass it so they cannot obscure a decision-only no-compute assertion.
+// Status observations are uncounted so they cannot obscure a decision-only no-compute assertion.
 type approvalRuntime struct {
 	placement.Backend
 	describes, creates, restores, snapshots atomic.Int32

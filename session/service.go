@@ -596,7 +596,9 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 	if sendErr != nil {
 		return sendErr
 	}
-	if operationErr != nil && !errors.Is(operationErr, api.ErrApprovalParked) {
+	var park *api.ApprovalParkedError
+	parked := errors.As(operationErr, &park) && isParkUnwind(operationErr, park.Ref)
+	if operationErr != nil && !parked {
 		if refused != nil && operationErr == refused {
 			return refused
 		}
@@ -619,7 +621,7 @@ func (s *Service) Exec(req *v1.ExecRequest, stream v1.Sessions_ExecServer) (err 
 			recordsSent++
 		}
 	}
-	if recoveryInfo != nil || errors.Is(operationErr, api.ErrApprovalParked) {
+	if recoveryInfo != nil || parked {
 		info, err := s.store.SessionInfo(uid)
 		if err != nil {
 			return sessionStoreError(err, uid)
@@ -869,7 +871,9 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 		refused = s.checkResumedHarness(uid, stored, name)
 		return refused
 	}
-	if err := s.registry.Resume(ctx, log, uid, info.Harness, placement.WithResolvedHarnessCheck(check)); err != nil && !errors.Is(err, api.ErrApprovalParked) {
+	err = s.registry.Resume(ctx, log, uid, info.Harness, placement.WithResolvedHarnessCheck(check))
+	var park *api.ApprovalParkedError
+	if err != nil && (!errors.As(err, &park) || !isParkUnwind(err, park.Ref)) {
 		if refused != nil && err == refused {
 			return nil, refused
 		}
@@ -880,6 +884,27 @@ func (s *Service) Resume(ctx context.Context, req *v1.ResumeRequest) (session *v
 		return nil, sessionStoreError(err, uid)
 	}
 	return s.pendingSession(info)
+}
+
+// A park is a successful public pause only when every joined cause unwinds the same request.
+// Independent Run failures retain the existing Exec/Resume error mapping, even beside a park.
+func isParkUnwind(err error, ref api.ApprovalRef) bool {
+	var parked *api.ApprovalParkedError
+	if !errors.As(err, &parked) || parked == nil || parked.Ref != ref {
+		return false
+	}
+	for err != nil {
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, cause := range joined.Unwrap() {
+				if !isParkUnwind(cause, ref) {
+					return false
+				}
+			}
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return true
 }
 
 func suspendError(err error) error {

@@ -39,7 +39,7 @@ func TestPlacementApprovalRepairCapturedCASAcrossRegistries(t *testing.T) {
 		for _, operation := range []string{"Placer", "Registry"} {
 			for _, advancement := range []string{"request", "decision", "receipt", "completed", "new execution", "fence superseded"} {
 				t.Run(backend+"/"+operation+"/"+advancement, func(t *testing.T) {
-					var log eventlog.Store = eventlog.AsStore(eventlog.New())
+					log := eventlog.AsStore(eventlog.New())
 					if backend == "sqlite" {
 						log = newSuspendStore(t).Session("s")
 					}

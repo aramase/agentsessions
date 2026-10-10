@@ -368,9 +368,10 @@ func TestApproveInvalidDoesNotFence(t *testing.T) {
 				t.Run(backend+"/"+mode+"/"+field, func(t *testing.T) {
 					log := approvalLog(t, backend)
 					cut := api.EventApprovalRequest
-					if mode == "decided" {
+					switch mode {
+					case "decided":
 						cut = api.EventApprovalResult
-					} else if mode == "call-only" {
+					case "call-only":
 						cut = api.EventToolCall
 					}
 					approvalSeed(t, log, false, cut)

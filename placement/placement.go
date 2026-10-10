@@ -340,7 +340,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	if err := c.Exec(ctx, har, inputs, expectedLastSeq); err != nil {
 		var park *api.ApprovalParkedError
-		if errors.As(err, &park) {
+		if errors.As(err, &park) && isParkUnwind(err, park.Ref) {
 			return inc, p.handoffPark(ctx, log, sessionUID, fence, park, closeInvocation, cfg.observer)
 		}
 		return inc, controllerError(ctx, err)
@@ -548,6 +548,27 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	return ref, nil
 }
 
+// isParkUnwind accepts wrapped and joined matching parks, but not an independent Run failure
+// hidden elsewhere in the error tree. Keep this check local to placement's two handoff callers.
+func isParkUnwind(err error, ref api.ApprovalRef) bool {
+	var parked *api.ApprovalParkedError
+	if !errors.As(err, &parked) || parked == nil || parked.Ref != ref {
+		return false
+	}
+	for err != nil {
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, cause := range joined.Unwrap() {
+				if !isParkUnwind(cause, ref) {
+					return false
+				}
+			}
+			return true
+		}
+		err = errors.Unwrap(err)
+	}
+	return true
+}
+
 // handoffPark releases the invocation connection before compute, keeping the same guard and
 // fence through the captured-head SUSPEND append. Only a fully committed handoff returns park.
 func (p *Placer) handoffPark(ctx context.Context, log eventlog.Store, sessionUID string, fence int64, park *api.ApprovalParkedError, closeInvocation func() error, observer controller.Observer) error {
@@ -688,7 +709,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	if _, err := c.Resume(ctx, har); err != nil {
 		var park *api.ApprovalParkedError
-		if errors.As(err, &park) {
+		if errors.As(err, &park) && isParkUnwind(err, park.Ref) {
 			return p.handoffPark(ctx, log, sessionUID, fence, park, closeInvocation, cfg.observer)
 		}
 		return controllerError(ctx, err)

@@ -120,11 +120,11 @@ func (s *advanceGateRead) Read(from int64) ([]eventlog.Record, error) {
 	}
 	if s.advance {
 		s.advance = false
-		head, err := s.Store.Head()
+		head, err := s.Head()
 		if err != nil {
 			return nil, err
 		}
-		_, err = s.Store.Append(head, s.fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleSuspend}})
+		_, err = s.Append(head, s.fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleSuspend}})
 		if err != nil {
 			return nil, err
 		}
