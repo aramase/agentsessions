@@ -29,6 +29,7 @@ const (
 	EventEnd             EventKind = "END"
 	EventError           EventKind = "ERROR"
 	EventExecutionStart  EventKind = "EXECUTION_START"
+	EventParked          EventKind = "PARKED" // transport-only approval park acknowledgement; never journaled
 )
 
 // Message is a role-tagged sequence of content parts (A2A Message = role + Part[]).
@@ -128,6 +129,7 @@ type Event struct {
 	End            *HarnessEnd
 	Err            *Error
 	ExecutionStart *ExecutionStart
+	Parked         *ApprovalRef `json:",omitempty"` // transport only, excluded from durable history
 
 	Actor IdentityRef // emitter principal -> provenance on every action
 }
@@ -214,6 +216,16 @@ type ToolCall struct {
 	IdempotencyKey string // dedups a retried side-effecting call tool-side (§3/I3)
 }
 
+// ToolResultCode is the machine-readable receipt status, matching common.proto ToolResult.Code.
+// Zero preserves legacy receipts and also denotes a successful result when IsError is false.
+type ToolResultCode int32
+
+const (
+	ToolResultCodeUnspecified    ToolResultCode = 0
+	ToolResultCodeApprovalDenied ToolResultCode = 1
+	ToolResultCodeExecutorError  ToolResultCode = 2
+)
+
 // ToolResult is the outcome of a ToolCall.
 type ToolResult struct {
 	ID           string
@@ -226,6 +238,14 @@ type ToolResult struct {
 	// TOOL_RESULT event the same ToolResult it feeds back as a tool_result part, so history rebuilt
 	// from the log can give the model what it saw live.
 	Content []Part `json:",omitempty"`
+	// Additive durable receipt fields are omitted at zero to preserve old model-input hashes.
+	Code                ToolResultCode `json:",omitempty"`
+	ApprovalRequestSeq  int64          `json:",omitempty"`
+	ApprovalDecisionSeq int64          `json:",omitempty"`
+	// Approval carries a host decision to a direct sink caller. It is transient: neither Go JSON
+	// nor wire conversion includes it in a receipt or model history. The durable decision is a
+	// separate APPROVAL_RESULT event; the receipt binds it by sequence above.
+	Approval *ApprovalResult `json:"-"`
 }
 
 // ApprovalRequest asks a human or policy engine to allow a tool call.
@@ -239,6 +259,7 @@ type ApprovalResult struct {
 	ToolCallID string
 	Approved   bool
 	Reason     string
+	RequestSeq int64 `json:",omitempty"` // sequence of the host-owned APPROVAL_REQUEST; zero for legacy decisions
 }
 
 // HarnessEnd is the terminal state of one execution.

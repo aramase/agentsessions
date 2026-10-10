@@ -65,7 +65,10 @@ type Capabilities struct {
 type Start struct {
 	// ExecutionID identifies this Run on the wire. Modern runs share it with journal events;
 	// legacy runs use a session-scoped legacy- compatibility token that is never journaled.
-	ExecutionID   string
+	ExecutionID string
+	// SessionUID carries the ControllerFrame session envelope for tool/approval correlation.
+	// Model-only callers that do not use that envelope may leave it empty.
+	SessionUID    string    `json:",omitempty"`
 	Config        []byte    // opaque per-execution config; journaled verbatim and restored on replay/resume
 	History       []Event   // replay context; empty if the sandbox was memory-restored
 	Inputs        []Message // invocation inputs; originals are restored on controller replay/resume
