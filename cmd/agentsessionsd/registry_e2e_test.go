@@ -147,8 +147,8 @@ func TestOperatorListenerIsolation(t *testing.T) {
 				}
 			}
 			for _, req := range []*reflectionalpha.ServerReflectionRequest{ //nolint:staticcheck // Probe deprecated v1alpha reflection to verify Sessions refuses it.
-				{MessageRequest: &reflectionalpha.ServerReflectionRequest_ListServices{ListServices: ""}},
-				{MessageRequest: &reflectionalpha.ServerReflectionRequest_FileContainingSymbol{FileContainingSymbol: "agentsessions.v1.HarnessRegistry"}},
+				{MessageRequest: &reflectionalpha.ServerReflectionRequest_ListServices{ListServices: ""}},                                                 //nolint:staticcheck // Legacy v1alpha request intentionally tests reflection isolation.
+				{MessageRequest: &reflectionalpha.ServerReflectionRequest_FileContainingSymbol{FileContainingSymbol: "agentsessions.v1.HarnessRegistry"}}, //nolint:staticcheck // Legacy v1alpha request intentionally tests reflection isolation.
 			} {
 				stream, err := reflectionalpha.NewServerReflectionClient(conn).ServerReflectionInfo(ctx)
 				if err != nil {
