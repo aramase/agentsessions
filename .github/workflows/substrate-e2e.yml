@@ -120,7 +120,14 @@ jobs:
         # build of the commit under test, which is the whole point of running conformance in CI.
         run: echo "HARNESS_IMG=$(ko build ./cmd/harnessnode)" >> "$GITHUB_ENV"
 
-      - name: Build + apply the echo harness ActorTemplate + WorkerPool
+      - name: Build the test-only approval harness image
+        working-directory: integrations/substrate
+        # ko otherwise misses the root's substrate-compatible base image in the nested module.
+        env:
+          KO_CONFIG_PATH: ../../.ko.yaml
+        run: echo "APPROVAL_HARNESS_IMG=$(ko build ./e2e/testdata/approval-harness)" >> "$GITHUB_ENV"
+
+      - name: Build + apply the echo and approval gVisor fixtures
         # The harness image is built once (above); resolve substrate's ateom-gvisor in its own module,
         # substitute both refs into the manifest, apply.
         run: |
@@ -131,6 +138,12 @@ jobs:
           kubectl --context kind-kind wait --for=condition=Ready \
             actortemplate/echo-harness -n ate-agentsessions --timeout=600s
           hack/wait-worker-pool.sh echo-harness
+          sed -e "s#APPROVAL_HARNESS_IMAGE#${APPROVAL_HARNESS_IMG}#" \
+              -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor#${ATEOM_IMG}#" \
+              deploy/substrate/approval-actortemplate.yaml | kubectl --context kind-kind apply -f -
+          kubectl --context kind-kind wait --for=condition=Ready \
+            actortemplate/approval-harness -n ate-agentsessions --timeout=600s
+          hack/wait-worker-pool.sh approval-harness
 
       - name: Allow the conformance Job to reach worker pods
         # substrate's per-WorkerPool NetworkPolicy admits only the atenet-router. The suite dials the
@@ -151,7 +164,7 @@ jobs:
 
       - name: Stateless-tier conformance (in-cluster Job)
         # Runs before the expensive micro-VM staging below, so a break in the cheap tier fails fast.
-        run: hack/run-e2e-job.sh '^(TestStatelessReplayOnGVisor|TestSessionSuspendResumeOnGVisor)$' "${E2E_IMAGE}" 600
+        run: hack/run-e2e-job.sh '^(TestStatelessReplayOnGVisor|TestSessionSuspendResumeOnGVisor|TestApprovalOnGVisor)$' "${E2E_IMAGE}" 900
 
       - name: Deploy the micro-VM sandbox class
         # run-microvm-demo-kind stages the (cached) kata-assets into rustfs and installs the
@@ -163,7 +176,7 @@ jobs:
         working-directory: _substrate
         run: hack/run-microvm-demo-kind.sh --ateapi-client-auth=token
 
-      - name: Build + apply the counter harness micro-VM ActorTemplate + WorkerPool
+      - name: Build + apply the counter and approval micro-VM fixtures
         # Reuses the harness image built once above (HARNESS_IMG); builds substrate's ateom-microvm.
         run: |
           ATEOM_MV_IMG="$(cd _substrate && ko build ./cmd/ateom-microvm)"
@@ -173,12 +186,18 @@ jobs:
           kubectl --context kind-kind wait --for=condition=Ready \
             actortemplate/counter-microvm -n ate-agentsessions --timeout=600s
           hack/wait-worker-pool.sh counter-microvm
+          sed -e "s#APPROVAL_HARNESS_IMAGE#${APPROVAL_HARNESS_IMG}#" \
+              -e "s#ko://github.com/agent-substrate/substrate/cmd/ateom-microvm#${ATEOM_MV_IMG}#" \
+              deploy/substrate/approval-memory-actortemplate.yaml | kubectl --context kind-kind apply -f -
+          kubectl --context kind-kind wait --for=condition=Ready \
+            actortemplate/approval-memory -n ate-agentsessions --timeout=600s
+          hack/wait-worker-pool.sh approval-memory
 
       - name: Stateful-tier + fork conformance (in-cluster Job)
         # Memory continuity across suspend/restore (the differentiator a plain pod cannot do), and
         # fork: fan out k children from one parent checkpoint and require each to continue at N+1
         # independently — the claim that a stateful fork clones RAM instead of silently cold-booting.
-        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestFork' "${E2E_IMAGE}" 1500
+        run: hack/run-e2e-job.sh '^(TestMemorySnapshotSuspendResume|TestForkFanOutFromMemorySnapshot|TestForkOfMemoryHarnessAtHistoricalSeqIsRefused|TestApprovalMemoryRefusalOnMicroVM)$' "${E2E_IMAGE}" 1500
 
       - name: Dump diagnostics on failure
         if: failure()

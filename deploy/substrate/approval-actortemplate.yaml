@@ -1,0 +1,43 @@
+# Test-only stateless approval fixture. Build in integrations/substrate with:
+# KO_CONFIG_PATH=../../.ko.yaml ko build ./e2e/testdata/approval-harness
+# Substitute APPROVAL_HARNESS_IMAGE and the pinned ateom-gvisor image before applying.
+# The workflow installs the namespace through echo-actortemplate.yaml first.
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: approval-harness
+  namespace: ate-agentsessions
+  labels:
+    workload: agentsessions-approval-harness
+spec:
+  replicas: 2
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-gvisor
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: approval-harness
+  namespace: ate-agentsessions
+spec:
+  pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+  containers:
+    - name: harness
+      image: APPROVAL_HARNESS_IMAGE
+      command:
+        - /ko-app/approval-harness
+      env:
+        - name: HARNESS_MODE
+          value: stateless
+      readyz:
+        httpGet:
+          path: /readyz
+          port: 8081
+  workerSelector:
+    matchLabels:
+      workload: agentsessions-approval-harness
+  snapshotsConfig:
+    onPause: Full
+    onCommit: Full
+    location: gs://ate-snapshots/ate-agentsessions-approval/

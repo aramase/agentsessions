@@ -1,0 +1,45 @@
+# Test-only approval refusal on an actual served REQUIRES_MEMORY_SNAPSHOT harness.
+# Uses the same fixture image as approval-harness, not the production counter. The
+# counter-microvm SandboxConfig is staged by the existing workflow before installation.
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: approval-memory
+  namespace: ate-agentsessions
+  labels:
+    workload: agentsessions-approval-memory
+spec:
+  replicas: 2
+  sandboxClass: microvm
+  sandboxConfigName: counter-microvm
+  ateomImage: ko://github.com/agent-substrate/substrate/cmd/ateom-microvm
+
+---
+
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: approval-memory
+  namespace: ate-agentsessions
+spec:
+  sandboxClass: microvm
+  pauseImage: "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+  containers:
+    - name: harness
+      image: APPROVAL_HARNESS_IMAGE
+      command:
+        - /ko-app/approval-harness
+      env:
+        - name: HARNESS_MODE
+          value: memory
+      readyz:
+        httpGet:
+          path: /readyz
+          port: 8081
+  workerSelector:
+    matchLabels:
+      workload: agentsessions-approval-memory
+  snapshotsConfig:
+    onPause: Full
+    onCommit: Full
+    location: gs://ate-snapshots/ate-agentsessions-approval-memory/
