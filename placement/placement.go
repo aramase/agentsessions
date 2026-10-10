@@ -140,7 +140,14 @@ func WithHarness(name string) ExecOption {
 type ResumeOption func(*resumeConfig)
 
 type resumeConfig struct {
-	harness string
+	harness  string
+	observer controller.Observer
+}
+
+// WithResumeObserver reports newly committed recovery records and streaming chunks, including
+// SUSPEND on a second approval park. It does not re-emit previously recorded effects.
+func WithResumeObserver(o controller.Observer) ResumeOption {
+	return func(c *resumeConfig) { c.observer = o }
 }
 
 // WithResumeHarness identifies the registry entry selected for this recovery attempt. The
@@ -242,9 +249,10 @@ func (p *Placer) Describe(ctx context.Context) (api.Descriptor, error) {
 	return p.backend.Describe(ctx)
 }
 
-// Exec places one turn: Create the incarnation, mint the fence from the log and stamp it on the
-// incarnation, bind a controller to that same token, and drive the (placed) harness. The log stays the
-// single fence authority; the returned incarnation carries the fence for Suspend/Resume (step 5).
+// Exec rejects an owned unreceipted approval before runtime admission; otherwise it creates an
+// incarnation and drives the harness under a log-minted fence stamped on the returned incarnation.
+// A new approval gate closes the dial, snapshots and commits SUSPEND under that same fence before
+// returning *api.ApprovalParkedError. Handoff failures return the actual operational cause.
 func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string, inputs []api.Message, expectedLastSeq int64, opts ...ExecOption) (inc api.Incarnation, err error) {
 	var cfg execConfig
 	for _, o := range opts {
@@ -271,6 +279,13 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	defer release()
 
+	state, err := controller.InspectApproval(log, 0)
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	if state != nil && !state.Inherited && state.Receipt == nil {
+		return api.Incarnation{}, controller.ErrApprovalBlocked
+	}
 	if _, err := p.admit(ctx, sessionUID); err != nil {
 		return api.Incarnation{}, err
 	}
@@ -295,7 +310,15 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return inc, err
 	}
 	dialFinished(nil)
-	defer p.closeHarness(ctx, sessionUID, inc.ID, closeHarness)
+	closeInvocation := func() error {
+		closer := closeHarness
+		closeHarness = nil
+		if closer == nil {
+			return nil
+		}
+		return p.closeHarness(ctx, sessionUID, inc.ID, closer)
+	}
+	defer func() { _ = closeInvocation() }()
 	if err := p.recheck(ctx, sessionUID, har); err != nil {
 		return inc, err
 	}
@@ -316,6 +339,10 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		return inc, err
 	}
 	if err := c.Exec(ctx, har, inputs, expectedLastSeq); err != nil {
+		var park *api.ApprovalParkedError
+		if errors.As(err, &park) {
+			return inc, p.handoffPark(ctx, log, sessionUID, fence, park, closeInvocation, cfg.observer)
+		}
 		return inc, controllerError(ctx, err)
 	}
 	return inc, nil
@@ -487,24 +514,67 @@ func (p *Placer) Suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	}
 	defer release()
 
+	return p.suspend(ctx, log, sessionUID, nil)
+}
+
+// suspend runs with the shared session guard already held. A nil cursor preserves public
+// Suspend's fresh-fence behavior; automatic parks supply the invocation fence and captured head.
+type suspendCursor struct {
+	head, fence int64
+	observer    controller.Observer
+}
+
+func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID string, cursor *suspendCursor) (ref api.SnapshotRef, err error) {
 	inc := api.Incarnation{ID: sessionUID}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, err
 	}
 	appendFinished := observability.StartDebug(ctx, p.logger, "placement", "append_suspend_event", "session_uid", sessionUID)
-	if err := appendLifecycle(log, api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}); err != nil {
-		appendFinished(err, "error_kind", placementErrorKind(err))
+	lc := api.Lifecycle{Kind: api.LifecycleSuspend, Snapshot: &ref}
+	if cursor == nil {
+		err = appendLifecycle(log, lc)
+	} else {
+		var record eventlog.Record
+		record, err = log.Append(cursor.head, cursor.fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &lc})
+		if err == nil && cursor.observer.OnRecord != nil {
+			cursor.observer.OnRecord(record)
+		}
+	}
+	appendFinished(err, "error_kind", placementErrorKind(err))
+	if err != nil {
 		return api.SnapshotRef{}, err
 	}
-	appendFinished(nil)
 	return ref, nil
 }
 
-// Resume recovers the recorded SnapshotRef, Restores an incarnation, mints a NEW fence (superseding
-// any zombie writer), binds a controller to it, re-drives any interrupted turn (replay for a
-// filesystem-only backend), and records a RESUME marker. A session with no prior SUSPEND (crash mid
-// turn) falls back to re-provisioning from the session handle.
+// handoffPark releases the invocation connection before compute, keeping the same guard and
+// fence through the captured-head SUSPEND append. Only a fully committed handoff returns park.
+func (p *Placer) handoffPark(ctx context.Context, log eventlog.Store, sessionUID string, fence int64, park *api.ApprovalParkedError, closeInvocation func() error, observer controller.Observer) error {
+	state, err := controller.InspectApproval(log, 0)
+	if err != nil {
+		return err
+	}
+	if state == nil || state.Inherited || state.Receipt != nil || state.Request == nil || state.Decision != nil ||
+		park.Ref != (api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: state.Request.Seq}) {
+		return fmt.Errorf("%w: park does not match the recorded owned request", controller.ErrReplayDiverged)
+	}
+	if err := closeInvocation(); err != nil {
+		return err
+	}
+	if _, err := p.suspend(ctx, log, sessionUID, &suspendCursor{head: state.Head, fence: fence, observer: observer}); err != nil {
+		return err
+	}
+	return park
+}
+
+// Resume returns *api.ApprovalParkedError for an owned pending request without runtime IO or a
+// new fence. A call-only cut mints a fence and repairs one request at the captured head, also
+// without runtime IO. Neither park proves cold compute: only a committed SUSPEND records that.
+// Otherwise Resume restores the recorded SnapshotRef (or the session handle when no owned
+// SUSPEND exists), mints a new fence, re-drives the turn and records RESUME on ordinary success.
+// A new gate instead closes the dial, snapshots and commits SUSPEND under that recovery fence,
+// returning a typed park without RESUME. Repair/handoff failures return their actual cause.
 func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID string, opts ...ResumeOption) error {
 	var cfg resumeConfig
 	for _, o := range opts {
@@ -518,6 +588,35 @@ func (p *Placer) Resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	return p.resume(ctx, log, sessionUID, cfg)
 }
 
+// resumeApproval answers an unresolved gate without allocating an actor. Inspection/route checks
+// precede this helper under the shared guard; only a missing request needs a new writer fence.
+func (p *Placer) resumeApproval(log eventlog.Store, state *controller.ApprovalState, observer controller.Observer) (bool, error) {
+	if state == nil || state.Receipt != nil {
+		return false, nil
+	}
+	if state.Inherited {
+		return true, controller.ErrInheritedToolIntent
+	}
+	if state.Decision != nil {
+		return false, nil
+	}
+	if state.Request != nil {
+		return true, &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: state.Request.Seq}}
+	}
+	fence, err := log.NewFence()
+	if err != nil {
+		return true, err
+	}
+	record, err := log.Append(state.Head, fence, api.Event{ExecutionID: state.ExecutionID, Kind: api.EventApprovalRequest, Approval: &api.ApprovalRequest{ToolCallID: state.Call.ID}})
+	if err != nil {
+		return true, err
+	}
+	if observer.OnRecord != nil {
+		observer.OnRecord(record)
+	}
+	return true, &api.ApprovalParkedError{Ref: api.ApprovalRef{ExecutionID: state.ExecutionID, ToolCallID: state.Call.ID, RequestSeq: record.Seq}}
+}
+
 // resume runs the recovery transition with the session guard already held by Placer or Registry.
 func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID string, cfg resumeConfig) (err error) {
 	ctx = observability.EnsureRequestID(ctx)
@@ -527,6 +626,13 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		finish(err, "error_kind", placementErrorKind(err), "incarnation_id", inc.ID, "runtime", inc.Runtime)
 	}()
 
+	state, err := controller.InspectApproval(log, 0)
+	if err != nil {
+		return err
+	}
+	if handled, err := p.resumeApproval(log, state, cfg.observer); handled {
+		return err
+	}
 	// Gate before Restore, exactly as Exec does before Create: Resume re-drives an interrupted turn,
 	// so it must not reach a harness the backend cannot host.
 	if _, err := p.admit(ctx, sessionUID); err != nil {
@@ -555,7 +661,15 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		return err
 	}
 	dialFinished(nil)
-	defer p.closeHarness(ctx, sessionUID, inc.ID, closeHarness)
+	closeInvocation := func() error {
+		closer := closeHarness
+		closeHarness = nil
+		if closer == nil {
+			return nil
+		}
+		return p.closeHarness(ctx, sessionUID, inc.ID, closer)
+	}
+	defer func() { _ = closeInvocation() }()
 	if err := p.recheck(ctx, sessionUID, har); err != nil {
 		return err
 	}
@@ -567,12 +681,16 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	fenceFinished(nil)
 	inc.FenceToken = fence
-	copts := append(p.controllerOpts(fence, sessionUID, controller.Observer{}), controller.WithHarness(cfg.harness))
+	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer), controller.WithHarness(cfg.harness))
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return err
 	}
 	if _, err := c.Resume(ctx, har); err != nil {
+		var park *api.ApprovalParkedError
+		if errors.As(err, &park) {
+			return p.handoffPark(ctx, log, sessionUID, fence, park, closeInvocation, cfg.observer)
+		}
 		return controllerError(ctx, err)
 	}
 	head, err := log.Head()
@@ -581,8 +699,11 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	// RESUME marker under the incarnation's fence (controller.Resume used the same token).
 	appendFinished := observability.StartDebug(ctx, p.logger, "placement", "append_resume_event", "session_uid", sessionUID)
-	_, err = log.Append(head, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleResume}})
+	record, err := log.Append(head, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleResume}})
 	appendFinished(err, "error_kind", placementErrorKind(err))
+	if err == nil && cfg.observer.OnRecord != nil {
+		cfg.observer.OnRecord(record)
+	}
 	return err
 }
 
@@ -592,13 +713,14 @@ type ForkChild struct {
 	Log eventlog.Store
 }
 
-func (p *Placer) closeHarness(ctx context.Context, sessionUID, incarnationID string, closeHarness func() error) {
+func (p *Placer) closeHarness(ctx context.Context, sessionUID, incarnationID string, closeHarness func() error) error {
 	finish := observability.StartDebug(ctx, p.logger, "placement", "close_harness",
 		"session_uid", sessionUID,
 		"incarnation_id", incarnationID,
 	)
 	err := closeHarness()
 	finish(err, "error_kind", closeErrorKind(err))
+	return err
 }
 
 func addressTransport(address string) string {
