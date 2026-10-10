@@ -409,10 +409,12 @@ func (s *Service) isRegistered(name string) (bool, error) {
 	}
 }
 
-// harnessError reports an unservable harness as InvalidArgument. Naming a harness the host does
-// not run is a caller mistake, and the message lists what is registered so the caller can correct
-// it without reading the host's configuration.
+// harnessError distinguishes a known but unservable registration (a host precondition) from an
+// unknown name (a caller mistake). For, not Registry.Has, decides whether it can run.
 func harnessError(err error) error {
+	if errors.Is(err, placement.ErrHarnessUnservable) {
+		return status.Error(codes.FailedPrecondition, err.Error())
+	}
 	if errors.Is(err, placement.ErrUnknownHarness) {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -806,7 +808,7 @@ func resumeError(err error) error {
 		return status.Errorf(codes.FailedPrecondition, "resume: %v; the incomplete turn never reached the harness and you should call Exec again with all inputs", err)
 	case errors.Is(err, controller.ErrInvalidExecutionLog):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
-	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
+	case errors.Is(err, placement.ErrUnplaceable), errors.Is(err, placement.ErrDescriptorMismatch), errors.Is(err, placement.ErrRecordedHarnessNotServed), errors.Is(err, placement.ErrHarnessUnservable), errors.Is(err, controller.ErrHarnessMismatch), errors.Is(err, controller.ErrHarnessVersionMismatch):
 		return status.Errorf(codes.FailedPrecondition, "resume: %v", err)
 	case errors.Is(err, placement.ErrUnknownHarness):
 		return harnessError(err)

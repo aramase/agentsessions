@@ -926,14 +926,15 @@ HarnessRegistration is one entry in the host&#39;s harness registry.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | metadata | [ResourceMetadata](#agentsessions-v1-ResourceMetadata) |  | metadata.name is the key that Session.harness and ExecRequest.harness refer to. metadata.uid is server-assigned and stays the same across UNCHANGED and REACTIVATED. metadata.project is unused: a registration is host-scoped. |
-| spec | [HarnessSpec](#agentsessions-v1-HarnessSpec) |  | Unset for a STATIC harness. |
-| spec_digest | [string](#string) |  | &#34;sha256:&#34; followed by the lowercase hex SHA-256 of the RFC 8785 (JCS) form of spec&#39;s proto3-JSON mapping, with proto field names, enum names, and unpopulated fields omitted. This is the same canonical form the journal hashes. Empty for a STATIC harness. |
+| spec | [HarnessSpec](#agentsessions-v1-HarnessSpec) |  | Unset for a STATIC harness, or for a stored registration whose spec this host cannot decode or validate. No partial spec is returned in the latter case; see unservable_reason. |
+| spec_digest | [string](#string) |  | &#34;sha256:&#34; followed by the lowercase hex SHA-256 of the RFC 8785 (JCS) form of the originally stored spec&#39;s proto3-JSON mapping, with proto field names, enum names, and unpopulated fields omitted. This is the same canonical form the journal hashes. Empty for a STATIC harness. Preserved when spec is unset for an undecodable registration: this host cannot recompute the original digest without understanding the complete spec. |
 | state | [HarnessState](#agentsessions-v1-HarnessState) |  |  |
 | source | [HarnessSource](#agentsessions-v1-HarnessSource) |  |  |
 | retire_time | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  | Set while RETIRED: when the harness was first retired. |
 | retire_reason | [string](#string) |  | Set while RETIRED: the reason given when the harness was first retired. |
 | observed | [HarnessDescriptor](#agentsessions-v1-HarnessDescriptor) |  | Set only when GetHarnessRequest.observe is true and Describe succeeded: what the harness reported just now. Never stored. |
 | observe_error | [string](#string) |  | Set only when GetHarnessRequest.observe is true and Describe failed: why. |
+| unservable_reason | [string](#string) |  | Nonempty if this host cannot serve a registered harness (including a row added by another host after startup, which requires a restart here). The registration remains visible and its name reserved, ACTIVE or RETIRED; Sessions operations needing it fail FAILED_PRECONDITION. Strict decoding refuses unsupported stored fields and enum values, rather than accepting a partial spec. This is a host-local status, never stored: another compatible host may serve the same registration. Do not match on this human-readable explanation. |
 
 
 
@@ -1128,7 +1129,7 @@ pays for.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| RegisterHarness | [RegisterHarnessRequest](#agentsessions-v1-RegisterHarnessRequest) | [RegisterHarnessResponse](#agentsessions-v1-RegisterHarnessResponse) | Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec, or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve the placement. |
+| RegisterHarness | [RegisterHarnessRequest](#agentsessions-v1-RegisterHarnessRequest) | [RegisterHarnessResponse](#agentsessions-v1-RegisterHarnessResponse) | Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec, or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve a new placement. An identical repeat on a locally unservable stored registration can return UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it. |
 | GetHarness | [GetHarnessRequest](#agentsessions-v1-GetHarnessRequest) | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | NOT_FOUND for a name that is neither STATIC nor registered. |
 | ListHarnesses | [ListHarnessesRequest](#agentsessions-v1-ListHarnessesRequest) | [ListHarnessesResponse](#agentsessions-v1-ListHarnessesResponse) |  |
 | RetireHarness | [RetireHarnessRequest](#agentsessions-v1-RetireHarnessRequest) | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | Idempotent: retiring a RETIRED harness returns it unchanged. FAILED_PRECONDITION for a STATIC harness; NOT_FOUND for an unknown name. |

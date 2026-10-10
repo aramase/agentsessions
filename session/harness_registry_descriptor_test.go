@@ -258,8 +258,20 @@ func TestRegisterHarnessRefusesPlacerWithoutDescriptorCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	checked.Close()
-	if _, err := session.NewHarnessRegistry(store, newRegistry(), unchecked); err == nil || !strings.Contains(err.Error(), `harness "h"`) {
-		t.Fatalf("startup with a placer that skips the stored descriptor id: got %v, want an error for harness h", err)
+	isolation, err := session.NewHarnessRegistry(store, newRegistry(), unchecked)
+	if err != nil {
+		t.Fatalf("startup must isolate a placer that skips the stored descriptor id: %v", err)
+	}
+	got, err := isolation.GetHarness(ctx, &v1.GetHarnessRequest{Name: "h"})
+	if err != nil || !strings.Contains(got.GetUnservableReason(), "WithDescriptorID") {
+		t.Fatalf("descriptor failure status = %v, %v", got, err)
+	}
+	if got := released.Load(); got != 3 {
+		t.Fatalf("failed load must release immediately: got %d releases, want 3", got)
+	}
+	isolation.Close()
+	if got := released.Load(); got != 4 { // no-id loaded successfully, released only on Close
+		t.Fatalf("Close must release healthy Placer once: got %d, want 4", got)
 	}
 }
 

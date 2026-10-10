@@ -409,11 +409,14 @@ type HarnessRegistration struct {
 	// server-assigned and stays the same across UNCHANGED and REACTIVATED. metadata.project is
 	// unused: a registration is host-scoped.
 	Metadata *ResourceMetadata `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	// Unset for a STATIC harness.
+	// Unset for a STATIC harness, or for a stored registration whose spec this host cannot decode
+	// or validate. No partial spec is returned in the latter case; see unservable_reason.
 	Spec *HarnessSpec `protobuf:"bytes,2,opt,name=spec,proto3" json:"spec,omitempty"`
-	// "sha256:" followed by the lowercase hex SHA-256 of the RFC 8785 (JCS) form of spec's
-	// proto3-JSON mapping, with proto field names, enum names, and unpopulated fields omitted. This
-	// is the same canonical form the journal hashes. Empty for a STATIC harness.
+	// "sha256:" followed by the lowercase hex SHA-256 of the RFC 8785 (JCS) form of the
+	// originally stored spec's proto3-JSON mapping, with proto field names, enum names, and
+	// unpopulated fields omitted. This is the same canonical form the journal hashes. Empty for a
+	// STATIC harness. Preserved when spec is unset for an undecodable registration: this host
+	// cannot recompute the original digest without understanding the complete spec.
 	SpecDigest string        `protobuf:"bytes,3,opt,name=spec_digest,json=specDigest,proto3" json:"spec_digest,omitempty"`
 	State      HarnessState  `protobuf:"varint,4,opt,name=state,proto3,enum=agentsessions.v1.HarnessState" json:"state,omitempty"`
 	Source     HarnessSource `protobuf:"varint,5,opt,name=source,proto3,enum=agentsessions.v1.HarnessSource" json:"source,omitempty"`
@@ -425,9 +428,16 @@ type HarnessRegistration struct {
 	// reported just now. Never stored.
 	Observed *HarnessDescriptor `protobuf:"bytes,8,opt,name=observed,proto3" json:"observed,omitempty"`
 	// Set only when GetHarnessRequest.observe is true and Describe failed: why.
-	ObserveError  string `protobuf:"bytes,9,opt,name=observe_error,json=observeError,proto3" json:"observe_error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ObserveError string `protobuf:"bytes,9,opt,name=observe_error,json=observeError,proto3" json:"observe_error,omitempty"`
+	// Nonempty if this host cannot serve a registered harness (including a row added by another
+	// host after startup, which requires a restart here). The registration remains visible and its
+	// name reserved, ACTIVE or RETIRED; Sessions operations needing it fail FAILED_PRECONDITION.
+	// Strict decoding refuses unsupported stored fields and enum values, rather than accepting a
+	// partial spec. This is a host-local status, never stored: another compatible host may serve the
+	// same registration. Do not match on this human-readable explanation.
+	UnservableReason string `protobuf:"bytes,10,opt,name=unservable_reason,json=unservableReason,proto3" json:"unservable_reason,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *HarnessRegistration) Reset() {
@@ -519,6 +529,13 @@ func (x *HarnessRegistration) GetObserved() *HarnessDescriptor {
 func (x *HarnessRegistration) GetObserveError() string {
 	if x != nil {
 		return x.ObserveError
+	}
+	return ""
+}
+
+func (x *HarnessRegistration) GetUnservableReason() string {
+	if x != nil {
+		return x.UnservableReason
 	}
 	return ""
 }
@@ -869,7 +886,7 @@ const file_harness_registry_proto_rawDesc = "" +
 	"\tsubstrate\x18\x02 \x01(\v2$.agentsessions.v1.SubstratePlacementH\x00R\tsubstrate\x12B\n" +
 	"\fcapabilities\x18\x03 \x01(\v2\x1e.agentsessions.v1.CapabilitiesR\fcapabilities\x12#\n" +
 	"\rdescriptor_id\x18\x04 \x01(\tR\fdescriptorIdB\v\n" +
-	"\tplacement\"\xe0\x03\n" +
+	"\tplacement\"\x8d\x04\n" +
 	"\x13HarnessRegistration\x12>\n" +
 	"\bmetadata\x18\x01 \x01(\v2\".agentsessions.v1.ResourceMetadataR\bmetadata\x121\n" +
 	"\x04spec\x18\x02 \x01(\v2\x1d.agentsessions.v1.HarnessSpecR\x04spec\x12\x1f\n" +
@@ -881,7 +898,9 @@ const file_harness_registry_proto_rawDesc = "" +
 	"retireTime\x12#\n" +
 	"\rretire_reason\x18\a \x01(\tR\fretireReason\x12?\n" +
 	"\bobserved\x18\b \x01(\v2#.agentsessions.v1.HarnessDescriptorR\bobserved\x12#\n" +
-	"\robserve_error\x18\t \x01(\tR\fobserveError\"_\n" +
+	"\robserve_error\x18\t \x01(\tR\fobserveError\x12+\n" +
+	"\x11unservable_reason\x18\n" +
+	" \x01(\tR\x10unservableReason\"_\n" +
 	"\x16RegisterHarnessRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x121\n" +
 	"\x04spec\x18\x02 \x01(\v2\x1d.agentsessions.v1.HarnessSpecR\x04spec\"\x97\x01\n" +

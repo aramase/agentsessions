@@ -45,7 +45,8 @@ const (
 type HarnessRegistryClient interface {
 	// Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec,
 	// or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve
-	// the placement.
+	// a new placement. An identical repeat on a locally unservable stored registration can return
+	// UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it.
 	RegisterHarness(ctx context.Context, in *RegisterHarnessRequest, opts ...grpc.CallOption) (*RegisterHarnessResponse, error)
 	// NOT_FOUND for a name that is neither STATIC nor registered.
 	GetHarness(ctx context.Context, in *GetHarnessRequest, opts ...grpc.CallOption) (*HarnessRegistration, error)
@@ -113,7 +114,8 @@ func (c *harnessRegistryClient) RetireHarness(ctx context.Context, in *RetireHar
 type HarnessRegistryServer interface {
 	// Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec,
 	// or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve
-	// the placement.
+	// a new placement. An identical repeat on a locally unservable stored registration can return
+	// UNCHANGED or REACTIVATED with unservable_reason set; it does not claim this host serves it.
 	RegisterHarness(context.Context, *RegisterHarnessRequest) (*RegisterHarnessResponse, error)
 	// NOT_FOUND for a name that is neither STATIC nor registered.
 	GetHarness(context.Context, *GetHarnessRequest) (*HarnessRegistration, error)
