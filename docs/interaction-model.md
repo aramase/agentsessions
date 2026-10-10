@@ -137,6 +137,22 @@ completion rather than treating the first receive as the result. The SDK does th
 Deltas are transport only. They are never logged, never hash-chained, and never produced on replay,
 so the journal is identical whether or not anyone watched the turn.
 
+### Reading approval state
+
+`GetSession` and `ListSessions` report `EXEC_AWAITING` when the latest unfinished execution has an
+unanswered approval request in the journal through the returned `last_seq`. A later approval or
+denial matching the execution and tool-call IDs answers it; `END` finishes the turn. `ERROR` and
+compute lifecycle transitions do not clear awaiting. These queries neither change the journal nor
+probe a live worker. See [status derivation](concepts.md#metadata-and-listing) for execution selection
+and legacy fallback rules.
+
+The session returned by `CreateSession`, `Fork`, `Suspend`, `Resume` or the initial `Exec` frame
+still uses the metadata-only fallback: `PENDING` for empty histories, `COMPLETED` otherwise. Poll a
+query RPC for approval state. Copied fork requests can report awaiting but do not authorize inherited
+effects. There is no approval gate or decision RPC, and `REQUIRES_APPROVAL` execution remains
+unsupported. Correlation has no unique request ID, so a stale duplicate decision for a reused call
+ID within one execution cannot be distinguished from an answer to the new request.
+
 ## Choosing a client
 
 Same protocol underneath, so moving between these is never a rewrite.
@@ -210,8 +226,9 @@ Real today, and worth knowing before you build on it:
   startup; there is no API to add one to a running host.
 - **History is pushed whole on every turn.** The controller hands the harness the full log each
   time, which is fine for demos and does not scale to long sessions.
-- **`exec_state` does not distinguish an interrupted turn** from a completed one. Recovery keys off
-  the log, not off that field.
+- **`exec_state` is not a live execution probe.** Get/List distinguish unanswered approvals, but
+  otherwise nonempty histories still report `COMPLETED`, including interrupted turns. Mutation
+  responses retain that fallback even with unanswered approvals. Recovery keys off the log.
 - **`Capabilities.streaming` is declared but unused.** Streaming comes from the model provider, not
   from a harness declaring it.
 

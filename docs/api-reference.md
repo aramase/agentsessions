@@ -1451,7 +1451,7 @@ stable when a session is created mid-pagination; an offset would skip or repeat 
 | metadata | [ResourceMetadata](#agentsessions-v1-ResourceMetadata) |  |  |
 | harness | [string](#string) |  |  |
 | model | [string](#string) |  | model-agnostic id |
-| exec_state | [ExecState](#agentsessions-v1-ExecState) |  | execution/turn axis |
+| exec_state | [ExecState](#agentsessions-v1-ExecState) |  | exec_state is derived from the journal up to last_seq; it is not a live probe. GetSession and ListSessions report EXEC_AWAITING when the latest execution is unfinished and has an APPROVAL_REQUEST with no matching APPROVAL_RESULT (same execution_id and tool_call_id). Otherwise an empty history is EXEC_PENDING and a nonempty one is EXEC_COMPLETED. Other RPCs report only PENDING or COMPLETED. |
 | compute_state | [ComputeState](#agentsessions-v1-ComputeState) |  | incarnation axis |
 | last_seq | [int64](#int64) |  | event-log cursor |
 | parent_uid | [string](#string) |  | fork lineage |
@@ -1571,7 +1571,7 @@ flattened lifecycle enum, because collapsing them loses which axis actually move
 | EXEC_STATE_UNSPECIFIED | 0 |  |
 | EXEC_PENDING | 1 |  |
 | EXEC_RUNNING | 2 |  |
-| EXEC_AWAITING | 3 | blocked on approval/input, resolved from the log |
+| EXEC_AWAITING | 3 | waiting on an approval decision |
 | EXEC_COMPLETED | 4 |  |
 | EXEC_FAILED | 5 |  |
 | EXEC_CANCELED | 6 |  |

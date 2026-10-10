@@ -35,7 +35,7 @@ const (
 	ExecState_EXEC_STATE_UNSPECIFIED ExecState = 0
 	ExecState_EXEC_PENDING           ExecState = 1
 	ExecState_EXEC_RUNNING           ExecState = 2
-	ExecState_EXEC_AWAITING          ExecState = 3 // blocked on approval/input, resolved from the log
+	ExecState_EXEC_AWAITING          ExecState = 3 // waiting on an approval decision
 	ExecState_EXEC_COMPLETED         ExecState = 4
 	ExecState_EXEC_FAILED            ExecState = 5
 	ExecState_EXEC_CANCELED          ExecState = 6
@@ -379,15 +379,20 @@ func (x *ComputeRef) GetFenceToken() int64 {
 }
 
 type Session struct {
-	state        protoimpl.MessageState `protogen:"open.v1"`
-	Metadata     *ResourceMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	Harness      string                 `protobuf:"bytes,2,opt,name=harness,proto3" json:"harness,omitempty"`
-	Model        string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`                                                                        // model-agnostic id
-	ExecState    ExecState              `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`             // execution/turn axis
-	ComputeState ComputeState           `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
-	LastSeq      int64                  `protobuf:"varint,5,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`                                                    // event-log cursor
-	ParentUid    string                 `protobuf:"bytes,6,opt,name=parent_uid,json=parentUid,proto3" json:"parent_uid,omitempty"`                                               // fork lineage
-	ForkSeq      int64                  `protobuf:"varint,7,opt,name=fork_seq,json=forkSeq,proto3" json:"fork_seq,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Metadata *ResourceMetadata      `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	Harness  string                 `protobuf:"bytes,2,opt,name=harness,proto3" json:"harness,omitempty"`
+	Model    string                 `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"` // model-agnostic id
+	// exec_state is derived from the journal up to last_seq; it is not a live probe.
+	// GetSession and ListSessions report EXEC_AWAITING when the latest execution is unfinished
+	// and has an APPROVAL_REQUEST with no matching APPROVAL_RESULT (same execution_id and
+	// tool_call_id). Otherwise an empty history is EXEC_PENDING and a nonempty one is
+	// EXEC_COMPLETED. Other RPCs report only PENDING or COMPLETED.
+	ExecState    ExecState    `protobuf:"varint,13,opt,name=exec_state,json=execState,proto3,enum=agentsessions.v1.ExecState" json:"exec_state,omitempty"`
+	ComputeState ComputeState `protobuf:"varint,14,opt,name=compute_state,json=computeState,proto3,enum=agentsessions.v1.ComputeState" json:"compute_state,omitempty"` // incarnation axis
+	LastSeq      int64        `protobuf:"varint,5,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`                                                    // event-log cursor
+	ParentUid    string       `protobuf:"bytes,6,opt,name=parent_uid,json=parentUid,proto3" json:"parent_uid,omitempty"`                                               // fork lineage
+	ForkSeq      int64        `protobuf:"varint,7,opt,name=fork_seq,json=forkSeq,proto3" json:"fork_seq,omitempty"`
 	// Recorded provenance, never enforced: it says on whose behalf a session was created, and the
 	// hash chain makes that record tamper-evident. Nothing in this implementation treats it as
 	// authorization. See docs/security.md.

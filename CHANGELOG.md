@@ -57,6 +57,16 @@ provide.
 
 ### Compatibility
 
+- `GetSession` and `ListSessions` now report `EXEC_AWAITING` for unanswered approval requests in
+  the latest unfinished ID-bearing execution, derived only through the returned `last_seq`.
+  Approval and denial both answer matching requests; `END` finishes the execution, while `ERROR`
+  and lifecycle transitions do not clear awaiting. Other nonempty histories retain `COMPLETED`,
+  including ID-less legacy histories; empty histories remain `PENDING`. Create/Fork/Suspend/Resume
+  responses and Exec's initial session frame retain the metadata-only fallback. Copied fork
+  requests are reporting evidence, not authorization. There is no approval gate or decision RPC;
+  `REQUIRES_APPROVAL` execution remains unsupported. Reused call IDs within one execution cannot
+  distinguish stale duplicate decisions from answers to a new request. No wire/schema change,
+  journal rewrite or live worker probe is required.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

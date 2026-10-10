@@ -121,17 +121,10 @@ func sessionProto(info sqlitelog.SessionInfo) (*v1.Session, error) {
 	return out, nil
 }
 
-// execStateOf reports the execution axis from the metadata row.
-//
-// It is a projection, with the same caveat as compute_state: it says what the log implies, not what
-// is happening right now. A session with no events has never run, so it is PENDING. Anything else
-// is reported COMPLETED, because Exec is synchronous and returns only after the turn reaches END.
-//
-// The case it cannot see is a turn interrupted mid-flight, which stays COMPLETED here until Resume
-// re-drives it. Distinguishing that needs the kind of the log's last event, and an event body is an
-// opaque blob no query can filter on, so answering it for a whole listing would mean decoding one
-// record per session. That is worth doing when something depends on the distinction; today nothing
-// does, and the recovery path keys off the log rather than off this field.
+// execStateOf retains the metadata-only fallback: no events means PENDING; every nonempty
+// history means COMPLETED, including interrupted turns. Mutation responses use this rendering.
+// Get/List alone refine it to AWAITING for unanswered approval evidence through the returned
+// cursor via querySessionProto. Neither rendering probes live execution; recovery uses the log.
 func execStateOf(info sqlitelog.SessionInfo) v1.ExecState {
 	if info.LastSeq == 0 {
 		return v1.ExecState_EXEC_PENDING
@@ -215,7 +208,7 @@ func (s *Service) GetSession(ctx context.Context, req *v1.GetSessionRequest) (se
 	if err != nil {
 		return nil, sessionStoreError(err, req.GetUid())
 	}
-	return sessionProto(info)
+	return s.querySessionProto(info)
 }
 
 // ListSessions enumerates sessions in a project, newest first, from the store rather than from any
@@ -254,7 +247,7 @@ func (s *Service) ListSessions(ctx context.Context, req *v1.ListSessionsRequest)
 	}
 	out := make([]*v1.Session, 0, len(page.Sessions))
 	for _, info := range page.Sessions {
-		sess, err := sessionProto(info)
+		sess, err := s.querySessionProto(info)
 		if err != nil {
 			return nil, err
 		}
