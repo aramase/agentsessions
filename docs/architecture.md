@@ -125,8 +125,9 @@ retiring it would refuse new sessions on the static one. Four checks keep the tw
 
 - At startup a host records its static and reserved names in the `reserved_harness_names` table, in
   one transaction with a check that none of them is registered. `NewHarnessRegistry` does this, and
-  so do `agentsessionsd` and embedded `agentctl`, which do not serve the registry
-  (`session.ReserveStaticHarnessNames`). A host refuses to start if one of its names is registered.
+  so does `agentsessionsd`, whether or not its operator listener is enabled. Embedded `agentctl`
+  reserves its static names with `session.ReserveStaticHarnessNames` but does not serve the registry.
+  A host refuses to start if one of its names is registered.
 - The migration to schema version 2 reserves every harness name a version 1 journal uses, in the
   transaction that creates the table: each session's harness and each harness recorded on an
   `EXECUTION_START` marker, since a turn can override the session's harness and Resume re-runs a
@@ -192,8 +193,12 @@ stateDiagram-v2
   process sharing the database is served after this host restarts. There is no delete, because
   `DeleteSession` does not exist yet and a harness with sessions must stay resolvable.
 
-The registry is an admin API and `agentsessionsd` does not serve it. It is wired in-process only, for
-tests and Go embedders; see [security.md](security.md).
+The registry is an admin API. `agentsessionsd` loads stored registrations on every start, even
+without the operator listener: existing sessions on retired harnesses still route to their backend.
+With `-registry-addr 127.0.0.1:8081` it serves `HarnessRegistry` alone on a separate, literal-loopback
+plaintext gRPC listener; the Sessions listener serves only Sessions. Its factory attaches remote
+harnesses without dialing during registration and requires `-model` for new remote registrations;
+this daemon does not support substrate placements. See [security.md](security.md).
 
 ## Runtime backends (`runtime/`)
 

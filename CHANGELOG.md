@@ -52,11 +52,21 @@ provide.
   and `Fork` are refused with `FAILED_PRECONDITION`, before anything is journaled, if the harness
   reports another id (`placement.WithDescriptorID`). A harness added with `placement.Registry.Add`
   shares the Registry's session guard, so overlapping calls for one session through it and a static
-  harness are `ABORTED` too. It is an admin API and `agentsessionsd` does not serve it yet: it is
-  available in-process through `session.NewHarnessRegistry` (see [security.md](docs/security.md)).
+  harness are `ABORTED` too. It is an admin API available in-process through
+  `session.NewHarnessRegistry` and, optionally, on `agentsessionsd`'s separate loopback operator
+  listener (see [security.md](docs/security.md)). `agentctl harness register|get|list|retire`
+  uses that listener with an explicit `--server` address.
 
 ### Compatibility
 
+- `agentsessionsd -registry-addr` is off by default. Enabling it creates a plaintext,
+  unauthenticated **local admin surface** on a separate literal-loopback listener; Sessions still
+  refuses registry RPCs, and neither listener gains TLS or authentication. Any local or same-pod
+  process that can reach it can administer harnesses. The daemon now loads persisted registrations
+  even when the listener is off, so existing sessions can still use retired harnesses after restart.
+  New remote registrations require `-model` (unlike inspecting, listing or retiring); substrate
+  placements are unsupported by this reference daemon. No Sessions transport/access guarantees
+  change.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

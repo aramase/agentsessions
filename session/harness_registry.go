@@ -47,8 +47,9 @@ type PlacerFactory func(name string, spec *v1.HarnessSpec) (p *placement.Placer,
 // Sessions service routes through.
 //
 // It is an admin surface: whoever can call RegisterHarness decides where the host sends session
-// history and whose credential pays for model calls. agentsessionsd does not serve it. Wire it
-// in-process, or on a listener only an operator can reach.
+// history and whose credential pays for model calls. agentsessionsd serves it only on an optional
+// separate literal-loopback listener; neither that listener nor Sessions authenticates callers.
+// Hosts that embed it must keep it off the Sessions listener and protect its reachability.
 type HarnessRegistry struct {
 	v1.UnimplementedHarnessRegistryServer
 	store    *sqlitelog.Store
