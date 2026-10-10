@@ -57,6 +57,24 @@ Source of truth: api/*.proto. Edit the proto comments, not this file.
   
     - [Harness](#agentsessions-v1-Harness)
   
+- [harness_registry.proto](#harness_registry-proto)
+    - [GetHarnessRequest](#agentsessions-v1-GetHarnessRequest)
+    - [HarnessRegistration](#agentsessions-v1-HarnessRegistration)
+    - [HarnessSpec](#agentsessions-v1-HarnessSpec)
+    - [ListHarnessesRequest](#agentsessions-v1-ListHarnessesRequest)
+    - [ListHarnessesResponse](#agentsessions-v1-ListHarnessesResponse)
+    - [RegisterHarnessRequest](#agentsessions-v1-RegisterHarnessRequest)
+    - [RegisterHarnessResponse](#agentsessions-v1-RegisterHarnessResponse)
+    - [RemotePlacement](#agentsessions-v1-RemotePlacement)
+    - [RetireHarnessRequest](#agentsessions-v1-RetireHarnessRequest)
+    - [SubstratePlacement](#agentsessions-v1-SubstratePlacement)
+  
+    - [HarnessSource](#agentsessions-v1-HarnessSource)
+    - [HarnessState](#agentsessions-v1-HarnessState)
+    - [RegisterOutcome](#agentsessions-v1-RegisterOutcome)
+  
+    - [HarnessRegistry](#agentsessions-v1-HarnessRegistry)
+  
 - [session.proto](#session-proto)
     - [CancelRequest](#agentsessions-v1-CancelRequest)
     - [ComputeRef](#agentsessions-v1-ComputeRef)
@@ -868,6 +886,257 @@ this against a runtime&#39;s RuntimeCapabilities.
 
 
 
+<a name="harness_registry-proto"></a>
+<p align="right"><a href="#top">Top</a></p>
+
+## harness_registry.proto
+The HarnessRegistry admin API: register, inspect and retire harnesses on a running host.
+
+A registration is immutable. Its spec is content-addressed by spec_digest, so registering the
+same spec under the same name again changes nothing, and a different spec under a taken name is
+refused. Retiring a harness refuses new sessions on it while every existing session keeps
+running, resuming and forking. Registering the identical spec again reactivates it.
+
+This service decides what the host dials and pays model calls for, so it is an operator
+surface, not a client one. agentsessionsd does not serve it; see docs/security.md.
+
+
+<a name="agentsessions-v1-GetHarnessRequest"></a>
+
+### GetHarnessRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  |  |
+| observe | [bool](#bool) |  | Also ask the harness to Describe itself, bounded by a host timeout. The result is in observed or observe_error; a failed Describe does not fail the call. |
+
+
+
+
+
+
+<a name="agentsessions-v1-HarnessRegistration"></a>
+
+### HarnessRegistration
+HarnessRegistration is one entry in the host&#39;s harness registry.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| metadata | [ResourceMetadata](#agentsessions-v1-ResourceMetadata) |  | metadata.name is the key that Session.harness and ExecRequest.harness refer to. metadata.uid is server-assigned and stays the same across UNCHANGED and REACTIVATED. metadata.project is unused: a registration is host-scoped. |
+| spec | [HarnessSpec](#agentsessions-v1-HarnessSpec) |  | Unset for a STATIC harness. |
+| spec_digest | [string](#string) |  | &#34;sha256:&#34; followed by the lowercase hex SHA-256 of the RFC 8785 (JCS) form of spec&#39;s proto3-JSON mapping, with proto field names, enum names, and unpopulated fields omitted. This is the same canonical form the journal hashes. Empty for a STATIC harness. |
+| state | [HarnessState](#agentsessions-v1-HarnessState) |  |  |
+| source | [HarnessSource](#agentsessions-v1-HarnessSource) |  |  |
+| retire_time | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  | Set while RETIRED: when the harness was first retired. |
+| retire_reason | [string](#string) |  | Set while RETIRED: the reason given when the harness was first retired. |
+| observed | [HarnessDescriptor](#agentsessions-v1-HarnessDescriptor) |  | Set only when GetHarnessRequest.observe is true and Describe succeeded: what the harness reported just now. Never stored. |
+| observe_error | [string](#string) |  | Set only when GetHarnessRequest.observe is true and Describe failed: why. |
+
+
+
+
+
+
+<a name="agentsessions-v1-HarnessSpec"></a>
+
+### HarnessSpec
+HarnessSpec is everything that decides what a session on this harness runs. It is the only
+input to spec_digest, so nothing descriptive (labels, operation ids, timestamps) belongs here.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| remote | [RemotePlacement](#agentsessions-v1-RemotePlacement) |  |  |
+| substrate | [SubstratePlacement](#agentsessions-v1-SubstratePlacement) |  |  |
+| capabilities | [Capabilities](#agentsessions-v1-Capabilities) |  | The contract the harness declares. resumability is required. Placement still gates every turn on the capabilities the harness reports through Describe. |
+| descriptor_id | [string](#string) |  | Expected HarnessDescriptor.id. When set, Exec, Resume and Fork are refused with FAILED_PRECONDITION, before anything is journaled, if the harness&#39;s Describe reports a different id. It is checked on every call, not at registration. Empty means not checked. The id is what the harness reports about itself, so this catches an address that reaches the wrong harness; it is not authentication. |
+
+
+
+
+
+
+<a name="agentsessions-v1-ListHarnessesRequest"></a>
+
+### ListHarnessesRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| page_size | [int32](#int32) |  | Maximum entries per page. 0 means 50; values above 500 are clamped to 500. Negative is INVALID_ARGUMENT. |
+| page_token | [string](#string) |  | Opaque cursor from a prior ListHarnessesResponse.next_page_token. Empty means the first page. |
+| include_retired | [bool](#bool) |  | Include RETIRED entries. STATIC entries are always included. |
+
+
+
+
+
+
+<a name="agentsessions-v1-ListHarnessesResponse"></a>
+
+### ListHarnessesResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| harnesses | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | repeated | In name order, STATIC and REGISTERED entries together. |
+| next_page_token | [string](#string) |  | Empty on the last page. |
+
+
+
+
+
+
+<a name="agentsessions-v1-RegisterHarnessRequest"></a>
+
+### RegisterHarnessRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  | An RFC 1123 DNS label: lowercase alphanumerics and &#39;-&#39;, starting and ending alphanumeric, at most 63 characters. |
+| spec | [HarnessSpec](#agentsessions-v1-HarnessSpec) |  |  |
+
+
+
+
+
+
+<a name="agentsessions-v1-RegisterHarnessResponse"></a>
+
+### RegisterHarnessResponse
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| harness | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) |  |  |
+| outcome | [RegisterOutcome](#agentsessions-v1-RegisterOutcome) |  |  |
+
+
+
+
+
+
+<a name="agentsessions-v1-RemotePlacement"></a>
+
+### RemotePlacement
+RemotePlacement is a harness already running at address, dialed over the Harness service.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| address | [string](#string) |  | unix:///path/to.sock or host:port. |
+
+
+
+
+
+
+<a name="agentsessions-v1-RetireHarnessRequest"></a>
+
+### RetireHarnessRequest
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | [string](#string) |  |  |
+| reason | [string](#string) |  | Recorded on the first retire only. |
+
+
+
+
+
+
+<a name="agentsessions-v1-SubstratePlacement"></a>
+
+### SubstratePlacement
+SubstratePlacement runs each session in its own actor created from an ActorTemplate. A host
+serves it only if it was built with a substrate placement backend; otherwise RegisterHarness
+returns FAILED_PRECONDITION.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| atespace | [string](#string) |  |  |
+| template | [string](#string) |  | ActorTemplate name. |
+
+
+
+
+
+ 
+
+
+<a name="agentsessions-v1-HarnessSource"></a>
+
+### HarnessSource
+
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| HARNESS_SOURCE_UNSPECIFIED | 0 |  |
+| HARNESS_SOURCE_STATIC | 1 | Built into the host or configured when it started. Never stored, always ACTIVE, and read-only through this API: its name cannot be registered or retired. |
+| HARNESS_SOURCE_REGISTERED | 2 | Created through RegisterHarness and stored in the host&#39;s journal database. |
+
+
+
+<a name="agentsessions-v1-HarnessState"></a>
+
+### HarnessState
+
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| HARNESS_STATE_UNSPECIFIED | 0 |  |
+| HARNESS_STATE_ACTIVE | 1 | New sessions may select it. |
+| HARNESS_STATE_RETIRED | 2 | New sessions are refused with FAILED_PRECONDITION. Existing sessions keep Exec, Resume, Suspend and Fork; fork children inherit the harness and are not new selections. |
+
+
+
+<a name="agentsessions-v1-RegisterOutcome"></a>
+
+### RegisterOutcome
+
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| REGISTER_OUTCOME_UNSPECIFIED | 0 |  |
+| REGISTER_OUTCOME_CREATED | 1 | The name was free; the registration is new and ACTIVE. |
+| REGISTER_OUTCOME_UNCHANGED | 2 | The name already held this spec and was ACTIVE. Nothing changed. |
+| REGISTER_OUTCOME_REACTIVATED | 3 | The name already held this spec and was RETIRED. It is ACTIVE again. |
+
+
+ 
+
+ 
+
+
+<a name="agentsessions-v1-HarnessRegistry"></a>
+
+### HarnessRegistry
+HarnessRegistry manages the harnesses a host can place sessions on. It is an admin API: a caller
+that can register a harness decides where the host sends session history and whose model calls it
+pays for.
+
+| Method Name | Request Type | Response Type | Description |
+| ----------- | ------------ | ------------- | ------------|
+| RegisterHarness | [RegisterHarnessRequest](#agentsessions-v1-RegisterHarnessRequest) | [RegisterHarnessResponse](#agentsessions-v1-RegisterHarnessResponse) | Returns CREATED, UNCHANGED or REACTIVATED. ALREADY_EXISTS when the name holds a different spec, or is taken by or reserved for a STATIC harness. FAILED_PRECONDITION when the host cannot serve the placement. |
+| GetHarness | [GetHarnessRequest](#agentsessions-v1-GetHarnessRequest) | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | NOT_FOUND for a name that is neither STATIC nor registered. |
+| ListHarnesses | [ListHarnessesRequest](#agentsessions-v1-ListHarnessesRequest) | [ListHarnessesResponse](#agentsessions-v1-ListHarnessesResponse) |  |
+| RetireHarness | [RetireHarnessRequest](#agentsessions-v1-RetireHarnessRequest) | [HarnessRegistration](#agentsessions-v1-HarnessRegistration) | Idempotent: retiring a RETIRED harness returns it unchanged. FAILED_PRECONDITION for a STATIC harness; NOT_FOUND for an unknown name. |
+
+ 
+
+
+
 <a name="session-proto"></a>
 <p align="right"><a href="#top">Top</a></p>
 
@@ -991,7 +1260,7 @@ reasoning) part. No seq; never hash-chained (§8, A2A TaskArtifactUpdateEvent).
 | session | [string](#string) |  | The session to run against. Empty creates one first, using the server defaults and the harness below, and returns it as the stream&#39;s first frame. A caller that wants to set a project, name, or model still calls CreateSession; this exists so the common case is one call rather than three (create, read the cursor, exec). |
 | inputs | [Message](#agentsessions-v1-Message) | repeated | Input messages for this turn. Empty = resume/re-drive the last non-terminal execution with no new input (recovery after a crash/interruption). |
 | resume_from_seq | [int64](#int64) |  | Cursor handed to the harness as Start.resume_from_seq. The host does not interpret it; only a harness knows what resuming from a sequence means for its own state. To re-read committed records after a disconnect, use Replay, which is the read path for exactly that. Non-zero cursors are journaled in EXECUTION_START and restored during controller replay/interrupted resume. |
-| harness | [string](#string) |  | empty = session default |
+| harness | [string](#string) |  | Empty = the session&#39;s harness. A different harness runs this turn only, unless either one is a registered harness (see HarnessRegistry): then the session is pinned and the call is FAILED_PRECONDITION. |
 | config | [bytes](#bytes) |  | Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume. Do not put credentials here: config is durable journal content exposed by Replay. |
 | expected_last_seq | [int64](#int64) | optional | Single-writer CAS: the host commits this execution&#39;s first event only if the log head equals expected_last_seq. A mismatch is ABORTED, meaning another writer advanced the log. It is optional because the guarantee should be opt-in rather than the price of a simple call. Unset means &#34;append at whatever the head is now&#34;, which is what a caller with a single writer wants. Set means the strict check, and 0 is a real value there: it asserts the session has no events yet. That distinction is why this carries explicit presence instead of treating 0 as &#34;unset&#34; -- a caller could not otherwise say &#34;this must be the first turn&#34;. |
 | deadline_unix | [int64](#int64) |  | optional execution deadline (unix seconds); host cancels past it |

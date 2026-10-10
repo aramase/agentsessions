@@ -82,6 +82,16 @@ backends, the turn runs on that harness and the host does not detect it. Registe
 address assumes the operator controls what serves that address, and that every harness that can
 answer there declares the same resumability.
 
+**Registering a harness is an admin action.** A caller that can register a harness chooses what the
+host dials, which means where it sends every session's history and whose model credential pays for
+that harness's calls. The `HarnessRegistry` API therefore has no place on the Sessions port, which
+anyone who can reach it can call. `agentsessionsd` does not serve it at all in this release; it is
+wired in-process only, for tests and Go embedders. An embedder that serves it must put it on a
+listener only an operator can reach, never beside the Sessions service. A registered remote harness
+is whatever answers at its address, as above. `HarnessSpec.descriptor_id` makes the host refuse a
+turn when the harness there reports another descriptor id, which catches a misdirected address; the
+id is what the harness says about itself, so it does not authenticate the harness.
+
 ## Deploying it
 
 Given the above, there is one safe shape for this release:

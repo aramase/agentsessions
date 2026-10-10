@@ -106,6 +106,95 @@ The `Placer` wires Sessions to the `Runtime` SPI and owns the incarnation lifecy
   `Runtime.Fork`. An N-way fan-out takes exactly one parent checkpoint, so all children branch from
   identical state.
 
+## Harness registry (`session/harness_registry.go`)
+
+`placement.Registry` maps a harness name to the Placer that runs it. Its entries come from two
+sources:
+
+- **Static** harnesses are built into the host or configured when it starts (the built-in `echo` and
+  `chat`, and each `agentsessionsd --harness name=address`). They are never stored, always active,
+  and read-only. Their names, plus any reserved built-in name the host is not serving right now,
+  cannot be registered.
+- **Registered** harnesses are added at runtime through the `HarnessRegistry` API
+  (`api/harness_registry.proto`) and stored in the `harnesses` table of the journal database
+  (schema version 2). The host loads every stored registration at startup, retired ones included.
+
+Several hosts can share one journal, and their static names can differ. A name must not be static on
+one and registered on another: the registered harness's sessions would run on the static one, and
+retiring it would refuse new sessions on the static one. Four checks keep the two apart:
+
+- At startup a host records its static and reserved names in the `reserved_harness_names` table, in
+  one transaction with a check that none of them is registered. `NewHarnessRegistry` does this, and
+  so do `agentsessionsd` and embedded `agentctl`, which do not serve the registry
+  (`session.ReserveStaticHarnessNames`). A host refuses to start if one of its names is registered.
+- The migration to schema version 2 reserves every harness name a version 1 journal uses, in the
+  transaction that creates the table: each session's harness and each harness recorded on an
+  `EXECUTION_START` marker, since a turn can override the session's harness and Resume re-runs a
+  pending turn on the name it recorded. All of them were static, and the host that migrates the
+  journal may not serve them.
+- `RegisterHarness` refuses a reserved name with `ALREADY_EXISTS`, checked in its own transaction, so
+  a host that is already running keeps its names.
+- A host that did not reserve its names fails closed: creating or routing a session on a static name
+  that has a registration row is `FAILED_PRECONDITION`.
+
+Reservations are never released, because the store cannot tell whether another host still serves the
+name.
+
+A registration is immutable. Its identity is the name plus `spec_digest`, a SHA-256 over the RFC 8785
+form of the spec's proto3-JSON, the same canonical form the journal hashes.
+
+```mermaid
+stateDiagram-v2
+  [*] --> ACTIVE: Register (CREATED)
+  ACTIVE --> ACTIVE: Register same spec (UNCHANGED)
+  ACTIVE --> RETIRED: Retire
+  RETIRED --> RETIRED: Retire (keeps first time and reason)
+  RETIRED --> ACTIVE: Register same spec (REACTIVATED)
+```
+
+- A different spec under a taken name is `ALREADY_EXISTS`; a new spec needs a new name.
+- **Retire refuses new sessions only.** The check runs in the same transaction as the session insert,
+  so once `RetireHarness` returns no new session can land on the harness. Existing sessions keep
+  `Exec`, `Suspend`, `Resume` and `Fork`; fork children inherit the harness.
+- **Registered harnesses pin their sessions.** `ExecRequest.harness` that differs from the session's
+  harness is `FAILED_PRECONDITION` when either harness is registered, whether or not this host has
+  loaded it, so no session can run turns on a registered harness it was not created on, retired or
+  not. `Resume` of an interrupted turn recorded on another harness applies the same rule, also when
+  the name was registered after the turn was recorded. Overrides that involve no registered harness
+  keep working as before.
+- **Recovery uses the recorded identity, not the registry's state.** Each turn's `EXECUTION_START`
+  records the registry name and the harness's advertised `Descriptor.Version`, and `Resume` of an
+  interrupted turn routes to that name, where the controller requires the recorded version (see
+  [concepts.md](concepts.md)). A registration is never replaced or removed, and retiring one leaves
+  it loaded, so a recorded name keeps resolving to the same `spec_digest`. The registry adds no
+  version check of its own: `spec_digest` fixes what the host dials, and the recorded version is
+  the only check on what answers there.
+- **One session guard per registry.** `Registry.Add` gives a registered harness's Placer the same
+  session guard as the static ones, so overlapping `Exec`, `Suspend` and `Resume` on one session are
+  `ABORTED` whichever of its Placers each call reaches. A `PlacerFactory` returns a new Placer for
+  each call; one already used or registered elsewhere is not supported.
+- **How placements are served is the host's choice.** A `PlacerFactory` turns a spec into a Placer, or
+  refuses a placement the host cannot serve (`FAILED_PRECONDITION`, nothing stored). It must not dial,
+  so a harness that is down does not keep the host from starting. A spec with a field or enum value
+  the host does not understand is `INVALID_ARGUMENT`. For a `RemotePlacement`, `runtime/remote` is the
+  backend, the same one `agentsessionsd --harness` uses.
+- **`descriptor_id` is checked on every turn.** The factory builds the Placer with
+  `placement.WithDescriptorID(spec.descriptor_id)`, and the registry refuses a Placer that does not
+  expect exactly that id, so a factory that drops it fails closed. The Placer then refuses `Exec`,
+  `Resume` and `Fork` with `FAILED_PRECONDITION` when the harness's `Describe` reports another id, at
+  the same gate that applies `CanPlace`: before compute is touched or anything is journaled, and,
+  for `runtime/remote`, again on the connection that runs the turn. The id is self-reported, so this
+  catches an address that reaches the wrong harness, not an impostor. Empty means not checked.
+- **Known limits.** The declared `capabilities` are stored, not compared with what the harness reports;
+  placement still gates every turn on the live `Describe`. `descriptor_id` is not checked at
+  registration, only when a call places the harness, and like the capability check it is not bound
+  to the turn's `Connect` stream (see [security.md](security.md)). A registration made by another
+  process sharing the database is served after this host restarts. There is no delete, because
+  `DeleteSession` does not exist yet and a harness with sessions must stay resolvable.
+
+The registry is an admin API and `agentsessionsd` does not serve it. It is wired in-process only, for
+tests and Go embedders; see [security.md](security.md).
+
 ## Runtime backends (`runtime/`)
 
 - **`runtime/local`** — filesystem-only, serves the harness over a unix socket. `MemorySnapshot=false`, so

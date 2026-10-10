@@ -44,7 +44,7 @@ func (s *Server) Describe(ctx context.Context, _ *v1.DescribeRequest) (*v1.Harne
 	if err != nil {
 		return nil, err
 	}
-	return descriptorToProto(d), nil
+	return DescriptorToProto(d), nil
 }
 
 // Connect drives one execution: it reads the Start frame, runs the harness with a streaming sink,
@@ -407,7 +407,8 @@ func startFromProto(p *v1.Start) *api.Start {
 	return out
 }
 
-func descriptorToProto(d api.Descriptor) *v1.HarnessDescriptor {
+// DescriptorToProto renders a harness descriptor as the wire type Describe returns.
+func DescriptorToProto(d api.Descriptor) *v1.HarnessDescriptor {
 	out := &v1.HarnessDescriptor{
 		Id:           d.ID,
 		Version:      d.Version,

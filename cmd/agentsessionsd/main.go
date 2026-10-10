@@ -106,12 +106,15 @@ func run() error {
 	}
 	defer closeBackends()
 
+	svc, err := sessionService(store, registry, logger, *project)
+	if err != nil {
+		return err
+	}
 	srv := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(observability.UnaryServerInterceptor(logger)),
 		grpc.ChainStreamInterceptor(observability.StreamServerInterceptor(logger)),
 	)
-	v1.RegisterSessionsServer(srv, session.NewService(store, registry,
-		session.WithLogger(logger), session.WithDefaultProject(*project)))
+	v1.RegisterSessionsServer(srv, svc)
 
 	lis, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -335,12 +338,17 @@ func remotesNeedModel(model string, remotes remoteHarnesses) error {
 	return nil
 }
 
+// reservedHarnesses names every harness this binary can serve itself, whatever its flags. All of them
+// are reserved in the journal, chat included on a host started without -model, so a registered
+// harness cannot take "chat" and then collide with it the next time the host starts with -model.
+var reservedHarnesses = []string{"chat", "echo"}
+
 // builtinHarnesses names the harnesses this binary serves itself: echo always, and chat with -model.
 func builtinHarnesses(model string) []string {
 	if model == "" {
 		return []string{"echo"}
 	}
-	return []string{"chat", "echo"}
+	return slices.Clone(reservedHarnesses)
 }
 
 // checkRemotes runs the -harness checks that need no side effect, so main can refuse a misconfigured
@@ -404,12 +412,26 @@ func harnessRegistry(model string, remotes remoteHarnesses, modelFn controller.M
 		remoteBackends = append(remoteBackends, backend)
 		placers[name] = placement.New(backend, modelFn, opts...)
 	}
-	registry, err := placement.NewRegistry("echo", placers)
+	// The -harness names are static entries, so ReserveStaticHarnessNames reserves them along with
+	// the built-in ones.
+	registry, err := placement.NewRegistry("echo", placers, placement.WithReservedNames(reservedHarnesses...))
 	if err != nil {
 		closeBackends()
 		return nil, nil, fmt.Errorf("build harness registry: %w", err)
 	}
 	return registry, closeBackends, nil
+}
+
+// sessionService builds the Sessions service, after reserving this host's harness names in the
+// journal. This host does not serve the registry, but a Go host that does may share the journal,
+// and its static names can differ: a registration named "echo" would otherwise mean a second
+// harness under the built-in name. Reserving refuses a journal that already holds such a
+// registration, and makes the other host refuse one made later.
+func sessionService(store *sqlitelog.Store, registry *placement.Registry, logger *slog.Logger, project string) (*session.Service, error) {
+	if err := session.ReserveStaticHarnessNames(store, registry); err != nil {
+		return nil, fmt.Errorf("journal: %w", err)
+	}
+	return session.NewService(store, registry, session.WithLogger(logger), session.WithDefaultProject(project)), nil
 }
 
 // modelFunc selects the model the host mediates. Empty -model keeps the built-in echo model so the

@@ -499,7 +499,9 @@ Or create and run the first turn in one call:
 That prints `session <uid>`; use that UID with `--session` for subsequent turns. The Go client
 already supports the same selection with `client.ExecOptions{Harness: "chat", Inputs: ...}`.
 On an existing session, `exec --harness` overrides the harness for that turn only; omitting it
-uses the stored session harness.
+uses the stored session harness. A registered harness cannot take part in an override: a session
+on one is pinned to it, and one cannot be borrowed for a single turn, so either is
+`FAILED_PRECONDITION`.
 
 With `--model` set, `agentsessionsd` registers `chat` alongside `echo`, each on its own
 `runtime/local.Backend`, using the configured host-side `model/openai` client. Echo remains the

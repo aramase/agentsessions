@@ -78,6 +78,11 @@ func TestHarnessRegistry(t *testing.T) {
 			if registry.Default() != "echo" {
 				t.Fatalf("default = %q, want echo", registry.Default())
 			}
+			for _, name := range []string{"echo", "chat"} {
+				if !registry.Reserved(name) {
+					t.Fatalf("built-in harness name %q is not reserved", name)
+				}
+			}
 			defaultPlacer, err := registry.For("")
 			if err != nil {
 				t.Fatal(err)
@@ -663,4 +668,53 @@ func serveHarness(t *testing.T, h api.Harness) string {
 	t.Helper()
 	addr, _ := serveStoppableHarness(t, h)
 	return addr
+}
+
+// The daemon does not serve the registry, but it refuses a journal in which another host registered
+// one of its built-in names, active or retired, chat even when it is not configured, or a name
+// given with -harness.
+func TestSessionServiceRefusesRegistrationCollision(t *testing.T) {
+	registry, closeBackends, err := harnessRegistry("", nil, echoagent.Model, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeBackends)
+	// A -harness name is a static entry like the built-in ones. Building the registry dials nothing,
+	// so the address need not be served.
+	withRemote, closeWithRemote, err := harnessRegistry("test-model", remoteHarnesses{"shouty": "127.0.0.1:9000"}, echoagent.Model, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeWithRemote)
+	for _, tc := range []struct {
+		registry *placement.Registry
+		name     string
+		retire   bool
+		wantErr  bool
+	}{
+		{registry: registry, name: "echo", wantErr: true},
+		{registry: registry, name: "echo", retire: true, wantErr: true},
+		{registry: registry, name: "chat", wantErr: true},
+		{registry: registry, name: "suite-agent"},
+		{registry: registry, name: "shouty"},
+		{registry: withRemote, name: "shouty", wantErr: true},
+		{registry: withRemote, name: "suite-agent"},
+	} {
+		store, err := sqlitelog.Open(t.TempDir() + "/journal.db")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.RegisterHarness(sqlitelog.HarnessRecord{Name: tc.name, UID: "u", Spec: "{}", SpecDigest: "d"}); err != nil {
+			t.Fatal(err)
+		}
+		if tc.retire {
+			if _, err := store.RetireHarness(tc.name, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := sessionService(store, tc.registry, nil, sqlitelog.DefaultProject); (err != nil) != tc.wantErr {
+			t.Errorf("registration %q (retired %v): got %v, want error %v", tc.name, tc.retire, err, tc.wantErr)
+		}
+		_ = store.Close()
+	}
 }
