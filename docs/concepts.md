@@ -71,9 +71,21 @@ enumerate a tenant it did not ask for. Results are newest first and paged with a
 the last `(create time, uid)` seen, so a session created while a caller walks pages neither skips
 nor duplicates a row.
 
-Two fields are derived rather than stored:
+Status fields reflect journal evidence:
 
 - `last_seq` is `MAX(seq)` over the log, so the cursor a listing reports is always the log's own.
+- `exec_state` on `GetSession` and `ListSessions` is derived through the returned `last_seq`.
+  The latest execution is selected by first-seen nonempty execution ID on non-lifecycle events;
+  late events for older IDs cannot select them again. An unfinished latest execution with an
+  unanswered `APPROVAL_REQUEST` reports `AWAITING`. Requests require an approval body and nonempty
+  execution and tool-call IDs. A later `APPROVAL_RESULT` with a result body and the same execution
+  and call IDs answers the request, whether approved or denied; a decision before the request
+  does not. `END` finishes the execution; `ERROR` and lifecycle records do not clear awaiting.
+  ID-bearing markerless histories work the same way. Other nonempty histories, including ID-less
+  legacy histories and interrupted turns without unanswered approvals, retain `COMPLETED`; empty
+  histories report `PENDING`. This is not a live execution probe. `CreateSession`, `Fork`,
+  `Suspend`, `Resume` and Exec's initial session frame retain the empty/nonempty fallback without
+  reading approval evidence. Poll `GetSession` or `ListSessions` for approval state.
 - `compute_state` is a projection maintained in the same transaction that appends an event, since an
   event body is an opaque blob no query can filter on. It records **what the log implies about
   compute**, not a live probe of the backend. Any ordinary event moves a session to `LIVE`, because
@@ -82,6 +94,12 @@ Two fields are derived rather than stored:
   makes it visible in a listing before it has any compute. `LIVE` goes stale if the process behind
   it later died. A backend that can enumerate its own incarnations is the thing that would make this
   exact; reconciling against the runtime is not implemented.
+
+Approval reporting does not implement a gate or a decision RPC: `REQUIRES_APPROVAL` tool execution
+remains unsupported. The current correlation fields are execution ID and tool-call ID, not a unique
+request ID. If a call ID is reused within one execution, a stale duplicate decision cannot be
+distinguished from an answer to the new request. A copied unanswered fork request remains awaiting
+evidence in the child, not permission to execute the parent's inherited intent.
 
 A fork inherits the parent's `project`, `harness` and `model`, because those define the workload and
 a branch of a run is still that run. It does **not** inherit the parent's name. A name is a label the
