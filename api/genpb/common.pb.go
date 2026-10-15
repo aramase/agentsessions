@@ -2008,8 +2008,15 @@ type ExecutionStart struct {
 	// match (including rejection of an empty served version) before running the harness.
 	// Empty recorded versions retain existing behavior; this field is opt-in, not required.
 	HarnessVersion string `protobuf:"bytes,5,opt,name=harness_version,json=harnessVersion,proto3" json:"harness_version,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Opaque identity of the compute instance the turn was placed on, set only when the harness keeps
+	// its state in that instance's memory (REQUIRES_MEMORY_SNAPSHOT) and the backend can tell two
+	// instances behind the same name apart (substrate: the actor's server-assigned UID). The host
+	// refuses a later turn, or a Resume, whose compute reports a different identity than the latest
+	// one recorded on that harness since the session's FORK marker: the state is gone. Empty means
+	// not recorded, and such a turn is not compared.
+	ComputeInstance string `protobuf:"bytes,6,opt,name=compute_instance,json=computeInstance,proto3" json:"compute_instance,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ExecutionStart) Reset() {
@@ -2073,6 +2080,13 @@ func (x *ExecutionStart) GetHarness() string {
 func (x *ExecutionStart) GetHarnessVersion() string {
 	if x != nil {
 		return x.HarnessVersion
+	}
+	return ""
+}
+
+func (x *ExecutionStart) GetComputeInstance() string {
+	if x != nil {
+		return x.ComputeInstance
 	}
 	return ""
 }
@@ -2603,14 +2617,15 @@ const file_common_proto_rawDesc = "" +
 	"\x0eLIFECYCLE_FORK\x10\x03\x12\x16\n" +
 	"\x12LIFECYCLE_BASELINE\x10\x04\x12\x14\n" +
 	"\x10LIFECYCLE_CANCEL\x10\x05\x12\x14\n" +
-	"\x10LIFECYCLE_DELETE\x10\x06\"\xc9\x01\n" +
+	"\x10LIFECYCLE_DELETE\x10\x06\"\xf4\x01\n" +
 	"\x0eExecutionStart\x12\x16\n" +
 	"\x06config\x18\x01 \x01(\fR\x06config\x12&\n" +
 	"\x0fresume_from_seq\x18\x02 \x01(\x03R\rresumeFromSeq\x12$\n" +
 	"\vinput_count\x18\x03 \x01(\x03H\x00R\n" +
 	"inputCount\x88\x01\x01\x12\x18\n" +
 	"\aharness\x18\x04 \x01(\tR\aharness\x12'\n" +
-	"\x0fharness_version\x18\x05 \x01(\tR\x0eharnessVersionB\x0e\n" +
+	"\x0fharness_version\x18\x05 \x01(\tR\x0eharnessVersion\x12)\n" +
+	"\x10compute_instance\x18\x06 \x01(\tR\x0fcomputeInstanceB\x0e\n" +
 	"\f_input_count\"\xb8\a\n" +
 	"\x05Event\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12*\n" +

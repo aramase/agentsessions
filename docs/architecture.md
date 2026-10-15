@@ -241,7 +241,11 @@ See [security.md](security.md).
 - **`runtime/substrate`** — agent-substrate (actors on pre-warmed workers, RAM+disk memory snapshots).
   `MemorySnapshot=true`. It depends only on a `ControlClient` interface **defined in the core**; the real
   ate-api adapter lives in a separate module (`integrations/substrate/`) so the core imports zero
-  substrate code. See [`substrate-conformance.md`](substrate-conformance.md).
+  substrate code. Its tier is declared in configuration, and it refuses to cold-create an actor for
+  a `REQUIRES_MEMORY_SNAPSHOT` session that already has started turns on that harness
+  (`FAILED_PRECONDITION`). See
+  [`substrate-conformance.md`](substrate-conformance.md), including the open questions under
+  [Substrate placement binding](substrate-conformance.md#substrate-placement-binding).
 
 ## Conformance (`conformance/`)
 

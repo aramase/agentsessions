@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/runtime/substrate"
 	atepb "github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc"
@@ -27,6 +29,12 @@ type fakeControl struct {
 	actor      *atepb.Actor
 	getErr     error
 	tagErr     error
+	createErr  error
+	resumeErr  error
+	suspendErr error
+	// onGet, when set, runs before GetActor answers its n-th call (1-based).
+	onGet func(n int)
+	gets  int
 }
 
 func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
@@ -34,14 +42,23 @@ func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorReques
 	f.calls = append(f.calls, "create:"+a.GetMetadata().GetAtespace()+"/"+a.GetMetadata().GetName()+
 		":tmpl="+a.GetActorTemplate().GetAtespace()+"/"+a.GetActorTemplate().GetName())
 	f.lastCreate = a
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	return a, nil
 }
 func (f *fakeControl) ResumeActor(_ context.Context, in *atepb.ResumeActorRequest, _ ...grpc.CallOption) (*atepb.ResumeActorResponse, error) {
 	f.calls = append(f.calls, "resume:"+in.GetActor().GetAtespace()+"/"+in.GetActor().GetName())
+	if f.resumeErr != nil {
+		return nil, f.resumeErr
+	}
 	return &atepb.ResumeActorResponse{Actor: f.actor, Resumed: true}, nil
 }
 func (f *fakeControl) SuspendActor(_ context.Context, in *atepb.SuspendActorRequest, _ ...grpc.CallOption) (*atepb.SuspendActorResponse, error) {
 	f.calls = append(f.calls, "suspend:"+in.GetActor().GetName())
+	if f.suspendErr != nil {
+		return nil, f.suspendErr
+	}
 	return &atepb.SuspendActorResponse{Actor: f.actor}, nil
 }
 func (f *fakeControl) DeleteActor(_ context.Context, in *atepb.DeleteActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
@@ -50,6 +67,10 @@ func (f *fakeControl) DeleteActor(_ context.Context, in *atepb.DeleteActorReques
 }
 func (f *fakeControl) GetActor(_ context.Context, in *atepb.GetActorRequest, _ ...grpc.CallOption) (*atepb.Actor, error) {
 	f.calls = append(f.calls, "get:"+in.GetActor().GetName())
+	f.gets++
+	if f.onGet != nil {
+		f.onGet(f.gets)
+	}
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -72,7 +93,7 @@ func (f *fakeControl) DeleteTag(_ context.Context, in *atepb.DeleteTagRequest, _
 
 func runningActor() *atepb.Actor {
 	return &atepb.Actor{
-		Metadata: &atepb.ResourceMetadata{Atespace: "space", Name: "sess-x"},
+		Metadata: &atepb.ResourceMetadata{Atespace: "space", Name: "sess-x", Uid: "0b5c3c56-6d5e-4f0e-9b1a-2f4d8c1e7a90"},
 		Status: &atepb.ActorStatus{
 			State: atepb.ActorState_ACTOR_STATE_RUNNING,
 			WorkerAssignment: &atepb.WorkerAssignment{
@@ -115,6 +136,43 @@ func TestCreateMapsTemplate(t *testing.T) {
 	}
 }
 
+// A name another caller already took is reported as substrate.ErrActorExists, keeping the gRPC
+// error, so the backend can attach to that actor; any other create error is returned unchanged.
+func TestCreateReportsATakenName(t *testing.T) {
+	ref := substrate.ActorRef{Atespace: "space", Name: "sess-x"}
+	tmpl := substrate.ObjectRef{Atespace: "space", Name: "echo"}
+	taken := status.Error(codes.AlreadyExists, "actor space/sess-x already exists")
+	err := FromClient(&fakeControl{createErr: taken}).CreateActor(context.Background(), ref, tmpl)
+	if !errors.Is(err, substrate.ErrActorExists) || !errors.Is(err, taken) {
+		t.Fatalf("taken name: err=%v, want ErrActorExists wrapping the AlreadyExists error", err)
+	}
+	other := status.Error(codes.FailedPrecondition, "template has no golden snapshot")
+	err = FromClient(&fakeControl{createErr: other}).CreateActor(context.Background(), ref, tmpl)
+	if errors.Is(err, substrate.ErrActorExists) || !errors.Is(err, other) {
+		t.Fatalf("other create error: err=%v, want it unchanged", err)
+	}
+}
+
+// GetActor reports the actor's server-assigned UID, which an actor created again under the same name
+// does not share.
+func TestGetReportsTheActorUID(t *testing.T) {
+	first := runningActor()
+	again := runningActor()
+	again.Metadata.Uid = "7f1e2d3c-4b5a-4968-8776-655443322110"
+	ref := substrate.ActorRef{Atespace: "space", Name: "sess-x"}
+	a, err := FromClient(&fakeControl{actor: first}).GetActor(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := FromClient(&fakeControl{actor: again}).GetActor(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.UID != first.GetMetadata().GetUid() || b.UID != again.GetMetadata().GetUid() || a.UID == b.UID {
+		t.Fatalf("UIDs = %q and %q, want the two actors' distinct metadata UIDs", a.UID, b.UID)
+	}
+}
+
 // ResumeActor reports the actor's state, its worker (diagnostics only) and the snapshot it holds.
 func TestResumeMapsActorState(t *testing.T) {
 	f := &fakeControl{actor: runningActor()}
@@ -126,6 +184,7 @@ func TestResumeMapsActorState(t *testing.T) {
 		Status:   substrate.StatusRunning,
 		Worker:   "echo-harness-7d9f-abcde",
 		Snapshot: "gs://b/atespaces/space/actors/u1/snapshots/s1",
+		UID:      "0b5c3c56-6d5e-4f0e-9b1a-2f4d8c1e7a90",
 	}
 	if info != want {
 		t.Fatalf("info=%+v want %+v", info, want)
@@ -275,8 +334,34 @@ func TestGetActorReportsNotFoundAsSentinel(t *testing.T) {
 	}
 }
 
+// Substrate refuses SuspendActor of a missing actor with NOT_FOUND (RPCService.SuspendActor in
+// cmd/ateapi/internal/controlapi/actor.go, from the store lookup in
+// cmd/ateapi/internal/controlapi/workflow_suspend.go). The ControlClient contract requires
+// ErrActorNotFound for it, as from GetActor, so a memory-tier Snapshot can report the session's
+// in-RAM state as lost; it is not ErrActorBusy, and substrate's reason is kept.
+func TestSuspendActorReportsNotFoundAsSentinel(t *testing.T) {
+	f := &fakeControl{suspendErr: status.Error(codes.NotFound, "Actor gone not found")}
+	_, err := FromClient(f).SuspendActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "gone"})
+	if !errors.Is(err, substrate.ErrActorNotFound) || errors.Is(err, substrate.ErrActorBusy) || !strings.Contains(err.Error(), "Actor gone not found") {
+		t.Fatalf("err=%v want ErrActorNotFound carrying substrate's reason", err)
+	}
+}
+
+// Substrate refuses ResumeActor of a missing actor with NOT_FOUND (RPCService.ResumeActor in
+// cmd/ateapi/internal/controlapi/actor.go). The adapter reports it as ErrActorNotFound, so a
+// memory-tier Restore reports the session's in-RAM state as lost from the resume itself; substrate's
+// reason is kept.
+func TestResumeActorReportsNotFoundAsSentinel(t *testing.T) {
+	f := &fakeControl{resumeErr: status.Error(codes.NotFound, "Actor space/gone not found")}
+	_, err := FromClient(f).ResumeActor(context.Background(), substrate.ActorRef{Atespace: "space", Name: "gone"})
+	if !errors.Is(err, substrate.ErrActorNotFound) || errors.Is(err, substrate.ErrActorBusy) || !strings.Contains(err.Error(), "Actor space/gone not found") {
+		t.Fatalf("err=%v want ErrActorNotFound carrying substrate's reason", err)
+	}
+}
+
 // A suspend yields the URI of the external snapshot the actor now holds, the handle the backend
-// records and later compares against GetActor to detect a superseded snapshot.
+// records and later compares against GetActor to detect a superseded snapshot, and the UID of the
+// actor it suspended, which a stateful fork compares with the one the journal recorded.
 func TestSuspendReturnsTheHeldSnapshot(t *testing.T) {
 	a := runningActor()
 	a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
@@ -286,8 +371,11 @@ func TestSuspendReturnsTheHeldSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "gs://b/atespaces/space/actors/u1/snapshots/s1"; got != want {
-		t.Fatalf("snapshot=%q want %q", got, want)
+	if want := "gs://b/atespaces/space/actors/u1/snapshots/s1"; got.Snapshot != want {
+		t.Fatalf("snapshot=%q want %q", got.Snapshot, want)
+	}
+	if want := a.GetMetadata().GetUid(); got.UID != want {
+		t.Fatalf("uid=%q want %q", got.UID, want)
 	}
 }
 
@@ -306,8 +394,8 @@ func TestSuspendWithoutCompletedSnapshotReturnsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "" {
-		t.Fatalf("snapshot=%q want empty: an in-progress snapshot is not one the actor holds", got)
+	if got.Snapshot != "" {
+		t.Fatalf("snapshot=%q want empty: an in-progress snapshot is not one the actor holds", got.Snapshot)
 	}
 }
 
@@ -353,9 +441,12 @@ func TestStatusMapping(t *testing.T) {
 		{atepb.ActorState_ACTOR_STATE_SUSPENDED, substrate.StatusSuspended},
 		{atepb.ActorState_ACTOR_STATE_PAUSED, substrate.StatusSuspended},
 		{atepb.ActorState_ACTOR_STATE_CRASHED, substrate.StatusTerminated},
-		{atepb.ActorState_ACTOR_STATE_RESUMING, substrate.StatusUnknown},
-		{atepb.ActorState_ACTOR_STATE_SUSPENDING, substrate.StatusUnknown},
+		{atepb.ActorState_ACTOR_STATE_RESUMING, substrate.StatusTransitioning},
+		{atepb.ActorState_ACTOR_STATE_SUSPENDING, substrate.StatusTransitioning},
+		{atepb.ActorState_ACTOR_STATE_PAUSING, substrate.StatusTransitioning},
+		{atepb.ActorState_ACTOR_STATE_DELETING, substrate.StatusUnknown},
 		{atepb.ActorState_ACTOR_STATE_REVERTING, substrate.StatusUnknown},
+		{atepb.ActorState_ACTOR_STATE_UNSPECIFIED, substrate.StatusUnknown},
 	} {
 		f := &fakeControl{actor: &atepb.Actor{
 			Metadata: &atepb.ResourceMetadata{Name: "a", Atespace: "s"},
@@ -368,5 +459,96 @@ func TestStatusMapping(t *testing.T) {
 		if info.Status != tc.want {
 			t.Fatalf("state %v -> %v, want %v", tc.s, info.Status, tc.want)
 		}
+	}
+}
+
+// Substrate refuses a resume, suspend or tag while another operation holds the actor's lease with
+// ABORTED (another host resuming the actor it just created, say). The adapter reports that as
+// substrate.ErrActorBusy, which the session service maps to a retryable ABORTED; any other failure
+// keeps its own error.
+func TestAbortedResumeAndSuspendAreBusy(t *testing.T) {
+	ref := substrate.ActorRef{Atespace: "space", Name: "sess-x"}
+	aborted := status.Error(codes.Aborted, "another operation is in progress for this actor")
+	ops := map[string]func(*fakeControl) error{
+		"resume": func(f *fakeControl) error {
+			_, err := FromClient(f).ResumeActor(context.Background(), ref)
+			return err
+		},
+		"suspend": func(f *fakeControl) error {
+			_, err := FromClient(f).SuspendActor(context.Background(), ref)
+			return err
+		},
+		"tag": func(f *fakeControl) error {
+			return FromClient(f).TagActor(context.Background(), ref, substrate.SnapshotID{Atespace: "space", Name: "fork-c"})
+		},
+	}
+	for name, op := range ops {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeControl{actor: runningActor(), resumeErr: aborted, suspendErr: aborted, tagErr: aborted}
+			if err := op(f); !errors.Is(err, substrate.ErrActorBusy) || !errors.Is(err, api.ErrComputeBusy) || !strings.Contains(err.Error(), "in progress") {
+				t.Fatalf("aborted %s: err=%v, want ErrActorBusy carrying substrate's reason", name, err)
+			}
+			unavailable := status.Error(codes.Unavailable, "ate-api unavailable")
+			f = &fakeControl{actor: runningActor(), resumeErr: unavailable, suspendErr: unavailable, tagErr: unavailable}
+			if err := op(f); err == nil || errors.Is(err, substrate.ErrActorBusy) {
+				t.Fatalf("unavailable %s: err=%v, want a failure that is not ErrActorBusy", name, err)
+			}
+		})
+	}
+}
+
+// Substrate answers ResumeActor with NOT_FOUND for a missing actor and also for one that exists but
+// whose template lacks a volume (createActorVolumes in cmd/ateapi/internal/controlapi/volumes.go).
+// Over the adapter, a memory-tier Restore and Create report the session's state lost only when
+// GetActor confirms the actor is gone (or, for Restore, no longer holds the snapshot); an actor that
+// still holds it keeps substrate's resume error.
+func TestResumeNotFoundOnAnExistingActorIsNotLostState(t *testing.T) {
+	const uri = "gs://b/atespaces/space/actors/u1/snapshots/s1"
+	volume := status.Error(codes.NotFound, `volume "scratch" not found in template`)
+	suspended := func() *atepb.Actor {
+		a := runningActor()
+		a.Status.State = atepb.ActorState_ACTOR_STATE_SUSPENDED
+		a.Status.WorkerAssignment = nil
+		return a
+	}
+	desc := api.Descriptor{ID: "counter", Capabilities: api.Capabilities{Resumability: api.ResumabilityRequiresMemorySnapshot}}
+	backend := func(f *fakeControl) *substrate.Backend {
+		return substrate.New(FromClient(f), "space", substrate.ObjectRef{Atespace: "space", Name: "counter"}, desc)
+	}
+	turns := func() (int, error) { return 1, nil }
+	ops := map[string]func(*substrate.Backend) error{
+		"restore": func(b *substrate.Backend) error {
+			_, err := b.Restore(context.Background(), api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: true})
+			return err
+		},
+		"create": func(b *substrate.Backend) error {
+			_, err := b.Create(context.Background(), &api.SessionSpec{SessionUID: "sess-x", StartedTurns: turns})
+			return err
+		},
+	}
+	for name, op := range ops {
+		t.Run(name+" of an actor that still exists keeps the resume error", func(t *testing.T) {
+			f := &fakeControl{actor: suspended(), resumeErr: volume}
+			err := op(backend(f))
+			if err == nil || errors.Is(err, api.ErrMemoryStateLost) || !strings.Contains(err.Error(), "not found in template") {
+				t.Fatalf("err=%v, want substrate's resume error, not lost state", err)
+			}
+		})
+		t.Run(name+" of an actor that is gone is lost state", func(t *testing.T) {
+			f := &fakeControl{actor: suspended(), resumeErr: status.Error(codes.NotFound, "Actor space/sess-x not found")}
+			if name == "restore" {
+				f.getErr = status.Error(codes.NotFound, "Actor space/sess-x not found")
+			} else {
+				// Create's first GetActor finds it SUSPENDED; it is gone by the second.
+				f.onGet = func(n int) {
+					if n == 2 {
+						f.getErr = status.Error(codes.NotFound, "Actor space/sess-x not found")
+					}
+				}
+			}
+			if err := op(backend(f)); !errors.Is(err, api.ErrMemoryStateLost) {
+				t.Fatalf("err=%v, want api.ErrMemoryStateLost", err)
+			}
+		})
 	}
 }

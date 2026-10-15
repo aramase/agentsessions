@@ -183,6 +183,8 @@ type Controller struct {
 	logger             *slog.Logger
 	sessionUID         string
 	harnessName        string
+	computeInstance    string
+	sameHarness        func(recorded string) bool
 }
 
 // New starts an incarnation over log. Unless the caller supplies a fence via WithFence, it advances
@@ -268,6 +270,11 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 	if _, err := legacyPrefix(history); err != nil {
 		return err
 	}
+	// Refuse compute that replaced the instance earlier turns ran on before anything is journaled.
+	// prior is exactly the journal the EXECUTION_START append below extends, or that append fails.
+	if err := c.checkComputeInstance(prior); err != nil {
+		return err
+	}
 
 	// Capture the actual supplied harness's advertised contract, not caller-provided version data.
 	// Failure leaves no invocation or inputs to recover.
@@ -287,6 +294,7 @@ func (c *Controller) Exec(ctx context.Context, har api.Harness, inputs []api.Mes
 			// Keep journaled bytes separate from Start.Config, which harness code can mutate.
 			Config: bytes.Clone(config), ResumeFromSeq: c.startResumeFromSeq, InputCount: &inputCount,
 			Harness: c.resolvedHarnessName(desc), HarnessVersion: desc.Version,
+			ComputeInstance: c.computeInstance,
 		},
 	})
 	if err != nil {

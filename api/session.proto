@@ -159,9 +159,11 @@ message ExecRequest {
   int64 resume_from_seq = 3;
   // Empty = the session's harness. A different harness runs this turn only, unless either one is
   // a registered harness (see HarnessRegistry): then the session is pinned and the call is
-  // FAILED_PRECONDITION. A stored REQUIRES_MEMORY_SNAPSHOT harness also refuses a
-  // STATELESS_REPLAY override before any fence or journal write: parking only the override
-  // cannot checkpoint the stored harness's live memory.
+  // FAILED_PRECONDITION. If either harness is REQUIRES_MEMORY_SNAPSHOT (and the two are not
+  // aliases of one entry), the call is FAILED_PRECONDITION too, before any compute is provisioned,
+  // fence minted or journal written: Suspend and Fork follow the session's harness, so they would
+  // not checkpoint or clone a memory-tier override's RAM, and parking only an override cannot
+  // checkpoint a memory-tier stored harness's live memory.
   string harness = 4;
   // Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled
   // verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume.
@@ -366,7 +368,7 @@ service Sessions {
   // and ordinary sessions use their stored default. An unserved recorded name is
   // FAILED_PRECONDITION, with no fallback.
   rpc Suspend(SuspendRequest) returns (Session); // cold, free worker
-  // A recorded STATELESS_REPLAY override of a stored REQUIRES_MEMORY_SNAPSHOT harness is
+  // A recorded override where either harness is REQUIRES_MEMORY_SNAPSHOT is
   // FAILED_PRECONDITION before compute changes or journal repair, as for Exec admission.
   // Otherwise an unresolved owned approval returns its current paused Session without runtime IO.
   // A call-only cut repairs the request; neither outcome proves cold compute. After a decision,

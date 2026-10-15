@@ -80,6 +80,11 @@ func (c *Controller) Resume(ctx context.Context, har api.Harness) (resumed bool,
 	if len(recs) == 0 {
 		return false, nil
 	}
+	// A Resume restores the session's compute whether or not a turn is pending, and the host records
+	// the resume afterwards, so refuse a replaced instance even when there is nothing to re-drive.
+	if err := c.checkComputeInstance(recs); err != nil {
+		return false, err
+	}
 
 	events := make([]api.Event, 0, len(recs))
 	for _, record := range recs {

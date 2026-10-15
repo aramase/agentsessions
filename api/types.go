@@ -145,6 +145,9 @@ type ExecutionStart struct {
 	InputCount     *int64
 	Harness        string // resolved registry name; empty legacy values use the session harness
 	HarnessVersion string // advertised opaque version; empty is unknown and retains legacy behavior
+	// ComputeInstance is Incarnation.ComputeInstance of the compute the turn was placed on; empty when
+	// the backend set none (a stateless harness, or a backend that cannot tell instances apart).
+	ComputeInstance string
 }
 
 // Lifecycle marks a compute/session transition in the log (§7). Baseline is a replay /

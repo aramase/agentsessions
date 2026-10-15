@@ -69,6 +69,17 @@ var describeTimeout = 10 * time.Second
 // codes.DeadlineExceeded or codes.Canceled. An interruption during Run does not wrap it.
 var ErrAdmissionInterrupted = errors.New("placement: admission interrupted")
 
+// ErrStatefulOverride is the memory-tier override rule: a turn on a harness other than the
+// session's own (an ExecRequest.harness override, or a recovery of a turn recorded on one; see
+// WithOverride) is refused when either harness is REQUIRES_MEMORY_SNAPSHOT. Suspend and Fork follow
+// the session's own harness, so they would neither checkpoint nor clone the state a memory-tier
+// override leaves in RAM; and a memory-tier session's RAM would miss the override's turn while an
+// approval park of the override reported the whole session cold. The Placer checks the override's
+// half on the descriptor it admits, before any compute is provisioned or anything is written to the
+// log, and again on the turn's own connection for a LiveDescriber backend; session.Service checks
+// the session harness's half before routing. Both surface as codes.FailedPrecondition.
+var ErrStatefulOverride = errors.New("placement: a per-turn harness override cannot involve a REQUIRES_MEMORY_SNAPSHOT harness")
+
 // Backend is the compute Runtime the Placer drives. It exposes the harness DESCRIPTOR so the Placer
 // can gate CanPlace before Create (placement must not provision compute to learn a harness's needs);
 // the harness itself is reached by dialing Incarnation.Address with Incarnation.CallMetadata on every
@@ -115,6 +126,11 @@ type Placer struct {
 	// stateful fork's checkpoint taken through one harness's Placer also covers a turn another Placer
 	// runs on the same session (ExecRequest.harness can differ from the session's default).
 	sessions *sessionSet
+
+	// registry is the Registry this Placer was given to, or nil for a standalone Placer. It is set
+	// before the Placer is in use (NewRegistry, Registry.Add) and never changes, so Exec can resolve a
+	// recorded harness name to the Placer that ran it.
+	registry *Registry
 }
 
 // sessionSet is the per-session state a checkpoint coordinates on. It is keyed by session UID
@@ -160,6 +176,7 @@ type execConfig struct {
 	config        []byte
 	resumeFromSeq int64
 	deadline      time.Time
+	override      bool
 }
 
 // WithHarness records the resolved registry name for this execution. Without a name, the
@@ -169,6 +186,14 @@ func WithHarness(name string) ExecOption {
 	return func(c *execConfig) { c.harness = name }
 }
 
+// WithOverride marks the execution as running on a harness other than the session's own (an
+// ExecRequest.harness override). The Placer then refuses a REQUIRES_MEMORY_SNAPSHOT harness with
+// ErrStatefulOverride before it provisions anything: Suspend and Fork route by the session's own
+// harness and would leave the state this turn builds unsnapshotted and uncloned.
+func WithOverride() ExecOption {
+	return func(c *execConfig) { c.override = true }
+}
+
 // ResumeOption configures one recovery attempt.
 type ResumeOption func(*resumeConfig)
 
@@ -176,6 +201,9 @@ type resumeConfig struct {
 	harness         string
 	observer        controller.Observer
 	expectedLastSeq *int64
+	// override is set when the pending turn was recorded on a harness other than the session's
+	// own; see WithOverride.
+	override bool
 }
 
 // WithResumeObserver reports newly committed recovery records and streaming chunks, including
@@ -227,6 +255,13 @@ func (p *Placer) controllerOpts(fence int64, sessionUID string, observer control
 		opts = append(opts, controller.WithToolExecutor(p.tool))
 	}
 	return opts
+}
+
+// computeInstance binds the controller to the compute instance inc was placed on, attributing a
+// recorded turn to this Placer as startedTurns does (ranHere), so the controller refuses compute that
+// replaced the instance this harness's earlier turns ran on.
+func (p *Placer) computeInstance(inc api.Incarnation) controller.Option {
+	return controller.WithComputeInstance(inc.ComputeInstance, p.ranHere)
 }
 
 // WithStreamingModel supplies a model that reports partial output, which the controller relays as
@@ -329,7 +364,11 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if state != nil && !state.Inherited && state.Receipt == nil {
 		return api.Incarnation{}, controller.ErrApprovalBlocked
 	}
-	if _, err := p.admit(ctx, sessionUID); err != nil {
+	desc, err := p.admit(ctx, sessionUID)
+	if err != nil {
+		return api.Incarnation{}, err
+	}
+	if err := refuseStatefulOverride(desc, cfg.override); err != nil {
 		return api.Incarnation{}, err
 	}
 
@@ -338,8 +377,17 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	if err = p.refuseDuringCheckpoint(sessionUID); err != nil {
 		return api.Incarnation{}, err
 	}
-	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute", "session_uid", sessionUID)
-	inc, err = p.backend.Create(ctx, &api.SessionSpec{SessionUID: sessionUID})
+	// The backend needs the started-turn count to tell a new session from one whose compute is gone:
+	// a memory-tier harness can be cold-started only for the former (api.ErrMemoryStateLost). Only
+	// turns this Placer ran count: a turn ExecRequest.harness sent to another harness left no state in
+	// this one's compute. The backend counts when it has seen the compute is missing, not here, so a
+	// turn another host journals in between is not missed (see api.SessionSpec.StartedTurns).
+	spec := &api.SessionSpec{SessionUID: sessionUID, StartedTurns: func() (int, error) {
+		return p.startedTurns(log)
+	}}
+	createFinished := observability.StartDebug(ctx, p.logger, "placement", "create_compute",
+		"session_uid", sessionUID)
+	inc, err = p.backend.Create(ctx, spec)
 	if err != nil {
 		createFinished(err, "error_kind", "runtime_create_failed")
 		return inc, err
@@ -370,7 +418,7 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 		}
 		return p.releaseHarness(ctx, sessionUID, inc.ID, live)
 	}
-	if err := p.recheck(ctx, sessionUID, har); err != nil {
+	if err := p.recheck(ctx, sessionUID, har, cfg.override); err != nil {
 		return inc, err
 	}
 
@@ -390,7 +438,8 @@ func (p *Placer) Exec(ctx context.Context, log eventlog.Store, sessionUID string
 	}
 	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer),
 		controller.WithStart(cfg.config, cfg.resumeFromSeq),
-		controller.WithHarness(cfg.harness))
+		controller.WithHarness(cfg.harness),
+		p.computeInstance(inc))
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return inc, err
@@ -432,11 +481,16 @@ func (p *Placer) admit(ctx context.Context, sessionUID string) (api.Descriptor, 
 // same address between Describe and Connect, the turn runs on it and this check does not detect
 // it. Registering a harness by address therefore assumes the operator controls what serves that
 // address; docs/security.md states the same limit.
-func (p *Placer) recheck(ctx context.Context, sessionUID string, har api.Harness) error {
+//
+// override repeats the ErrStatefulOverride check on the descriptor the connection reports.
+func (p *Placer) recheck(ctx context.Context, sessionUID string, har api.Harness, override bool) error {
 	if l, ok := p.backend.(LiveDescriber); !ok || !l.DescribesLiveHarness() {
 		return nil
 	}
-	_, err := p.gate(ctx, sessionUID, "verify_execution_harness", har.Describe)
+	desc, err := p.gate(ctx, sessionUID, "verify_execution_harness", har.Describe)
+	if err == nil {
+		err = refuseStatefulOverride(desc, override)
+	}
 	if err != nil && errors.Is(context.Cause(ctx), errSuperseded) {
 		// A checkpoint of the session ended this turn's connection during the check. Report the
 		// checkpoint, as turnError does for a running turn, and format the check's error with %v so
@@ -494,6 +548,16 @@ func (p *Placer) gate(ctx context.Context, sessionUID, op string, describe func(
 		"runtime_memory_snapshot", p.backend.Capabilities().MemorySnapshot,
 	)
 	return desc, nil
+}
+
+// refuseStatefulOverride returns ErrStatefulOverride for a REQUIRES_MEMORY_SNAPSHOT harness that
+// runs as an override of the session's own harness (see WithOverride).
+func refuseStatefulOverride(desc api.Descriptor, override bool) error {
+	if !override || desc.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
+		return nil
+	}
+	return fmt.Errorf("%w: harness %q is %s and the session's own harness is another one; Suspend and Fork follow the session's harness and would not checkpoint or clone this harness's state",
+		ErrStatefulOverride, desc.ID, desc.Capabilities.Resumability)
 }
 
 // controllerError maps only the controller's Describe boundary. Run, model and runtime errors
@@ -833,7 +897,9 @@ func (p *Placer) endHarnesses(ctx context.Context, sessionUID string, open []*li
 // Suspend transitions the incarnation to cold via SnapshotExternal, then records the SnapshotRef
 // in a SUSPEND lifecycle event so Resume can recover it from the tamper-evident chain (§5.1).
 // Snapshot owns dedicated compute release and retains the handles Restore needs; Stop would
-// destructively tear them down. Snapshot keys on the session id, so a minimal incarnation suffices.
+// destructively tear them down. Snapshot keys on the session id plus the compute instance the
+// journal last recorded, so a backend can refuse to checkpoint compute that replaced the one the
+// session's turns ran on (api.ErrMemoryStateLost); nothing is journaled then.
 //
 // Suspend does not interrupt a running turn. While an Exec or Resume of the session runs through
 // this Placer or its Registry, Suspend fails with ErrSessionBusy without touching compute or the
@@ -878,7 +944,17 @@ func (p *Placer) suspend(ctx context.Context, log eventlog.Store, sessionUID str
 	if err := eventlog.CheckWritable(log); err != nil {
 		return api.SnapshotRef{}, err
 	}
-	inc := api.Incarnation{ID: sessionUID}
+	// The snapshot must capture the compute the session's turns ran on, exactly as a stateful fork's
+	// does (forkSource): a SUSPEND recording a replacement's snapshot would put a checkpoint without
+	// the session's state on the chain. Pass the instance the journal last recorded for this
+	// Placer's harness so the backend refuses another actor (api.ErrMemoryStateLost); the session
+	// guard the caller holds keeps any turn of this Registry from recording a newer one meanwhile.
+	recs, err := log.Read(1)
+	if err != nil {
+		return api.SnapshotRef{}, fmt.Errorf("placement: read session journal: %w", err)
+	}
+	instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
+	inc := api.Incarnation{ID: sessionUID, ComputeInstance: instance}
 	ref, err = p.backend.Snapshot(ctx, inc, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, err
@@ -1016,7 +1092,11 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	}
 	// Gate before Restore, exactly as Exec does before Create: Resume re-drives an interrupted turn,
 	// so it must not reach a harness the backend cannot host.
-	if _, err := p.admit(ctx, sessionUID); err != nil {
+	desc, err := p.admit(ctx, sessionUID)
+	if err != nil {
+		return err
+	}
+	if err := refuseStatefulOverride(desc, cfg.override); err != nil {
 		return err
 	}
 	sourceFinished := observability.StartDebug(ctx, p.logger, "placement", "resolve_resume_source", "session_uid", sessionUID)
@@ -1064,7 +1144,7 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		}
 		return p.releaseHarness(ctx, sessionUID, inc.ID, live)
 	}
-	if err := p.recheck(ctx, sessionUID, har); err != nil {
+	if err := p.recheck(ctx, sessionUID, har, cfg.override); err != nil {
 		return err
 	}
 	// Retake the writer fence now that checkpoints can see this connection. Rechecking also
@@ -1081,7 +1161,8 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 	if err := live.checkSuperseded(ctx); err != nil {
 		return err
 	}
-	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer), controller.WithHarness(cfg.harness))
+	copts := append(p.controllerOpts(fence, sessionUID, cfg.observer), controller.WithHarness(cfg.harness),
+		p.computeInstance(inc))
 	c, err := controller.New(log, p.model, copts...)
 	if err != nil {
 		return err
@@ -1128,10 +1209,14 @@ func placementErrorKind(err error) string {
 		return "unplaceable"
 	case errors.Is(err, ErrDescriptorMismatch):
 		return "descriptor_mismatch"
+	case errors.Is(err, ErrStatefulOverride):
+		return "stateful_override"
 	case errors.Is(err, ErrHarnessUnavailable):
 		return "harness_unavailable"
 	case errors.Is(err, ErrCheckpointing):
 		return "checkpointing"
+	case errors.Is(err, api.ErrMemoryStateLost):
+		return "memory_state_lost"
 	case errors.Is(err, ErrSessionBusy), errors.Is(err, eventlog.ErrConflict):
 		return "conflict"
 	case errors.Is(err, eventlog.ErrFenced):
@@ -1338,7 +1423,18 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if atSeq != head {
 		return api.SnapshotRef{}, nil, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
 	}
-	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID}, api.SnapshotExternal)
+	// The snapshot must capture the compute the parent's turns ran on. If that was replaced under
+	// the same name, the replacement holds none of the parent's state, and every child cloned from
+	// it would run without it: a child's own compute is a clone with its own instance, and the FORK
+	// marker resets the comparison its turns make. Pass the instance the journal last recorded so
+	// the backend refuses a replacement (api.ErrMemoryStateLost). The records read here are the
+	// history the SUSPEND append below extends under its CAS on atSeq.
+	recs, err := parent.Read(1)
+	if err != nil {
+		return api.SnapshotRef{}, nil, fmt.Errorf("placement: read parent journal: %w", err)
+	}
+	instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
+	ref, err := p.backend.Snapshot(ctx, api.Incarnation{ID: parentUID, ComputeInstance: instance}, api.SnapshotExternal)
 	if err != nil {
 		return api.SnapshotRef{}, nil, err
 	}
@@ -1383,6 +1479,74 @@ func appendLifecycle(log eventlog.Store, lc api.Lifecycle) error {
 func appendLifecycleAt(log eventlog.Store, expectedLastSeq, fence int64, lc api.Lifecycle) error {
 	_, err := log.Append(expectedLastSeq, fence, api.Event{Kind: api.EventLifecycle, Lifecycle: &lc})
 	return err
+}
+
+// startedTurns counts the turns the journal records as started that ran on this Placer, the
+// inherited prefix of a forked child included: every EXECUTION_START, whether its turn completed,
+// failed or was interrupted, since a turn that did not complete may still have changed the harness's
+// state.
+//
+// A turn is attributed by the harness name its EXECUTION_START recorded (ranHere). A turn that cannot
+// be attributed (a turn with no recorded name, a name this host does not serve, any turn on a Placer
+// outside a Registry, or a legacy turn written before EXECUTION_START existed) is counted:
+// undercounting would let a memory-tier backend cold-create compute for a session whose state it
+// held, while overcounting can only refuse.
+func (p *Placer) startedTurns(log eventlog.Store) (int, error) {
+	recs, err := log.Read(1)
+	if err != nil {
+		return 0, fmt.Errorf("placement: read journal: %w", err)
+	}
+	n := 0
+	inLegacyTurn := false
+	for _, rec := range recs {
+		ev := rec.Event
+		switch {
+		case ev.Kind == api.EventExecutionStart:
+			inLegacyTurn = false
+			recorded := ""
+			if ev.ExecutionStart != nil {
+				recorded = ev.ExecutionStart.Harness
+			}
+			if p.ranHere(recorded) {
+				n++
+			}
+		case ev.ExecutionID == "" && isLegacyTurnEvent(ev.Kind):
+			// A legacy turn has no EXECUTION_START: it is a run of events with no execution ID that
+			// an END or ERROR closes, or that is still open at the tail.
+			if !inLegacyTurn {
+				n++
+				inLegacyTurn = true
+			}
+			if ev.Kind == api.EventEnd || ev.Kind == api.EventError {
+				inLegacyTurn = false
+			}
+		}
+	}
+	return n, nil
+}
+
+// isLegacyTurnEvent reports whether an event of kind k with no execution ID belongs to a turn written
+// before EXECUTION_START existed (the kinds controller.legacyPrefix accepts, lifecycle excluded).
+func isLegacyTurnEvent(k api.EventKind) bool {
+	switch k {
+	case api.EventInput, api.EventModelCall, api.EventOutput, api.EventToolCall,
+		api.EventToolResult, api.EventUsage, api.EventEnd, api.EventError:
+		return true
+	}
+	return false
+}
+
+// ranHere reports whether a turn recorded under the harness name recorded may have run on this
+// Placer. In a Registry the answer is whether recorded resolves to this Placer, so a name that
+// aliases it counts. A standalone Placer has one backend and no map from names to backends, so a
+// turn recorded under any name may have run on it: every turn counts. Every case it cannot decide
+// counts as this Placer's.
+func (p *Placer) ranHere(recorded string) bool {
+	if recorded == "" || p.registry == nil {
+		return true
+	}
+	q, ok := p.registry.lookup(recorded)
+	return !ok || q == p
 }
 
 // lastSuspendRef returns the SnapshotRef from the most recent SUSPEND event THIS session wrote, or —
