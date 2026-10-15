@@ -732,7 +732,8 @@ func TestCreateWithNoTurnCountCreates(t *testing.T) {
 // Restore resumes the actor that holds the session's snapshot. When a REQUIRES_MEMORY_SNAPSHOT
 // session's actor no longer exists, the snapshot went with it, so Restore reports ErrMemoryStateLost
 // (FAILED_PRECONDITION at the Sessions API) instead of the resume error, and creates nothing. Every
-// other failure keeps the resume error.
+// other failure keeps the resume error, including a NOT_FOUND resume of the actor the journal
+// recorded, which substrate also answers for an actor whose template volume is missing.
 func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 	memory := func(m *mockControl) *substrate.Backend { return newMemoryBackend(m) }
 	stateless := func(m *mockControl) *substrate.Backend { return newBackend(m) }
@@ -745,6 +746,7 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 		getErr    error
 		holds     string // the snapshot the existing actor holds
 		snapshot  string // the ExternalURI restored: "" is gs://snap/sess-x, "-" is none
+		recorded  string // the UID RestoreInstance reads: "" calls Restore, "!" fails the read
 		resumeErr error  // nil: resumeErr below, which GetActor has to classify
 		wantCalls []string
 		wantLost  bool
@@ -764,8 +766,19 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 			resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true},
 		{name: "memory tier whose resume reports the actor missing and which is replaced", backend: memory, existing: substrate.StatusSuspended,
 			resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true, wantMsg: "no longer holds the snapshot"},
-		{name: "memory tier whose resume reports the actor missing and no snapshot to compare", backend: memory, existing: substrate.StatusSuspended,
-			holds: "gs://snap/sess-x", snapshot: "-", resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true},
+		// With no snapshot recorded (a host died during a turn), the actor's UID decides: only one
+		// other than the UID the journal recorded is a replacement.
+		{name: "memory tier whose resume reports the actor missing, with no snapshot and no UID to compare, keeps the resume error", backend: memory,
+			existing: substrate.StatusRunning, snapshot: "-", resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}},
+		{name: "memory tier whose resume reports the recorded actor missing, with no snapshot, keeps the resume error", backend: memory,
+			existing: substrate.StatusRunning, snapshot: "-", recorded: "uid-sess-x-1", resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x", "read-record"}},
+		{name: "memory tier whose resume reports the actor missing and which replaced the recorded one, with no snapshot", backend: memory,
+			existing: substrate.StatusRunning, snapshot: "-", recorded: "uid-old", resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x", "read-record"},
+			wantLost: true, wantMsg: `has UID "uid-sess-x-1", not the "uid-old"`},
+		{name: "memory tier whose resume reports the actor missing and whose record cannot be read, with no snapshot, keeps the resume error", backend: memory,
+			existing: substrate.StatusRunning, snapshot: "-", recorded: "!", resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x", "read-record"}},
+		{name: "memory tier without an actor and no snapshot", backend: memory,
+			snapshot: "-", recorded: "uid-sess-x-1", resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true},
 		// Substrate also answers NOT_FOUND for an actor that exists (a template volume it cannot
 		// find); one that still holds the snapshot keeps the resume error.
 		{name: "memory tier whose resume reports the actor missing but which holds the snapshot keeps the resume error", backend: memory,
@@ -795,7 +808,21 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 			default:
 				uri = tc.snapshot
 			}
-			_, err := tc.backend(m).Restore(context.Background(), api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: true})
+			ref := api.SnapshotRef{Local: "sess-x", ExternalURI: uri, Memory: true}
+			var err error
+			switch tc.recorded {
+			case "":
+				_, err = tc.backend(m).Restore(context.Background(), ref)
+			default:
+				// The record is read after GetActor answers, when the backend decides; calls shows when.
+				_, err = tc.backend(m).RestoreInstance(context.Background(), ref, func() (string, error) {
+					m.calls = append(m.calls, "read-record")
+					if tc.recorded == "!" {
+						return "", errors.New("journal unreadable")
+					}
+					return tc.recorded, nil
+				})
+			}
 			if !reflect.DeepEqual(m.calls, tc.wantCalls) {
 				t.Errorf("calls=%v want %v", m.calls, tc.wantCalls)
 			}

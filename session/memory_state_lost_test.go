@@ -968,6 +968,66 @@ func TestResumeWhoseActorIsReplacedAfterTheFailedResumeIsRefused(t *testing.T) {
 	}
 }
 
+// Resume of a memory-tier session with no SUSPEND recorded (its host died during a turn) restores the
+// actor by name, with no snapshot handle to compare. Substrate answers ResumeActor with NOT_FOUND for
+// an actor that still exists when its template's volume is missing, so a NOT_FOUND resume alone does
+// not prove the state is gone. Restore then compares the actor GetActor finds with the UID the
+// journal recorded: the recorded actor keeps the resume error (INTERNAL), and only a replacement is
+// FAILED_PRECONDITION. Neither journals anything.
+func TestResumeWithoutASnapshotIsLostOnlyWhenTheRecordedActorIsGone(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replace bool
+		want    codes.Code
+	}{
+		{name: "the recorded actor is still there", want: codes.Internal},
+		{name: "the actor was replaced after the failed resume", replace: true, want: codes.FailedPrecondition},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+			sess := mustCreate(t, c)
+			if err := execHi(c, sess); err != nil {
+				t.Fatalf("first turn: %v", err)
+			}
+			head, err := store.Session(sess).Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var failed atomic.Bool
+			ctl.resumeErr = func(actor string) error {
+				if actor != sess || !failed.CompareAndSwap(false, true) {
+					return nil
+				}
+				if tc.replace {
+					_ = ctl.DeleteActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor})
+					_ = ctl.CreateActor(ctx, substrate.ActorRef{Atespace: "space", Name: actor}, substrate.ObjectRef{})
+				}
+				return fmt.Errorf("%w: template volume not found", substrate.ErrActorNotFound)
+			}
+
+			_, err = c.Resume(ctx, &v1.ResumeRequest{Session: sess})
+			if status.Code(err) != tc.want {
+				t.Fatalf("resume: want %v, got %v", tc.want, err)
+			}
+			if got, err := store.Session(sess).Head(); err != nil || got != head {
+				t.Errorf("journal head after the failed resume = %d (err %v), want %d: nothing may be journaled", got, err, head)
+			}
+			if tc.want == codes.FailedPrecondition {
+				if msg := status.Convert(err).Message(); !strings.Contains(msg, "cannot be restored") {
+					t.Errorf("error %q does not say the state cannot be restored", msg)
+				}
+			}
+		})
+	}
+}
+
 // An Exec finds the session's actor SUSPENDED and resumes it, and the actor is deleted in between.
 // For a REQUIRES_MEMORY_SNAPSHOT session that is the actor lost, as when Exec finds it missing:
 // FAILED_PRECONDITION, no actor created and nothing journaled, where the bare resume error used to

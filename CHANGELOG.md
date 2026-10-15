@@ -324,7 +324,11 @@ not provide.
   before reading it as the actor being gone, since substrate also answers `NOT_FOUND` for an actor
   whose template lacks a volume: such an actor keeps the resume error. Otherwise a `Resume` whose
   actor is replaced between the failed resume and `Restore`'s `GetActor` is `INTERNAL`; with it, a
-  replacement that does not hold the session's snapshot is `FAILED_PRECONDITION`. An `Exec` whose
+  replacement that does not hold the session's snapshot is `FAILED_PRECONDITION`. For a session with
+  no `SUSPEND` recorded there is no snapshot to compare, so the backend compares the actor's UID with
+  the one the journal last recorded, read through the new optional `api.InstanceRestorer`, which the
+  Placer uses in place of `Restore`: only another UID is `FAILED_PRECONDITION`, and the recorded
+  actor, or one with no UID recorded to compare, keeps the resume error. An `Exec` whose
   `SUSPENDED` actor is deleted before its resume is treated as a missing actor
   (`FAILED_PRECONDITION` for a memory-tier session with started turns, a new actor otherwise), and
   one replaced there, or deleted again after `CreateActor` found the name taken, is `ABORTED`; both

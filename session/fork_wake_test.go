@@ -36,6 +36,9 @@ type actorControl struct {
 	tagErr error
 	// onCreate, when set, runs before CreateActor looks at the registry.
 	onCreate func(actor string)
+	// resumeErr, when set and returning an error, fails ResumeActor with it after onResume ran,
+	// whether or not the actor exists, as substrate does for an actor whose template volume is gone.
+	resumeErr func(actor string) error
 	// uids is each actor's server-assigned UID, minted at create and dropped at delete, so an actor
 	// created again under a name reports a new one.
 	uids    map[string]string
@@ -68,6 +71,11 @@ func (c *actorControl) CreateActor(_ context.Context, a substrate.ActorRef, _ su
 func (c *actorControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	if c.onResume != nil {
 		c.onResume(a.Name)
+	}
+	if c.resumeErr != nil {
+		if err := c.resumeErr(a.Name); err != nil {
+			return substrate.ActorInfo{}, err
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

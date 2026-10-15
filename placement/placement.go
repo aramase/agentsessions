@@ -1100,11 +1100,12 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 		return err
 	}
 	sourceFinished := observability.StartDebug(ctx, p.logger, "placement", "resolve_resume_source", "session_uid", sessionUID)
-	ref, err := lastSuspendRef(log, sessionUID)
+	recs, err := log.Read(1)
 	if err != nil {
 		sourceFinished(err, "error_kind", placementErrorKind(err))
 		return err
 	}
+	ref := lastSuspendRef(recs, sessionUID)
 	sourceFinished(nil, "memory_snapshot", ref.Memory)
 	if err := p.refuseDuringCheckpoint(sessionUID); err != nil {
 		return err
@@ -1116,7 +1117,21 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 			return err
 		}
 	}
-	inc, err = p.backend.Restore(ctx, ref)
+	// A backend that can tell instances apart reads the one this harness's turns last ran on, so a
+	// failed restore is reported as lost state only when that instance is gone or replaced. It reads
+	// the journal when it decides, not here, so a turn another host journals meanwhile is seen.
+	if r, ok := p.backend.(api.InstanceRestorer); ok {
+		inc, err = r.RestoreInstance(ctx, ref, func() (string, error) {
+			recs, err := log.Read(1)
+			if err != nil {
+				return "", fmt.Errorf("placement: read session journal: %w", err)
+			}
+			instance, _ := controller.LatestComputeInstance(recs, p.ranHere)
+			return instance, nil
+		})
+	} else {
+		inc, err = p.backend.Restore(ctx, ref)
+	}
 	if err != nil {
 		return err
 	}
@@ -1558,19 +1573,15 @@ func (p *Placer) ranHere(recorded string) bool {
 // handle), so accepting an inherited ref would restore the PARENT's incarnation under the child's
 // session — two sessions bound to one actor. Every backend records its own session UID in Local, so
 // a ref that names another session is history, not this session's checkpoint.
-func lastSuspendRef(log eventlog.Store, sessionUID string) (api.SnapshotRef, error) {
-	recs, err := log.Read(1)
-	if err != nil {
-		return api.SnapshotRef{}, err
-	}
+func lastSuspendRef(recs []eventlog.Record, sessionUID string) api.SnapshotRef {
 	for i := len(recs) - 1; i >= 0; i-- {
 		ev := recs[i].Event
 		if ev.Kind == api.EventLifecycle && ev.Lifecycle != nil && ev.Lifecycle.Kind == api.LifecycleSuspend && ev.Lifecycle.Snapshot != nil {
 			if ev.Lifecycle.Snapshot.Local != sessionUID {
 				continue // inherited from a forked-from parent, not this session's checkpoint
 			}
-			return *ev.Lifecycle.Snapshot, nil
+			return *ev.Lifecycle.Snapshot
 		}
 	}
-	return api.SnapshotRef{Local: sessionUID}, nil
+	return api.SnapshotRef{Local: sessionUID}
 }

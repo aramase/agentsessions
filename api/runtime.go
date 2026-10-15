@@ -16,12 +16,14 @@ var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was supers
 // gone. Create returns it rather than create fresh compute when the journal already records a
 // started turn on that harness (SessionSpec.StartedTurns). Restore returns it for any such session
 // whose compute no longer exists, whatever the journal records, since the snapshot it would restore
-// went with the compute. The host returns it when the compute a turn or a Resume was placed on
-// reports another Incarnation.ComputeInstance than the journal recorded: the compute was replaced
-// under the same name. Snapshot returns it when the compute behind Incarnation.ID is not the
-// instance the caller required (a stateful fork). The journal cannot rebuild the state (I4), so
-// fresh compute would continue the journal with a harness that has forgotten it. The caller cannot
-// fix this by retrying; the session service reports it as FAILED_PRECONDITION.
+// went with the compute; the recorded compute, still there and holding the session's snapshot,
+// keeps the restore error (see InstanceRestorer). The host returns it when the compute a turn or a
+// Resume was placed on reports another Incarnation.ComputeInstance than the journal recorded: the
+// compute was replaced under the same name. Snapshot returns it when the compute behind
+// Incarnation.ID is not the instance the caller required (a stateful fork). The journal cannot
+// rebuild the state (I4), so fresh compute would continue the journal with a harness that has
+// forgotten it. The caller cannot fix this by retrying; the session service reports it as
+// FAILED_PRECONDITION.
 var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
 
 // ErrComputeBusy reports that the session's compute is in the middle of another operation (another
@@ -78,6 +80,20 @@ type Runtime interface {
 
 	// Capabilities reports what this backend supports.
 	Capabilities() RuntimeCapabilities
+}
+
+// InstanceRestorer is an optional extension of Runtime for a backend that sets
+// Incarnation.ComputeInstance. RestoreInstance is Restore with a way to read the compute instance the
+// journal last recorded for the session's harness, so that when the restore fails the backend can
+// tell whether that instance is gone or replaced. recorded returns "" when no instance is recorded;
+// the backend calls it only after a failed restore, when it decides, so a turn another host journaled
+// before then is seen. A backend reports ErrMemoryStateLost from RestoreInstance only when it can
+// show the recorded instance gone or replaced or, with none recorded, finds an instance it cannot
+// tell from a replacement, and otherwise returns the restore error: an instance that is still there
+// may fail a restore for another reason. The host calls RestoreInstance in place of Restore when the
+// backend implements it.
+type InstanceRestorer interface {
+	RestoreInstance(ctx context.Context, ref SnapshotRef, recorded func() (string, error)) (Incarnation, error)
 }
 
 // SnapshotKind selects local (warm/pause) vs external (cold/suspend) storage.
