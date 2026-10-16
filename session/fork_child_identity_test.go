@@ -199,3 +199,82 @@ func TestForkChildWithoutARecordedCloneIsNotCompared(t *testing.T) {
 		t.Errorf("child's first turn recorded instance %q, want the actor it attached to, %q", got, actor)
 	}
 }
+
+// The clone is SUSPENDED between Runtime.Fork's CreateActorFromTag and its ResumeActor, so it can
+// be deleted and another actor created under the child's name in that window. ResumeActor resolves
+// the name, so without a UID check the child's FORK marker would record the replacement's UID and
+// its first turn would run there, on none of the cloned RAM. The fork is ABORTED instead (the
+// parent still holds its snapshot, so a retry clones it again), no FORK marker names the
+// replacement, and the replacement is left in place. The retry succeeds.
+func TestForkWhoseCloneIsReplacedDuringTheForkIsAborted(t *testing.T) {
+	ctx := context.Background()
+	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+	store, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+	parent := mustCreate(t, c)
+	if err := execHi(c, parent); err != nil {
+		t.Fatalf("parent turn: %v", err)
+	}
+	var child, clone, replacement string
+	ctl.onResume = func(actor string) {
+		if actor == parent || child != "" {
+			return
+		}
+		child = actor
+		ctl.mu.Lock()
+		clone = ctl.uids[actor]
+		ctl.mu.Unlock()
+		ref := substrate.ActorRef{Atespace: "space", Name: actor}
+		if err := ctl.DeleteActor(ctx, ref); err != nil {
+			t.Error(err)
+		}
+		if err := ctl.CreateActor(ctx, ref, substrate.ObjectRef{Atespace: "space", Name: "mem"}); err != nil {
+			t.Error(err)
+		}
+		ctl.mu.Lock()
+		replacement = ctl.uids[actor]
+		ctl.mu.Unlock()
+	}
+
+	_, err = c.Fork(ctx, &v1.ForkRequest{Session: parent, Count: 1})
+	if child == "" || clone == "" || replacement == "" || clone == replacement {
+		t.Fatalf("the clone was not replaced before its resume (child %q, clone %q, replacement %q)", child, clone, replacement)
+	}
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("fork whose clone was replaced before its resume: want Aborted, got %v", err)
+	}
+	if msg := status.Convert(err).Message(); !strings.Contains(msg, child) || !strings.Contains(msg, clone) || !strings.Contains(msg, replacement) {
+		t.Errorf("error %q does not name the child, its clone and the replacement", msg)
+	}
+	recs, _ := store.Session(child).Read(1)
+	for _, r := range recs {
+		if lc := r.Event.Lifecycle; lc != nil && lc.Kind == api.LifecycleFork {
+			t.Errorf("child %q has a FORK marker recording %q; an aborted fork records none", child, lc.ComputeInstance)
+		}
+	}
+	ctl.mu.Lock()
+	left, exists := ctl.uids[child], ctl.status[child]
+	ctl.mu.Unlock()
+	if left != replacement || exists == substrate.StatusUnknown {
+		t.Errorf("actor under %q has UID %q (status %v), want the replacement %q left in place", child, left, exists, replacement)
+	}
+
+	resp, err := c.Fork(ctx, &v1.ForkRequest{Session: parent, Count: 1})
+	if err != nil {
+		t.Fatalf("retried fork: %v", err)
+	}
+	retried := resp.GetChildren()[0].GetMetadata().GetUid()
+	ctl.mu.Lock()
+	retriedClone := ctl.uids[retried]
+	ctl.mu.Unlock()
+	if got := forkMarkerInstance(t, store, retried); got != retriedClone {
+		t.Errorf("retried child's FORK marker records %q, want its clone's UID %q", got, retriedClone)
+	}
+	if err := execHi(c, retried); err != nil {
+		t.Fatalf("first turn of the retried child: %v", err)
+	}
+}

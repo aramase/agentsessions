@@ -436,15 +436,15 @@ func (c *cloningControl) TagActor(_ context.Context, source substrate.ActorRef, 
 	return nil
 }
 
-func (c *cloningControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) error {
+func (c *cloningControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
 	if c.failCloneOf == a.Name {
 		if c.onFailedClone != nil {
 			c.onFailedClone()
 		}
-		return errors.New("clone refused")
+		return substrate.ActorInfo{}, errors.New("clone refused")
 	}
 	c.calls = append(c.calls, "clone:"+a.Name+":from="+tag.Name)
-	return nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: "uid-" + a.Name}, nil
 }
 
 func (c *cloningControl) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {

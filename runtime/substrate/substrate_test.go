@@ -159,6 +159,11 @@ type mockCloner struct {
 	*mockControl
 	cloneErr error
 	tagErr   error
+	// afterClone, when set, runs after CreateActorFromTag returns, so a test can delete or replace
+	// the SUSPENDED clone before Fork resumes it. cloneNoUID makes CreateActorFromTag report no
+	// UID.
+	afterClone func(name string)
+	cloneNoUID bool
 }
 
 func (m *mockCloner) TagActor(ctx context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
@@ -166,12 +171,22 @@ func (m *mockCloner) TagActor(ctx context.Context, source substrate.ActorRef, ta
 	return m.tagErr
 }
 
-func (m *mockCloner) CreateActorFromTag(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) error {
+func (m *mockCloner) CreateActorFromTag(ctx context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
 	if m.cloneErr != nil {
-		return m.cloneErr
+		return substrate.ActorInfo{}, m.cloneErr
 	}
 	m.calls = append(m.calls, "clone:"+a.Name+":from="+tag.Name)
-	return nil
+	if _, ok := m.actors[a.Name]; ok {
+		return substrate.ActorInfo{}, fmt.Errorf("%w: %q", substrate.ErrActorExists, a.Name)
+	}
+	m.exists(a.Name, substrate.StatusSuspended)
+	if m.afterClone != nil {
+		defer m.afterClone(a.Name)
+	}
+	if m.cloneNoUID {
+		return substrate.ActorInfo{Status: substrate.StatusSuspended}, nil
+	}
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: m.uid(a.Name)}, nil
 }
 
 func (m *mockCloner) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {
@@ -621,6 +636,104 @@ func TestForkTearsDownACloneThatIsNotRunning(t *testing.T) {
 	if !reflect.DeepEqual(m.calls, want) {
 		t.Fatalf("calls=%v want the stranded clone torn down %v", m.calls, want)
 	}
+}
+
+// A clone is SUSPENDED between CreateActorFromTag and ResumeActor, so it can be deleted, or deleted
+// and another actor created under the child's name, before Fork resumes it. ResumeActor resolves
+// the name, so Fork compares the UID it reports with the clone's: the child's FORK marker must
+// never record a replacement's UID, which its first turn would then accept as the clone. A fork
+// that lost its clone is retryable (the parent still holds its snapshot, and a retry mints a new
+// child), and cleanup never suspends or deletes an actor this fork did not create.
+func TestForkRefusesACloneReplacedBeforeItsResume(t *testing.T) {
+	notFound := fmt.Errorf("%w: space/child", substrate.ErrActorNotFound)
+	resumeFailed := errors.New("resume workflow failed")
+	errRead := errors.New("control plane unavailable")
+	head := []string{"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child", "resume:child"}
+	for _, tc := range []struct {
+		name       string
+		afterClone func(m *mockCloner, name string)
+		noUID      bool
+		resumeErr  error
+		wantCalls  []string
+		wantBusy   bool  // retryable ErrActorBusy, not ErrMemoryStateLost
+		wantErr    error // also wrapped
+		wantMsg    string
+		wantLeft   bool // the actor under the child's name is the replacement, untouched
+	}{
+		{name: "replaced, then resumed: refused, replacement left", afterClone: replace,
+			wantCalls: append(slices.Clone(head), "untag:fork-child"), wantBusy: true,
+			wantMsg: "replaced between its create and resume", wantLeft: true},
+		{name: "replaced, then the resume fails: refused, replacement left", afterClone: replace, resumeErr: resumeFailed,
+			wantCalls: append(slices.Clone(head), "get:child", "untag:fork-child"), wantBusy: true, wantErr: resumeFailed,
+			wantMsg: "the replacement was left in place", wantLeft: true},
+		{name: "deleted: refused, tag released", afterClone: func(m *mockCloner, name string) { m.delete(name) },
+			resumeErr: notFound, wantCalls: append(slices.Clone(head), "get:child", "untag:fork-child"), wantBusy: true,
+			wantErr: notFound, wantMsg: "was deleted between its create and resume"},
+		{name: "resume fails on the clone: the clone is torn down", resumeErr: resumeFailed,
+			wantCalls: append(slices.Clone(head), "get:child", "suspend:child", "delete:child", "untag:fork-child"), wantErr: resumeFailed},
+		{name: "the cleanup read fails: nothing is touched",
+			afterClone: func(m *mockCloner, _ string) { m.getErr = errRead }, resumeErr: resumeFailed,
+			wantCalls: append(slices.Clone(head), "get:child"), wantErr: resumeFailed, wantMsg: "were left in place"},
+		{name: "a clone reported without a UID is torn down before its resume", noUID: true,
+			wantCalls: []string{"get:parent", "tag:parent->fork-child", "get:parent", "clone:child:from=fork-child",
+				"suspend:child", "delete:child", "untag:fork-child"}, wantMsg: "reported no actor UID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newClonerWithSuspendedParent()
+			m.resumeErr = tc.resumeErr
+			m.cloneNoUID = tc.noUID
+			var cloneUID, replacementUID string
+			m.afterClone = func(name string) {
+				cloneUID = m.uids[name]
+				if tc.afterClone != nil {
+					tc.afterClone(m, name)
+				}
+				replacementUID = m.uids[name]
+			}
+			_, err := newMemoryBackend(m).Fork(context.Background(),
+				api.SnapshotRef{Local: "parent", ExternalURI: "snap-parent-1", Memory: true},
+				api.ForkOpts{ChildSessionUID: "child"})
+			if err == nil {
+				t.Fatal("Fork succeeded, want it refused")
+			}
+			if !reflect.DeepEqual(m.calls, tc.wantCalls) {
+				t.Errorf("calls=%v want %v", m.calls, tc.wantCalls)
+			}
+			if got := errors.Is(err, substrate.ErrActorBusy) && errors.Is(err, api.ErrComputeBusy); got != tc.wantBusy {
+				t.Errorf("err=%v: retryable busy=%v want %v", err, got, tc.wantBusy)
+			}
+			if errors.Is(err, api.ErrMemoryStateLost) {
+				t.Errorf("err=%v is ErrMemoryStateLost; the parent still holds its snapshot", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Errorf("err=%v want it to wrap %v", err, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("err=%q want it to say %q", err, tc.wantMsg)
+			}
+			if tc.wantLeft {
+				if replacementUID == cloneUID || m.uids["child"] != replacementUID {
+					t.Errorf("actor under the child's name has UID %q, want the replacement %q (clone %q) left in place",
+						m.uids["child"], replacementUID, cloneUID)
+				}
+				if !strings.Contains(err.Error(), cloneUID) || !strings.Contains(err.Error(), replacementUID) {
+					t.Errorf("err=%q want it to name the clone %q and the replacement %q", err, cloneUID, replacementUID)
+				}
+			}
+		})
+	}
+}
+
+// replace deletes the actor under name and creates another under it, as an atespace operator could.
+func replace(m *mockCloner, name string) {
+	m.delete(name)
+	m.exists(name, substrate.StatusSuspended)
+}
+
+// delete drops an actor and its UID without recording a call: the deletion is someone else's.
+func (m *mockControl) delete(name string) {
+	delete(m.actors, name)
+	delete(m.uids, name)
 }
 
 // The likeliest reason a fork fails partway is that the caller's deadline expired or it went away.

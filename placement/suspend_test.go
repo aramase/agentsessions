@@ -178,26 +178,27 @@ func (c *suspendControl) TagActor(_ context.Context, ref substrate.ActorRef, tag
 	return nil
 }
 
-func (c *suspendControl) CreateActorFromTag(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef, tag substrate.SnapshotID) error {
+func (c *suspendControl) CreateActorFromTag(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
 	c.calls = append(c.calls, "clone:"+ref.Name+":from="+tag.Name)
 	source, exists := c.tags[tag]
 	if !exists {
-		return status.Error(codes.NotFound, "tag does not exist")
+		return substrate.ActorInfo{}, status.Error(codes.NotFound, "tag does not exist")
 	}
 	snapshot, exists := c.snapshots[source]
 	if !exists {
-		return status.Error(codes.NotFound, "snapshot does not exist")
+		return substrate.ActorInfo{}, status.Error(codes.NotFound, "snapshot does not exist")
 	}
 	if template != snapshot.template {
-		return status.Error(codes.FailedPrecondition, "snapshot template mismatch")
+		return substrate.ActorInfo{}, status.Error(codes.FailedPrecondition, "snapshot template mismatch")
 	}
 	if _, exists := c.actors[ref]; exists {
-		return status.Error(codes.AlreadyExists, "actor exists")
+		return substrate.ActorInfo{}, status.Error(codes.AlreadyExists, "actor exists")
 	}
-	c.actors[ref] = &suspendActor{
+	a := &suspendActor{
 		status: substrate.StatusSuspended, snapshot: source, sourceTag: tag, template: template, uid: c.newUID(),
 	}
-	return nil
+	c.actors[ref] = a
+	return substrate.ActorInfo{Status: a.status, UID: a.uid}, nil
 }
 
 func (c *suspendControl) DeleteTag(_ context.Context, tag substrate.SnapshotID) error {

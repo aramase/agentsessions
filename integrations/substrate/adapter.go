@@ -166,16 +166,22 @@ func (ad *Adapter) TagActor(ctx context.Context, source substrate.ActorRef, tag 
 
 // CreateActorFromTag creates an actor seeded from the snapshot behind tag. Substrate requires the
 // actor's template to be the one the snapshot was taken under. The actor is created SUSPENDED and
-// borrows the tag's snapshot; the caller resumes it to restore the cloned RAM.
-func (ad *Adapter) CreateActorFromTag(ctx context.Context, actor substrate.ActorRef, template substrate.ObjectRef, tag substrate.SnapshotID) error {
-	_, err := ad.ctl.CreateActor(ctx, &atepb.CreateActorRequest{
+// borrows the tag's snapshot; the caller resumes it to restore the cloned RAM. CreateActor returns
+// the actor it stored, with the UID substrate assigned (RPCService.CreateActor in
+// cmd/ateapi/internal/controlapi/actor.go), so the caller can tell that clone from a later actor
+// under the same name.
+func (ad *Adapter) CreateActorFromTag(ctx context.Context, actor substrate.ActorRef, template substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
+	a, err := ad.ctl.CreateActor(ctx, &atepb.CreateActorRequest{
 		Actor: &atepb.Actor{
 			Metadata:      &atepb.ResourceMetadata{Atespace: actor.Atespace, Name: actor.Name},
 			ActorTemplate: templateRef(template),
 			SourceTag:     tagRef(tag),
 		},
 	})
-	return err
+	if err != nil {
+		return substrate.ActorInfo{}, err
+	}
+	return actorInfo(a), nil
 }
 
 // DeleteTag removes a tag and collects the snapshot copy it owns.

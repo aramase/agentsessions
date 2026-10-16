@@ -142,9 +142,11 @@ type SnapshotCloner interface {
 	// copies, so a call that fails may still leave a pending tag behind; a name that was already
 	// taken fails with ErrTagExists.
 	TagActor(ctx context.Context, source ActorRef, tag SnapshotID) error
-	// CreateActorFromTag creates actor seeded from the snapshot behind tag. Substrate requires the
-	// actor's template to be the one the snapshot was taken under.
-	CreateActorFromTag(ctx context.Context, actor ActorRef, template ObjectRef, tag SnapshotID) error
+	// CreateActorFromTag creates actor seeded from the snapshot behind tag and reports the actor it
+	// created, UID included. Substrate requires the actor's template to be the one the snapshot was
+	// taken under. Fork compares the reported UID with the one ResumeActor reports, so a clone
+	// deleted and replaced under its name between the two calls is refused rather than recorded.
+	CreateActorFromTag(ctx context.Context, actor ActorRef, template ObjectRef, tag SnapshotID) (ActorInfo, error)
 	// DeleteTag removes a tag and collects its copy of the snapshot. An actor seeded from the tag
 	// borrows that copy until its own first suspend, so a tag must outlive its unsuspended clones.
 	DeleteTag(ctx context.Context, tag SnapshotID) error
@@ -681,17 +683,35 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		b.releaseForkTag(ctx, cloner, child)
 		return api.Incarnation{}, err
 	}
-	if err := cloner.CreateActorFromTag(ctx, b.ref(child), b.template, tag); err != nil {
+	created, err := cloner.CreateActorFromTag(ctx, b.ref(child), b.template, tag)
+	if err != nil {
 		// No actor exists yet, but the tag does. Release it: the tag name is derived from a child UID
 		// the caller is about to discard, so this is the last moment it can be named.
 		b.releaseForkTag(ctx, cloner, child)
 		return api.Incarnation{}, fmt.Errorf("substrate: create actor from tag %q: %w", tag.Name, err)
 	}
-	// The child holds the tag's snapshot, so resuming it restores the cloned RAM.
-	info, err := b.ctl.ResumeActor(ctx, b.ref(child))
-	if err != nil {
+	if created.UID == "" {
+		// The host records the clone's UID on the child's FORK marker and refuses any other actor
+		// under the child's name, so a clone it cannot identify is never handed out. The create
+		// just succeeded, so the actor under the name is this call's.
 		b.destroyChild(ctx, child)
-		return api.Incarnation{}, fmt.Errorf("substrate: resume cloned actor: %w", err)
+		return api.Incarnation{}, fmt.Errorf("substrate: create actor from tag %q reported no actor UID; a %s clone must report one",
+			tag.Name, api.ResumabilityRequiresMemorySnapshot)
+	}
+	// The child holds the tag's snapshot, so resuming it restores the cloned RAM. The clone is
+	// SUSPENDED until then, so it can be deleted and another actor created under its name, and
+	// ResumeActor resolves the name, not the UID: compare the UID it reports with the clone's.
+	childRef := b.ref(child)
+	info, err := b.ctl.ResumeActor(ctx, childRef)
+	if err != nil {
+		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, fmt.Errorf("substrate: resume cloned actor: %w", err))
+	}
+	if info.UID != created.UID {
+		// ResumeActor has no UID precondition, so it may have resumed the replacement. That actor
+		// is not this fork's: leave it as it is and release only the tag, which no clone holds now.
+		b.releaseForkTag(ctx, cloner, child)
+		return api.Incarnation{}, fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); its cloned RAM is gone, no child was created, and the replacement was left in place",
+			ErrActorBusy, childRef.Atespace, childRef.Name, created.UID, info.UID)
 	}
 	inc, err = b.incarnation(child, info)
 	if err != nil {
@@ -739,6 +759,37 @@ func (b *Backend) destroyChild(ctx context.Context, child string) {
 	ctx, cancel := cleanupContext(ctx)
 	defer cancel()
 	_ = b.Stop(ctx, api.Incarnation{ID: child})
+}
+
+// discardClone cleans up after a fork whose clone (created with uid) failed to resume, and returns
+// cause. It reads the child's name first so it never tears down an actor this fork did not create:
+// the clone is destroyed only while the name still resolves to uid, and cause stands. Gone or
+// replaced, only the tag is released and the fork is ErrActorBusy, retryable: the parent still holds
+// its snapshot and a retry clones a new child. When the read fails, nothing is touched and the
+// error says so. Stop suspends and
+// deletes by name, so an actor created between this read and Stop's delete is not protected.
+// TODO(spike): substrate's DeleteActorRequest.options.uid can make that delete UID-conditional, but
+// ControlClient.DeleteActor does not carry it and Stop's SuspendActor has no such precondition.
+func (b *Backend) discardClone(ctx context.Context, cloner SnapshotCloner, ref ActorRef, uid string, cause error) error {
+	readCtx, cancel := cleanupContext(ctx)
+	now, err := b.ctl.GetActor(readCtx, ref)
+	cancel()
+	switch {
+	case err == nil && now.UID == uid:
+		b.destroyChild(ctx, ref.Name)
+	case err == nil:
+		b.releaseForkTag(ctx, cloner, ref.Name)
+		return fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); the replacement was left in place: %w",
+			ErrActorBusy, ref.Atespace, ref.Name, uid, now.UID, cause)
+	case errors.Is(err, ErrActorNotFound):
+		b.releaseForkTag(ctx, cloner, ref.Name)
+		return fmt.Errorf("%w: fork child %s/%s (clone %q) was deleted between its create and resume: %w",
+			ErrActorBusy, ref.Atespace, ref.Name, uid, cause)
+	default:
+		return fmt.Errorf("%w; fork child %s/%s (clone %q) could not be read for cleanup, so it and its tag %q were left in place: %v",
+			cause, ref.Atespace, ref.Name, uid, forkTag(ref.Name), err)
+	}
+	return cause
 }
 
 // releaseForkTag deletes the tag a fork took of the parent, for the case where no child actor was

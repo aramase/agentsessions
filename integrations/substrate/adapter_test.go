@@ -45,7 +45,11 @@ func (f *fakeControl) CreateActor(_ context.Context, in *atepb.CreateActorReques
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
-	return a, nil
+	// Substrate returns the actor it stored: the server assigned the UID, and it starts SUSPENDED.
+	stored := proto.Clone(a).(*atepb.Actor)
+	stored.Metadata.Uid = "uid-" + a.GetMetadata().GetName()
+	stored.Status = &atepb.ActorStatus{State: atepb.ActorState_ACTOR_STATE_SUSPENDED}
+	return stored, nil
 }
 func (f *fakeControl) ResumeActor(_ context.Context, in *atepb.ResumeActorRequest, _ ...grpc.CallOption) (*atepb.ResumeActorResponse, error) {
 	f.calls = append(f.calls, "resume:"+in.GetActor().GetAtespace()+"/"+in.GetActor().GetName())
@@ -410,10 +414,16 @@ func TestCloneTagsParentThenCreatesFromTag(t *testing.T) {
 	if err := ad.TagActor(context.Background(), parent, tag); err != nil {
 		t.Fatal(err)
 	}
-	if err := ad.CreateActorFromTag(context.Background(),
+	created, err := ad.CreateActorFromTag(context.Background(),
 		substrate.ActorRef{Atespace: "space", Name: "child"},
-		substrate.ObjectRef{Atespace: "tmpl", Name: "counter"}, tag); err != nil {
+		substrate.ObjectRef{Atespace: "tmpl", Name: "counter"}, tag)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// Fork compares this UID with the one ResumeActor reports, so it must be the server-assigned
+	// one.
+	if created.UID != "uid-child" || created.Status != substrate.StatusSuspended {
+		t.Fatalf("created=%+v want the stored actor (UID uid-child, SUSPENDED)", created)
 	}
 	if err := ad.DeleteTag(context.Background(), tag); err != nil {
 		t.Fatal(err)

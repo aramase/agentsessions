@@ -146,12 +146,17 @@ child's name in that window (the clone deleted out of band and another created i
 attached to as if it held the cloned RAM. The child now records the clone's UID at fork:
 
 - **Where.** In `Lifecycle.compute_instance` on the child's own `FORK` marker, set from the
-  `ComputeInstance` of the incarnation `Runtime.Fork` returned (substrate: the UID `ResumeActor`
-  reports for the actor `CreateActorFromTag` made). The Placer clones each child before it writes
-  the child's journal, so the UID is known when the marker is appended. The marker is already one
-  per child, so no new record is needed; a separate per-child record was rejected because it would
-  be a second append that can fail after the marker (leaving the gap) and a new event kind older
-  readers do not know. A backend that sets no instance (a stateless fork) records none.
+  `ComputeInstance` of the incarnation `Runtime.Fork` returned. For substrate that is the UID
+  `CreateActor{source_tag}` assigned the clone, and `Fork` returns it only when `ResumeActor`
+  reports the same UID: the clone is `SUSPENDED` between the two calls, so it can be deleted and
+  another actor created under the child's name, and `ResumeActor` resolves the name. Another UID
+  is `substrate.ErrActorBusy` (`ABORTED`; the parent still holds its snapshot and a retry mints a
+  new child), the fork records no child, and the replacement is left in place. The Placer clones
+  each child before it writes the child's journal, so the UID is known when the marker is appended.
+  The marker is already one per child, so no new record is needed; a separate per-child record was
+  rejected because it would be a second append that can fail after the marker (leaving the gap) and
+  a new event kind older readers do not know. A backend that sets no instance (a stateless fork)
+  records none.
 - **Comparison.** `controller.LatestComputeInstance` returns the marker's UID until the child's own
   first turn records one; the marker is attributed like a turn with no recorded harness name. So the
   child's first `Exec` and a `Resume` compare the actor they were placed on with it, `Suspend` and a
@@ -259,6 +264,14 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   `api.ErrMemoryStateLost` → `FailedPrecondition` before the backend suspends it, or, if it was
   replaced between that look and the suspend, after: the replacement is then left suspended, with
   no SUSPEND event on the parent's chain and no child.
+- A child must be resumed on the clone the fork created. `CreateActorFromTag` reports the clone's
+  UID from `CreateActor`'s response, and `Fork` refuses a `ResumeActor` that reports another one
+  with `substrate.ErrActorBusy` (`ABORTED`), since the clone was deleted, and maybe replaced under
+  its name, while it was `SUSPENDED`. When the resume fails, the backend reads the child's name
+  before it cleans up: it tears down only the actor with the clone's UID (the resume's error
+  stands), releases just the tag when the name is gone or holds another actor (`ABORTED` too), and
+  touches nothing when the read fails. `Stop` suspends and deletes by name, so an actor created between that read and the
+  delete is not protected.
 - A control client without the Tag APIs does not satisfy the optional `SnapshotCloner` interface; a
   stateful fork there fails loudly rather than degrading to a lossy replay-fork.
 - The child fan-out is all-or-nothing. If a child fails to provision, the ones already created are
@@ -303,8 +316,8 @@ Two properties make the failure paths above safe, both read off substrate's susp
   therefore neither errors nor mints a second snapshot — it re-reads the same one.
 - **A clone that never resumed is still deletable.** `CreateActor` starts an actor at
   `ACTOR_STATE_SUSPENDED`, and `DeleteActor` accepts `SUSPENDED`, `CRASHED`, or `DELETING`. So the
-  suspend-then-delete teardown the backend runs works on a child that failed at `ResumeActor`, and
-  rollback does not strand an actor or leak its tag.
+  suspend-then-delete teardown the backend runs works on a child that failed at `ResumeActor` and
+  still holds the clone's UID, and rollback does not strand an actor or leak its tag.
 
 ### It is not copy-on-write
 

@@ -137,12 +137,12 @@ func (c *actorControl) TagActor(_ context.Context, a substrate.ActorRef, _ subst
 	return c.tagErr
 }
 
-func (c *actorControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, _ substrate.SnapshotID) error {
+func (c *actorControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, _ substrate.SnapshotID) (substrate.ActorInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.status[a.Name] = substrate.StatusSuspended
 	c.newUID(a.Name)
-	return nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: c.uids[a.Name]}, nil
 }
 
 func (c *actorControl) DeleteTag(context.Context, substrate.SnapshotID) error { return nil }
