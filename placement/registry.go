@@ -329,7 +329,9 @@ func WithResolvedHarnessCheck(check func(name string) error) RegistryResumeOptio
 
 // Resume resolves and recovers an invocation under the Registry's shared session guard, running
 // the resolved-harness check before runtime IO or call-only repair. Pending/repaired requests
-// return *api.ApprovalParkedError without runtime IO; that alone is not cold-compute proof.
+// return *api.ApprovalParkedError without runtime IO; that alone is not cold-compute proof. The
+// one exception is the repair of an override turn on a runtime with memory snapshots: its harness
+// is described first, and a REQUIRES_MEMORY_SNAPSHOT one is refused (ErrStatefulOverride).
 // Decided recovery delegates to the Placer: a new gate commits SUSPEND and returns park, while
 // ordinary success records RESUME. Repair/handoff failures retain their actual cause.
 // Contention through this Registry wins over stale invocation errors. Legacy markerless and
@@ -383,17 +385,19 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 			return err
 		}
 	}
-	resume := resumeConfig{harness: name, observer: cfg.observer, expectedLastSeq: cfg.expectedLastSeq}
-	if handled, err := p.resumeApproval(log, sessionUID, state, resume); handled {
-		return err
-	}
 	// A pending turn recorded on a Placer other than the session's own ran as an override. The
-	// Placer refuses a memory-tier harness there (ErrStatefulOverride). An alias of the session's
-	// harness shares its Placer and is not an override; a session harness this host cannot resolve
-	// is treated as another one.
+	// Placer refuses a memory-tier harness there (ErrStatefulOverride), before it repairs a missing
+	// approval request too. An alias of the session's harness shares its Placer and is not an
+	// override; a session harness this host cannot resolve is treated as another one.
+	resume := resumeConfig{harness: name, observer: cfg.observer, expectedLastSeq: cfg.expectedLastSeq}
 	if name != own {
 		ownPlacer, err := r.For(own)
 		resume.override = err != nil || ownPlacer != p
+	}
+	if handled, err := p.resumeApproval(log, sessionUID, state, resume, func() error {
+		return p.refuseOverrideRepair(ctx, sessionUID, resume.override)
+	}); handled {
+		return err
 	}
 	return p.resume(ctx, log, sessionUID, resume)
 }

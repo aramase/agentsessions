@@ -94,16 +94,21 @@ func TestOverrideOntoAMemoryHarnessIsRefused(t *testing.T) {
 }
 
 // Registry.Resume of a pending turn recorded on a memory harness other than the session's own is
-// refused the same way, before anything is restored. A pending turn recorded under an alias of the
-// session's harness shares its Placer and is not an override.
+// refused the same way, before anything is restored. When the turn's tool call is still waiting
+// for its approval request, the refusal comes before that request is repaired onto the journal. A
+// pending turn recorded under an alias of the session's harness shares its Placer and is not an
+// override, so its approval request is repaired and the turn parks.
 func TestRegistryResumeRefusesAMemoryOverrideTurn(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		session string
-		want    error
+		name     string
+		session  string
+		approval bool
+		want     error
 	}{
 		{name: "session on another harness", session: "echo", want: placement.ErrStatefulOverride},
+		{name: "session on another harness, approval request missing", session: "echo", approval: true, want: placement.ErrStatefulOverride},
 		{name: "session on an alias of the memory harness", session: "mem-alias"},
+		{name: "session on an alias of the memory harness, approval request missing", session: "mem-alias", approval: true, want: api.ErrApprovalParked},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			echo := local.New(echoagent.Harness{})
@@ -133,10 +138,16 @@ func TestRegistryResumeRefusesAMemoryOverrideTurn(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for i, ev := range []api.Event{
+			events := []api.Event{
 				{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{InputCount: proto.Int64(1), Harness: "mem"}},
 				{Kind: api.EventInput, Message: api.TextMessage("user", "hi")},
-			} {
+			}
+			if tc.approval {
+				// An older journal interrupted after the gated call and before its request.
+				call := placementGateCall()
+				events = append(events, api.Event{Kind: api.EventToolCall, ToolCall: &call})
+			}
+			for i, ev := range events {
 				ev.ExecutionID = "pending"
 				if _, err := log.Append(int64(i), fence, ev); err != nil {
 					t.Fatal(err)
@@ -157,11 +168,21 @@ func TestRegistryResumeRefusesAMemoryOverrideTurn(t *testing.T) {
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("Resume: got %v, want %v", err, tc.want)
 			}
-			if got, _ := log.Head(); got != head {
-				t.Fatalf("a refused Resume wrote to the log: head %d -> %d", head, got)
-			}
 			if provision.Load() != 0 {
-				t.Fatalf("a refused Resume restored compute %d time(s)", provision.Load())
+				t.Fatalf("Resume restored compute %d time(s)", provision.Load())
+			}
+			got, err := log.Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if errors.Is(tc.want, api.ErrApprovalParked) {
+				if got != head+1 {
+					t.Fatalf("Resume under an alias did not repair the approval request: head %d -> %d", head, got)
+				}
+				return
+			}
+			if got != head {
+				t.Fatalf("a refused Resume wrote to the log: head %d -> %d", head, got)
 			}
 		})
 	}
