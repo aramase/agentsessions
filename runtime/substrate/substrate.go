@@ -500,8 +500,7 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarna
 
 // RestoreInstance is Restore with a reader for the UID of the actor the session's journal last
 // recorded (api.InstanceRestorer); nil reads none. After a failed resume, that UID is what tells the
-// session's actor, still there, from a replacement, unless the resume reported the actor missing
-// and ref carries a snapshot handle to compare (see memoryActorGone).
+// session's actor, still there, from a replacement (see memoryActorGone).
 func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) (inc api.Incarnation, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "restore_compute",
 		"actor", ref.Local,
@@ -536,17 +535,23 @@ func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, reco
 // session's state is gone, as ErrMemoryStateLost wrapping resumeErr too: the snapshot Restore would
 // resume belonged to that actor, so the state went with it and there is nothing to retry. It asks
 // GetActor, whose ControlClient contract reports a missing actor as ErrActorNotFound. The actor is
-// gone when GetActor finds none. An actor GetActor finds is compared with the session's record.
-// After a resume that reported the actor missing (ErrActorNotFound), with a snap.ExternalURI, an
-// actor that does not hold it is gone: a replacement created between the two calls holds no
-// snapshot of the session's, and the same actor suspended again since, by another host, holds a
-// newer one; substrate also answers a resume with NOT_FOUND for an actor that still exists (a
-// template volume it cannot find), which the held snapshot tells apart. After any other resume
-// error, or without a snap.ExternalURI (no SUSPEND recorded), an actor whose UID is not the one the
-// journal last recorded, read through recorded after GetActor answers, is a replacement. An actor
-// that matches, or one there is nothing to compare with (no recorded UID, or no way to read it),
-// keeps the resume error. It returns nil for a stateless harness, whose state is in the journal,
-// and when GetActor or recorded fails, so the caller keeps the resume error.
+// gone when GetActor finds none. An actor GetActor finds is compared with the session's record:
+//
+//   - After a resume that reported the actor missing (ErrActorNotFound), with a snap.ExternalURI,
+//     an actor that holds it keeps the resume error: substrate also answers a resume with NOT_FOUND
+//     for an actor that still exists (a template volume it cannot find).
+//   - Otherwise, an actor whose UID is not the one the journal last recorded, read through recorded
+//     after GetActor answers, is a replacement. The recorded actor keeps the resume error, whatever
+//     snapshot it holds: one newer than snap is still the session's own RAM, left by a suspend whose
+//     SUSPEND append failed after the snapshot was taken, or by another host suspending it again.
+//   - With no UID to compare with (a nil recorded, or a journal that records none), an actor that
+//     does not hold snap.ExternalURI after a NOT_FOUND resume is reported gone, since a replacement
+//     holds no snapshot of the session's; this cannot tell the session's own actor holding a newer
+//     snapshot from a replacement. Without a snap.ExternalURI either, the actor keeps the resume
+//     error.
+//
+// It returns nil for a stateless harness, whose state is in the journal, and when GetActor or
+// recorded fails, so the caller keeps the resume error.
 func (b *Backend) memoryActorGone(ctx context.Context, snap api.SnapshotRef, recorded func() (string, error), resumeErr error) error {
 	if b.descriptor.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
 		return nil
@@ -557,24 +562,34 @@ func (b *Backend) memoryActorGone(ctx context.Context, snap api.SnapshotRef, rec
 	case errors.Is(err, ErrActorNotFound):
 	case err != nil:
 		return nil
-	case errors.Is(resumeErr, ErrActorNotFound) && snap.ExternalURI != "":
-		if info.Snapshot == snap.ExternalURI {
-			return nil
-		}
-		return fmt.Errorf("%w: actor %s/%s of session %q on harness %q no longer holds the snapshot the session was suspended to "+
-			"(replaced, or suspended again since), so its in-RAM state cannot be restored; no actor was created: resume: %w",
-			ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, resumeErr)
-	case recorded != nil:
-		instance, err := recorded()
-		if err != nil || instance == "" || info.UID == instance {
-			return nil
-		}
-		return fmt.Errorf("%w: actor %s/%s of session %q on harness %q has UID %q, "+
-			"not the %q the session's journal recorded "+
-			"(replaced), so its in-RAM state cannot be restored; no actor was created: resume: %w",
-			ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, info.UID, instance, resumeErr)
-	default:
+	case errors.Is(resumeErr, ErrActorNotFound) && snap.ExternalURI != "" && info.Snapshot == snap.ExternalURI:
 		return nil
+	default:
+		instance := ""
+		if recorded != nil {
+			id, err := recorded()
+			if err != nil {
+				// Lost is permanent and a journal read can fail transiently: keep the resume error.
+				return nil
+			}
+			instance = id
+		}
+		switch {
+		case instance != "" && info.UID == instance:
+			return nil
+		case instance != "":
+			return fmt.Errorf("%w: actor %s/%s of session %q on harness %q has UID %q, "+
+				"not the %q the session's journal recorded "+
+				"(replaced), so its in-RAM state cannot be restored; no actor was created: resume: %w",
+				ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, info.UID, instance, resumeErr)
+		case errors.Is(resumeErr, ErrActorNotFound) && snap.ExternalURI != "":
+			return fmt.Errorf("%w: actor %s/%s of session %q on harness %q no longer holds the snapshot the session was suspended to "+
+				"and the session's journal records no actor UID to compare (replaced, or suspended again since), "+
+				"so its in-RAM state cannot be restored; no actor was created: resume: %w",
+				ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, resumeErr)
+		default:
+			return nil
+		}
 	}
 	return fmt.Errorf("%w: actor %s/%s of session %q on harness %q does not exist, so its in-RAM state cannot be restored; no actor was created: resume: %w",
 		ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, resumeErr)

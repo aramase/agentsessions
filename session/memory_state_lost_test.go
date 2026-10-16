@@ -922,8 +922,8 @@ func TestForkWhoseTagFailsIsClassified(t *testing.T) {
 
 // Resume of a memory-tier session whose actor substrate reports missing is FAILED_PRECONDITION even
 // when a third party creates a replacement under the session's name before Restore could ask
-// GetActor: after the resume's ErrActorNotFound, GetActor finds an actor that does not hold the
-// snapshot the session was suspended to (the replacement holds none), so the state is lost.
+// GetActor: after the resume's ErrActorNotFound, GetActor finds an actor whose UID is not the one
+// the session's journal recorded, so the state is lost.
 func TestResumeWhoseActorIsReplacedAfterTheFailedResumeIsRefused(t *testing.T) {
 	ctx := context.Background()
 	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
@@ -966,6 +966,92 @@ func TestResumeWhoseActorIsReplacedAfterTheFailedResumeIsRefused(t *testing.T) {
 	}
 	if got, err := store.Session(sess).Head(); err != nil || got != head {
 		t.Errorf("journal head after the refused resume = %d (err %v), want %d", got, err, head)
+	}
+}
+
+// The session's own actor can hold a newer snapshot than the journal's last SUSPEND names: the
+// SUSPEND append failed after the snapshot was taken, or another host woke and suspended it again.
+// When substrate then answers the resume with NOT_FOUND for that actor (a template volume it cannot
+// find), the actor still holds the session's RAM, so Resume keeps the resume error (INTERNAL) and a
+// retry restores it; only an actor with another UID than the journal recorded is FAILED_PRECONDITION.
+// Neither failed Resume journals anything.
+func TestResumeOfTheRecordedActorHoldingANewerSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replace bool
+		want    codes.Code
+	}{
+		{name: "the recorded actor suspended again keeps the resume error", want: codes.Internal},
+		{name: "a replacement holding a snapshot is lost", replace: true, want: codes.FailedPrecondition},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+			store, err := sqlitelog.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			c := newMemoryHost(t, ctl, store, echoagent.Harness{})
+			sess := mustCreate(t, c)
+			if err := execHi(c, sess); err != nil {
+				t.Fatalf("first turn: %v", err)
+			}
+			if _, err := c.Suspend(ctx, &v1.SuspendRequest{Session: sess}); err != nil {
+				t.Fatalf("suspend: %v", err)
+			}
+			head, err := store.Session(sess).Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+			actor := substrate.ActorRef{Atespace: "space", Name: sess}
+			ctl.mu.Lock()
+			journaled, uid := ctl.snapshots[sess], ctl.uids[sess]
+			ctl.mu.Unlock()
+			if tc.replace {
+				_ = ctl.DeleteActor(ctx, actor)
+				_ = ctl.CreateActor(ctx, actor, substrate.ObjectRef{})
+			}
+			// Woken and suspended again outside this journal: the actor now holds a newer snapshot.
+			ctl.mu.Lock()
+			ctl.status[sess] = substrate.StatusRunning
+			ctl.mu.Unlock()
+			info, err := ctl.SuspendActor(ctx, actor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Snapshot == journaled || (info.UID == uid) == tc.replace {
+				t.Fatalf("setup: actor holds %q with UID %q; journal names %q with UID %q", info.Snapshot, info.UID, journaled, uid)
+			}
+			var failed atomic.Bool
+			ctl.resumeErr = func(actor string) error {
+				if actor != sess || !failed.CompareAndSwap(false, true) {
+					return nil
+				}
+				return fmt.Errorf("%w: template volume not found", substrate.ErrActorNotFound)
+			}
+
+			_, err = c.Resume(ctx, &v1.ResumeRequest{Session: sess})
+			if status.Code(err) != tc.want {
+				t.Fatalf("resume: want %v, got %v", tc.want, err)
+			}
+			if got, err := store.Session(sess).Head(); err != nil || got != head {
+				t.Errorf("journal head after the failed resume = %d (err %v), want %d: nothing may be journaled", got, err, head)
+			}
+			if tc.want == codes.FailedPrecondition {
+				if msg := status.Convert(err).Message(); !strings.Contains(msg, "cannot be restored") {
+					t.Errorf("error %q does not say the state cannot be restored", msg)
+				}
+				return
+			}
+			// The state was never lost: once substrate resumes the actor, the session continues.
+			if _, err := c.Resume(ctx, &v1.ResumeRequest{Session: sess}); err != nil {
+				t.Fatalf("retried resume: %v", err)
+			}
+			if err := execHi(c, sess); err != nil {
+				t.Fatalf("turn after the retried resume: %v", err)
+			}
+		})
 	}
 }
 

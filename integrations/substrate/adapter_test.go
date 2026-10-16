@@ -510,8 +510,8 @@ func TestAbortedResumeAndSuspendAreBusy(t *testing.T) {
 // Substrate answers ResumeActor with NOT_FOUND for a missing actor and also for one that exists but
 // whose template lacks a volume (createActorVolumes in cmd/ateapi/internal/controlapi/volumes.go).
 // Over the adapter, a memory-tier Restore and Create report the session's state lost only when
-// GetActor confirms the actor is gone (or, for Restore, no longer holds the snapshot); an actor that
-// still holds it keeps substrate's resume error.
+// GetActor confirms the actor is gone (or, for Restore with no UID to compare, no longer holds the
+// snapshot); an actor that still holds it keeps substrate's resume error.
 func TestResumeNotFoundOnAnExistingActorIsNotLostState(t *testing.T) {
 	const uri = "gs://b/atespaces/space/actors/u1/snapshots/s1"
 	volume := status.Error(codes.NotFound, `volume "scratch" not found in template`)

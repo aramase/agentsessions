@@ -16,8 +16,8 @@ var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was supers
 // gone. Create returns it rather than create fresh compute when the journal already records a
 // started turn on that harness (SessionSpec.StartedTurns). Restore returns it for any such session
 // whose compute no longer exists, whatever the journal records, since the snapshot it would restore
-// went with the compute; the recorded compute, still there and holding the session's snapshot,
-// keeps the restore error (see InstanceRestorer). The host returns it when the compute a turn or a
+// went with the compute; the recorded compute, still there, keeps the restore error whatever
+// snapshot it holds (see InstanceRestorer). The host returns it when the compute a turn or a
 // Resume was placed on reports another Incarnation.ComputeInstance than the journal recorded: the
 // compute was replaced under the same name. Snapshot returns it when the compute behind
 // Incarnation.ID is not the instance the caller required (a stateful fork). The journal cannot

@@ -102,13 +102,17 @@ still there, the resume error stands, since substrate also answers `NOT_FOUND` f
 template lacks a volume. `Restore` (`Sessions.Resume`) returns `ErrMemoryStateLost` for every
 memory-tier session whose actor is gone, whatever its journal records (a session interrupted on its
 first turn included), since the snapshot it would resume went with the actor: after the resume
-fails, `GetActor` finds no actor, or a replacement. When the resume reported the actor missing and
-the session has a snapshot to restore, a replacement is one that does not hold that snapshot.
-Otherwise (another resume error, or no `SUSPEND` recorded because the host died during a turn), it
-is one whose UID is not the one the journal last recorded for that harness. The Placer passes
-`Restore` a reader for that UID (`api.InstanceRestorer`), called after `GetActor` answers. The
-recorded actor itself, or an actor with nothing to compare against (no recorded UID), keeps the
-resume error.
+fails, `GetActor` finds no actor, or a replacement: one whose UID is not the one the journal last
+recorded for that harness. The Placer passes `Restore` a reader for that UID
+(`api.InstanceRestorer`), called after `GetActor` answers. The recorded actor itself keeps the
+resume error whatever snapshot it holds: one newer than the journal's last `SUSPEND` names is still
+the session's RAM, left by a suspend whose `SUSPEND` append failed after the snapshot was taken, or
+by another host suspending it again. When the resume reported the actor missing and the actor still
+holds the session's snapshot, it keeps the resume error without the read. With no UID recorded to
+compare (journals from before the field, or a caller of plain `Restore`), an actor that does not
+hold the snapshot after a `NOT_FOUND` resume is treated as a replacement, so the session's own actor
+holding a newer snapshot reads as lost there; with no snapshot either, the actor keeps the resume
+error, and so does any actor when the journal cannot be read.
 
 Limits of these checks:
 
@@ -117,7 +121,9 @@ Limits of these checks:
 - The router reaches an actor by name, and the backend reads the UID when it looks. A turn that is
   already placed when its actor is replaced runs on the replacement and records the old UID; the
   next turn is refused, so one turn's output can come from a harness without the session's state.
-- Turns journaled before `compute_instance` existed recorded no UID and are not compared.
+- Turns journaled before `compute_instance` existed recorded no UID and are not compared. A
+  `Resume` of such a session falls back to the snapshot: after a `NOT_FOUND` resume, its own actor
+  holding a newer snapshot than the last `SUSPEND` names is reported lost.
 - `EXECUTION_START.compute_instance` and `Lifecycle.compute_instance` are in the record's canonical
   bytes. A binary built before them drops the fields on read and fails chain verification
   (`content_hash` mismatch) on a session with a memory-tier turn or a memory-tier fork child, so
@@ -161,8 +167,8 @@ attached to as if it held the cloned RAM. The child now records the clone's UID 
 - **Comparison.** `controller.LatestComputeInstance` returns the marker's UID until the child's own
   first turn records one; the marker is attributed like a turn with no recorded harness name. So the
   child's first `Exec` and a `Resume` compare the actor they were placed on with it, `Suspend` and a
-  stateful `Fork` of the child pass it to `Runtime.Snapshot`, and a `Resume` with no `SUSPEND`
-  recorded reads it through `api.InstanceRestorer`. Another UID is `api.ErrMemoryStateLost`
+  stateful `Fork` of the child pass it to `Runtime.Snapshot`, and a `Resume` whose restore fails
+  reads it through `api.InstanceRestorer` (see above). Another UID is `api.ErrMemoryStateLost`
   (`FAILED_PRECONDITION`): nothing is journaled, snapshotted or cloned and the harness does not run,
   as for every other identity check above. The error names the child and the `FORK` marker's clone.
 - **Hash chain.** `compute_instance` is part of the marker's canonical bytes when it is set. proto3

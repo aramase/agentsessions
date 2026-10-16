@@ -845,9 +845,11 @@ func TestCreateWithNoTurnCountCreates(t *testing.T) {
 // Restore resumes the actor that holds the session's snapshot. When a REQUIRES_MEMORY_SNAPSHOT
 // session's actor no longer exists, the snapshot went with it, so Restore reports ErrMemoryStateLost
 // (FAILED_PRECONDITION at the Sessions API) instead of the resume error, and creates nothing. So
-// does an actor whose UID is not the one the journal recorded, whatever the resume error. Every
-// other failure keeps the resume error, including a NOT_FOUND resume of the actor the journal
-// recorded, which substrate also answers for an actor whose template volume is missing.
+// does an actor whose UID is not the one the journal recorded, whatever the resume error and
+// whatever snapshot it holds. Every other failure keeps the resume error, including a NOT_FOUND
+// resume of the actor the journal recorded, which substrate also answers for an actor whose
+// template volume is missing, even when that actor holds a newer snapshot than the session's last
+// SUSPEND names.
 func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 	memory := func(m *mockControl) *substrate.Backend { return newMemoryBackend(m) }
 	stateless := func(m *mockControl) *substrate.Backend { return newBackend(m) }
@@ -894,12 +896,31 @@ func TestRestoreOfAGoneMemoryActorIsMemoryStateLost(t *testing.T) {
 			recorded: "!", wantCalls: []string{"resume:sess-x", "get:sess-x", "read-record"}},
 		{name: "stateless tier whose resume fails keeps the resume error whatever the record", backend: stateless, existing: substrate.StatusSuspended,
 			recorded: "uid-old", wantCalls: []string{"resume:sess-x"}},
-		// After a resume that reports the actor missing, GetActor decides: no actor, or one that
-		// does not hold the snapshot (a replacement created after the resume failed), is lost.
+		// After a resume that reports the actor missing, GetActor decides: no actor is lost. An
+		// actor that does not hold the snapshot is compared by UID when the journal records one,
+		// and is lost by the snapshot alone (a replacement holds none) when it records none.
 		{name: "memory tier whose resume reports the actor missing and which is gone", backend: memory,
 			resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true},
-		{name: "memory tier whose resume reports the actor missing and which is replaced", backend: memory, existing: substrate.StatusSuspended,
+		{name: "memory tier whose resume reports the actor missing and which is replaced, with no UID to compare", backend: memory, existing: substrate.StatusSuspended,
 			resumeErr: notFound, wantCalls: []string{"resume:sess-x", "get:sess-x"}, wantLost: true, wantMsg: "no longer holds the snapshot"},
+		{name: "memory tier whose resume reports the actor missing and which holds another snapshot, with no UID recorded", backend: memory,
+			existing: substrate.StatusSuspended, holds: "gs://snap/sess-x-B", recorded: "-", resumeErr: notFound,
+			wantCalls: []string{"resume:sess-x", "get:sess-x", "read-record"}, wantLost: true, wantMsg: "records no actor UID to compare"},
+		// The session's own actor holding a newer snapshot than the journal's last SUSPEND (the
+		// SUSPEND append failed after the snapshot was taken, or another host suspended it again)
+		// still holds the session's RAM: it keeps the resume error. Only another UID is lost.
+		{name: "memory tier whose resume reports the recorded actor missing and which holds a newer snapshot keeps the resume error", backend: memory,
+			existing: substrate.StatusSuspended, holds: "gs://snap/sess-x-B", recorded: "uid-sess-x-1", resumeErr: notFound,
+			wantCalls: []string{"resume:sess-x", "get:sess-x", "read-record"}},
+		{name: "memory tier whose resume reports the actor missing and which replaced the recorded one, holding another snapshot", backend: memory,
+			existing: substrate.StatusSuspended, holds: "gs://snap/sess-x-B", recorded: "uid-old", resumeErr: notFound,
+			wantCalls: []string{"resume:sess-x", "get:sess-x", "read-record"}, wantLost: true, wantMsg: `has UID "uid-sess-x-1", not the "uid-old"`},
+		{name: "memory tier whose resume reports the actor missing and which replaced the recorded one, holding no snapshot", backend: memory,
+			existing: substrate.StatusSuspended, recorded: "uid-old", resumeErr: notFound,
+			wantCalls: []string{"resume:sess-x", "get:sess-x", "read-record"}, wantLost: true, wantMsg: `has UID "uid-sess-x-1", not the "uid-old"`},
+		{name: "memory tier whose resume reports the actor missing, which holds another snapshot and whose record cannot be read, keeps the resume error", backend: memory,
+			existing: substrate.StatusSuspended, holds: "gs://snap/sess-x-B", recorded: "!", resumeErr: notFound,
+			wantCalls: []string{"resume:sess-x", "get:sess-x", "read-record"}},
 		// With no snapshot recorded (a host died during a turn), the actor's UID decides: only one
 		// other than the UID the journal recorded is a replacement.
 		{name: "memory tier whose resume reports the actor missing, with no snapshot and no UID to compare, keeps the resume error", backend: memory,
