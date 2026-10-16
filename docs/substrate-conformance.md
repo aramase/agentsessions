@@ -102,12 +102,13 @@ still there, the resume error stands, since substrate also answers `NOT_FOUND` f
 template lacks a volume. `Restore` (`Sessions.Resume`) returns `ErrMemoryStateLost` for every
 memory-tier session whose actor is gone, whatever its journal records (a session interrupted on its
 first turn included), since the snapshot it would resume went with the actor: after the resume
-fails, `GetActor` finds no actor, or, when the resume reported it missing, a replacement: one that
-does not hold the snapshot being restored, or, when the session has no `SUSPEND` recorded (its host
-died during a turn) and so no snapshot to compare, one whose UID is not the one the journal last
-recorded for that harness. The Placer passes `Restore` a reader for that UID
-(`api.InstanceRestorer`), called after `GetActor` answers. The recorded actor itself, or an actor
-with nothing to compare against (no snapshot and no recorded UID), keeps the resume error.
+fails, `GetActor` finds no actor, or a replacement. When the resume reported the actor missing and
+the session has a snapshot to restore, a replacement is one that does not hold that snapshot.
+Otherwise (another resume error, or no `SUSPEND` recorded because the host died during a turn), it
+is one whose UID is not the one the journal last recorded for that harness. The Placer passes
+`Restore` a reader for that UID (`api.InstanceRestorer`), called after `GetActor` answers. The
+recorded actor itself, or an actor with nothing to compare against (no recorded UID), keeps the
+resume error.
 
 Limits of these checks:
 
