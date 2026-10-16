@@ -42,11 +42,157 @@ client without substrate's Tag APIs still satisfies the base interface.
   generated ate-api client to `ControlClient`. The core never imports it.
 - A CI gate asserts `go list -deps ./...` on the core contains **zero** `agent-substrate` packages.
 
+### Substrate placement binding
+
+A session's journal records its harness name, not where that harness's actors live: the atespace,
+the ActorTemplate and the declared tier come from the host's configuration, and the session store
+keeps none of them. A `REQUIRES_MEMORY_SNAPSHOT` session's state lives in one actor's RAM, so a lost
+or replaced actor loses it.
+
+What is enforced today: `runtime/substrate` refuses to cold-create an actor for a
+`REQUIRES_MEMORY_SNAPSHOT` session whose journal already has a started turn (an `EXECUTION_START`)
+on that harness, whether that turn completed, failed or was interrupted, since any of them may have
+changed the actor's RAM. The Placer hands `Create` a counter in `api.SessionSpec.StartedTurns`, and
+`Create` calls it only after `GetActor` reports the actor missing, so a turn journaled before that
+point is counted, including one another host ran. The Placer attributes a turn by the harness name
+its `EXECUTION_START` recorded: a turn an `ExecRequest.harness` override sent to another harness is
+not counted, a name that aliases the same Placer in the registry is, and so is a turn it cannot
+attribute (no recorded name, a name this host does not serve, a legacy turn with no
+`EXECUTION_START`, or any turn when the Placer is not in a registry, since it cannot tell which
+backend another name ran on), so an unknown history refuses rather than cold-creates. A journal
+that cannot be read refuses too. `Create` returns `substrate.ErrMemoryStateLost` (wrapping
+`api.ErrMemoryStateLost`, `FAILED_PRECONDITION` at the Sessions API), names the session, and creates
+nothing. A stateless session, or a memory-tier session with no started turn, is created as before.
+
+The count cannot see a turn journaled after it. Host A finds no actor and counts no turn; host B
+then creates the actor, runs the session's first turn, and loses the actor; A's `CreateActor` then
+creates a replacement under the session's name, which every later `GetActor` finds. The actor's
+identity covers that case. A memory-tier incarnation carries the actor's UID
+(`ResourceMetadata.uid`, which substrate assigns at create and keeps across suspend and resume) as
+`api.Incarnation.ComputeInstance`, and each turn records it in `EXECUTION_START.compute_instance`.
+A fork child's `FORK` marker records the UID of its clone (see [A fork child's clone
+UID](#a-fork-childs-clone-uid)). Before `Exec` journals a turn, the controller compares the UID of
+the actor it was placed on with the latest UID recorded for that harness since the session's `FORK`
+marker, or the clone's UID that marker recorded (attributed as above), reading
+the history its compare-and-swap append extends, so a turn another host journaled first is either
+compared or makes the append fail. `Resume` makes the same comparison before it re-drives a turn or
+records the resume. A different UID is `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), names the
+session, and journals nothing; so is every later turn on either host. `Suspend` and a stateful
+`Fork` make the same comparison against the session's actor: the Placer reads the session's journal
+(at the fork point, for a fork) and passes the latest recorded UID to `Runtime.Snapshot`, and
+`runtime/substrate` refuses another actor, or a missing one, with `api.ErrMemoryStateLost`
+(`FAILED_PRECONDITION`) before it suspends it, and again on the UID the suspend reports, since
+substrate's `SuspendActor` takes no UID precondition. Neither then appends a `SUSPEND`, so the
+journal never records a replacement's snapshot as the session's checkpoint, and the fork clones
+nothing and records no child, where it would otherwise have cloned the replacement into children
+whose own turns never compare against the parent's UID. `runtime/substrate` refuses to place a
+memory-tier session on an actor that reports no UID, and refuses to snapshot one with a plain error
+(`INTERNAL`), a fork child before its first turn included, since a `ControlClient` that reports no
+UID breaks its contract. When `CreateActor` finds the name taken (`substrate.ErrActorExists`),
+`Create` attaches to that actor, so two hosts racing a session's first turn share one actor. The
+loser's turn fails at worst, never the session, and a retry attaches: `ABORTED` when its append
+loses, and `ABORTED` (`api.ErrComputeBusy`) when it finds the winner's actor `RESUMING`,
+`SUSPENDING` or `PAUSING`, or substrate refuses its resume because another operation holds the actor
+(substrate's `ABORTED`, reported as `substrate.ErrActorBusy`). An actor that is `CRASHED`,
+`DELETING`, `REVERTING` or in a state the adapter does not know is `INTERNAL`. When `Create` resumes
+a `SUSPENDED` actor and the resume reports it missing (`substrate.ErrActorNotFound`), `Create` reads
+it again: gone, it is a missing actor (a memory-tier session with started turns is
+`ErrMemoryStateLost`, anything else gets a new actor); replaced under the name, it is `ABORTED`;
+still there, the resume error stands, since substrate also answers `NOT_FOUND` for an actor whose
+template lacks a volume. `Restore` (`Sessions.Resume`) returns `ErrMemoryStateLost` for every
+memory-tier session whose actor is gone, whatever its journal records (a session interrupted on its
+first turn included), since the snapshot it would resume went with the actor: after the resume
+fails, `GetActor` finds no actor, or a replacement: one whose UID is not the one the journal last
+recorded for that harness. The Placer passes `Restore` a reader for that UID
+(`api.InstanceRestorer`), called after `GetActor` answers. The recorded actor itself keeps the
+resume error whatever snapshot it holds: one newer than the journal's last `SUSPEND` names is still
+the session's RAM, left by a suspend whose `SUSPEND` append failed after the snapshot was taken, or
+by another host suspending it again. When the resume reported the actor missing and the actor still
+holds the session's snapshot, it keeps the resume error without the read. With no UID recorded to
+compare (journals from before the field, or a caller of plain `Restore`), an actor that does not
+hold the snapshot after a `NOT_FOUND` resume is treated as a replacement, so the session's own actor
+holding a newer snapshot reads as lost there; with no snapshot either, the actor keeps the resume
+error, and so does any actor when the journal cannot be read.
+
+Limits of these checks:
+
+- The check only sees the tier the daemon is configured with, so it does not cover a mis-declared
+  tier.
+- The router reaches an actor by name, and the backend reads the UID when it looks. A turn that is
+  already placed when its actor is replaced runs on the replacement and records the old UID; the
+  next turn is refused, so one turn's output can come from a harness without the session's state.
+- Turns journaled before `compute_instance` existed recorded no UID and are not compared. A
+  `Resume` of such a session falls back to the snapshot: after a `NOT_FOUND` resume, its own actor
+  holding a newer snapshot than the last `SUSPEND` names is reported lost.
+- `EXECUTION_START.compute_instance` and `Lifecycle.compute_instance` are in the record's canonical
+  bytes. A binary built before them drops the fields on read and fails chain verification
+  (`content_hash` mismatch) on a session with a memory-tier turn or a memory-tier fork child, so
+  every host sharing a journal must be upgraded before any of them runs one, and rollback is not
+  supported for such sessions.
+- A fork child whose `FORK` marker records no UID (a marker written before
+  `Lifecycle.compute_instance` existed) is not compared before its first turn: an actor someone
+  else created under the child's name in that window is attached to. The started-turn count still
+  refuses to cold-create a missing child actor, since it includes the inherited prefix.
+- The refused replacement actor is not deleted: it keeps its name and any worker it holds until an
+  operator deletes it.
+
+Open questions, not implemented:
+
+- Can the atenet-router target an actor by UID, or reject a request whose expected UID differs? If it
+  could, a turn already placed would never reach a replacement actor.
+- Should `runtime/substrate` verify the live harness's `Describe` resumability against the configured
+  tier, given that `Placer.recheck` runs only for a `LiveDescriber` backend and does not compare
+  tiers?
+
+### A fork child's clone UID
+
+A memory-tier fork child runs on a clone of the parent's actor, with its own UID, and its copied
+prefix records only the parent's UIDs, which do not count for it. Without a record of the clone, the
+child had nothing to compare with until its first turn recorded one, so an actor created under the
+child's name in that window (the clone deleted out of band and another created in its place) was
+attached to as if it held the cloned RAM. The child now records the clone's UID at fork:
+
+- **Where.** In `Lifecycle.compute_instance` on the child's own `FORK` marker, set from the
+  `ComputeInstance` of the incarnation `Runtime.Fork` returned. For substrate that is the UID
+  `CreateActor{source_tag}` assigned the clone, and `Fork` returns it only when `ResumeActor`
+  reports the same UID: the clone is `SUSPENDED` between the two calls, so it can be deleted and
+  another actor created under the child's name, and `ResumeActor` resolves the name. Another UID
+  is `substrate.ErrActorBusy` (`ABORTED`; the parent still holds its snapshot and a retry mints a
+  new child), the fork records no child, and the replacement, which this fork's resume may have
+  woken, is left running, not suspended or deleted. The Placer clones each child before it writes
+  the child's journal, so the UID is known when the marker is appended. The marker is already one
+  per child, so no new record is needed; a separate per-child record was rejected because it would
+  be a second append that can fail after the marker (leaving the gap) and a new event kind older
+  readers do not know. A backend that sets no instance (a stateless fork) records none.
+- **Comparison.** `controller.LatestComputeInstance` returns the marker's UID until the child's own
+  first turn records one; the marker is attributed like a turn with no recorded harness name. So the
+  child's first `Exec` and a `Resume` compare the actor they were placed on with it, `Suspend` and a
+  stateful `Fork` of the child pass it to `Runtime.Snapshot`, and a `Resume` whose restore fails
+  reads it through `api.InstanceRestorer` (see above). Another UID is `api.ErrMemoryStateLost`
+  (`FAILED_PRECONDITION`): nothing is journaled, snapshotted or cloned and the harness does not run,
+  as for every other identity check above. The error names the child and the `FORK` marker's clone.
+- **Hash chain.** `compute_instance` is part of the marker's canonical bytes when it is set. proto3
+  JSON omits an empty field, so a marker that records no UID canonicalizes and hashes exactly as
+  before. `canon` and `hack/verify_chain.py --golden` pin both forms as interop vectors, and
+  `hack/verify_chain.py --journal` reads the field from the schema it builds. The child's copied
+  prefix is unchanged and still shares the parent's prefix hashes.
+- **Journals written before the field.** Their `FORK` markers record no UID, so a child forked by an
+  older build keeps today's behavior: its first turn is not compared, attaches to whatever actor is
+  under its name, and records that actor's UID for the turns after it.
+- **Older binaries.** A v0.1.x binary never reads the field: the journal is SQLite schema version 3
+  and v0.1.0 through v0.1.2 refuse it at open (`unsupported database schema`). A build from before
+  this change that opens version 3 decodes the marker without the field, so it does not compare the
+  child, and its `Verify` fails with a `content_hash` mismatch at the marker, or at an earlier
+  record carrying `EXECUTION_START.compute_instance`. A fork it takes of such a child re-appends the
+  copied prefix without the fields, so the new child's chain verifies on its own but no longer
+  shares the prefix hashes. This is the same as for `EXECUTION_START.compute_instance`, and the same
+  rollout applies.
+
 ## SPI → substrate mapping
 
 | `api.Runtime` | substrate Control |
 |---|---|
-| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots) |
+| `Create` | `CreateActor` + `ResumeActor` (starts from the template's golden snapshot, or cold-boots); refused for a memory-tier session with started turns and no actor |
 | `Snapshot(EXTERNAL)` | `SuspendActor` (RAM+disk snapshot to storage, worker freed, actor SUSPENDED) |
 | `Restore` | `ResumeActor` (restores the actor's own snapshot on a possibly-different worker) |
 | `Fork` (stateless) | `CreateActor` + `ResumeActor` — a replay-fork; the journal reconstructs the child |
@@ -102,8 +248,12 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
   request addressed to it, so the parent can be woken and suspended again between the fork's
   checkpoint and its tag. The backend checks on both sides of the tag that the parent is still
   SUSPENDED holding the snapshot the fork took (a suspend always writes a new one), and otherwise
-  deletes the tag and fails with `ErrSnapshotSuperseded`. That error wraps `api.ErrSnapshotSuperseded`,
-  which `Fork` reports as ABORTED; the caller retries at the parent's new head. The Placer's hold on
+  deletes the tag and fails with `ErrSnapshotSuperseded`. That error wraps
+  `api.ErrSnapshotSuperseded`, which `Fork` reports as ABORTED; the caller retries at the parent's
+  new head. When the tag itself fails, the backend reads the parent again: a parent that is gone is
+  `api.ErrMemoryStateLost` (FAILED_PRECONDITION), and one holding another snapshot is
+  `ErrSnapshotSuperseded`. A tag substrate refuses because another operation holds the parent's
+  lease (`ABORTED`) is `substrate.ErrActorBusy`, also ABORTED. The Placer's hold on
   the parent starts when the fork installs its checkpoint mark and covers the turns this
   `placement.Registry` drives. It does not stop a request from outside this Registry, or a turn whose
   `Runtime.Create` or `Runtime.Restore` was already in flight when the mark was installed; this
@@ -116,6 +266,20 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - A memory clone reflects the parent's RAM **now**, so it can only realize a fork at the log head.
   Forking a stateful session at a historical seq is refused with `ErrUnplaceable` →
   `FailedPrecondition` instead of pairing an old prefix with present-day RAM.
+- A memory clone must come from the actor the parent's turns ran on. When the actor under the
+  parent's name has another UID than the parent's journal last recorded, the fork is refused with
+  `api.ErrMemoryStateLost` → `FailedPrecondition` before the backend suspends it, or, if it was
+  replaced between that look and the suspend, after: the replacement is then left suspended, with
+  no SUSPEND event on the parent's chain and no child.
+- A child must be resumed on the clone the fork created. `CreateActorFromTag` reports the clone's
+  UID from `CreateActor`'s response, and `Fork` refuses a `ResumeActor` that reports another one
+  with `substrate.ErrActorBusy` (`ABORTED`), since the clone was deleted, and maybe replaced under
+  its name, while it was `SUSPENDED`. That replacement may have been woken by this fork's resume
+  and is left running, not suspended or deleted. When the resume fails, the backend reads the
+  child's name before it cleans up: it tears down only the actor with the clone's UID (the resume's
+  error stands), releases just the tag when the name is gone or holds another actor (`ABORTED`
+  too), and touches nothing when the read fails. `Stop` suspends and deletes by name, so an actor
+  created between that read and the delete is not protected.
 - A control client without the Tag APIs does not satisfy the optional `SnapshotCloner` interface; a
   stateful fork there fails loudly rather than degrading to a lossy replay-fork.
 - The child fan-out is all-or-nothing. If a child fails to provision, the ones already created are
@@ -160,8 +324,10 @@ Two properties make the failure paths above safe, both read off substrate's susp
   therefore neither errors nor mints a second snapshot — it re-reads the same one.
 - **A clone that never resumed is still deletable.** `CreateActor` starts an actor at
   `ACTOR_STATE_SUSPENDED`, and `DeleteActor` accepts `SUSPENDED`, `CRASHED`, or `DELETING`. So the
-  suspend-then-delete teardown the backend runs works on a child that failed at `ResumeActor`, and
-  rollback does not strand an actor or leak its tag.
+  suspend-then-delete teardown the backend runs works on a child that failed at `ResumeActor` and
+  still holds the clone's UID, and rollback does not strand an actor or leak its tag. The exception
+  is a cleanup that cannot read the child's name: it leaves the clone and its tag rather than risk
+  deleting an actor this fork did not create, and the error names both.
 
 ### It is not copy-on-write
 
@@ -337,6 +503,11 @@ prefix plus the `FORK` marker), then resumes the **parent** and requires it to c
 fork checkpoints its parent, it does not consume it. The fan-out is timed and logged, so a run reports
 the real per-child clone cost rather than leaving it asserted.
 
+`TestMemorySessionWhoseActorIsLostIsRefused` drives the counter one turn, deletes its actor and
+requires the next turn to fail with `api.ErrMemoryStateLost`, with no actor created and nothing
+journaled. A fresh actor would answer 1 again where the journal expects 2, which is the silent loss
+the check exists to stop.
+
 `TestForkOfMemoryHarnessAtHistoricalSeqIsRefused` pins the honest-degradation half on real compute: a
 stateful fork behind the head is refused, and the refusal leaves the parent usable.
 
@@ -462,7 +633,7 @@ for tier in echo counter; do
   hack/wait-worker-pool.sh "${tier}-gvisor"
 done
 HARNESS_IMAGE="${HARNESS_IMAGE}" ECHO_SANDBOX_CLASS=gvisor COUNTER_SANDBOX_CLASS=gvisor \
-  hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestFork|TestConcurrentSessionsReachTheirOwnActors' \
+  hack/run-e2e-job.sh 'TestStatelessReplay|TestSessionSuspendResume|TestSuspendUnderAnIdleHarnessStream|TestMemorySnapshotSuspendResume|TestMemorySessionWhoseActorIsLostIsRefused|TestFork|TestConcurrentSessionsReachTheirOwnActors' \
   "${E2E_IMAGE}" 1800
 ```
 

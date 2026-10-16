@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // lifecycleControl is a stateful ate-api Control double for the stateful fork path: it keeps one
@@ -34,6 +35,10 @@ type lifecycleControl struct {
 	completed         map[string]string // actor name -> uri of its most recent COMPLETED durable copy
 	calls             []string
 	completeOnSuspend bool
+	created           int // actors created so far, for server-assigned UIDs
+	// vanishOnSuspend deletes the actor as SuspendActor starts, as a delete landing between the
+	// backend's GetActor and its SuspendActor would.
+	vanishOnSuspend bool
 }
 
 func newLifecycleControl() *lifecycleControl {
@@ -62,7 +67,11 @@ func (l *lifecycleControl) CreateActor(_ context.Context, in *atepb.CreateActorR
 		st.LastAssignedGeneration = 1
 		l.completed[name] = uri
 	}
-	a := &atepb.Actor{Metadata: in.GetActor().GetMetadata(), ActorTemplate: in.GetActor().GetActorTemplate(), Status: st}
+	// Substrate assigns the UID at create; an actor created again under the name gets a new one.
+	md := proto.Clone(in.GetActor().GetMetadata()).(*atepb.ResourceMetadata)
+	l.created++
+	md.Uid = fmt.Sprintf("uid-%d", l.created)
+	a := &atepb.Actor{Metadata: md, ActorTemplate: in.GetActor().GetActorTemplate(), Status: st}
 	l.actors[name] = a
 	return a, nil
 }
@@ -86,6 +95,10 @@ func (l *lifecycleControl) SuspendActor(_ context.Context, in *atepb.SuspendActo
 	defer l.mu.Unlock()
 	name := in.GetActor().GetName()
 	l.record("suspend:" + name)
+	if l.vanishOnSuspend {
+		delete(l.actors, name)
+		delete(l.completed, name)
+	}
 	a, ok := l.actors[name]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "Actor %s not found", name)
@@ -135,7 +148,9 @@ func (l *lifecycleControl) CreateTag(_ context.Context, in *atepb.CreateTagReque
 	tg := in.GetTag()
 	l.record("tag:" + tg.GetSourceActor().GetName() + "->" + tg.GetMetadata().GetName())
 	if _, ok := l.actors[tg.GetSourceActor().GetName()]; !ok {
-		return nil, status.Errorf(codes.NotFound, "Actor %s not found", tg.GetSourceActor().GetName())
+		// RPCService.CreateTag in cmd/ateapi/internal/controlapi/tag.go reports a missing source
+		// actor as FAILED_PRECONDITION, not NOT_FOUND.
+		return nil, status.Errorf(codes.FailedPrecondition, "Actor %s not found", tg.GetSourceActor().GetName())
 	}
 	uri := l.completed[tg.GetSourceActor().GetName()]
 	if uri == "" {
@@ -266,5 +281,32 @@ func TestStatefulForkDetectsNewerGeneration(t *testing.T) {
 	}
 	if _, ok := ctl.actors["child"]; ok {
 		t.Fatal("a superseded fork must not create the child")
+	}
+}
+
+// An actor deleted after the memory-tier Snapshot checked it, and before it suspends, is refused as
+// lost state over the real adapter, not INTERNAL: substrate's NOT_FOUND from SuspendActor reaches the
+// backend as ErrActorNotFound, which Snapshot maps to api.ErrMemoryStateLost. A fork's snapshot of
+// the parent takes the same path.
+func TestSnapshotOfAnActorDeletedBeforeTheSuspendIsLostState(t *testing.T) {
+	ctx := context.Background()
+	ctl := newLifecycleControl()
+	b := memoryBackend(ctl)
+
+	parent, err := b.Create(ctx, &api.SessionSpec{SessionUID: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parent.ComputeInstance == "" {
+		t.Fatalf("incarnation=%+v, want the actor's UID in ComputeInstance", parent)
+	}
+	ctl.vanishOnSuspend = true
+	ctl.calls = nil
+	_, err = b.Snapshot(ctx, parent, api.SnapshotExternal)
+	if !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
+		t.Fatalf("snapshot err=%v, want ErrMemoryStateLost wrapping ErrActorNotFound", err)
+	}
+	if want := []string{"suspend:parent"}; !reflect.DeepEqual(ctl.calls, want) {
+		t.Fatalf("calls=%v want %v: the check before the suspend (GetActor, not recorded) passes", ctl.calls, want)
 	}
 }

@@ -284,6 +284,13 @@ message Lifecycle {
   string snapshot_external_uri = 4;
   bool snapshot_memory = 5;
   bool snapshot_sealed = 6;
+  // Set only on FORK: the identity of the compute instance the child was cloned onto, in the
+  // same form as ExecutionStart.compute_instance (substrate: the cloned actor's UID). The child's
+  // turns are compared with it until the child records one of its own, so a turn, Resume,
+  // Suspend or Fork placed on another instance before the child's first turn is refused. Empty
+  // means not recorded (a stateless fork, or a marker written before this field existed), and
+  // the child's first turn is not compared.
+  string compute_instance = 7;
 }
 
 // ExecutionStart is host-owned invocation state, committed before inputs and harness execution.
@@ -307,6 +314,14 @@ message ExecutionStart {
   // match (including rejection of an empty served version) before running the harness.
   // Empty recorded versions retain existing behavior; this field is opt-in, not required.
   string harness_version = 5;
+  // Opaque identity of the compute instance the turn was placed on, set only when the harness keeps
+  // its state in that instance's memory (REQUIRES_MEMORY_SNAPSHOT) and the backend can tell two
+  // instances behind the same name apart (substrate: the actor's server-assigned UID). The host
+  // refuses a later turn, or a Resume, whose compute reports a different identity than the latest
+  // one recorded on that harness since the session's FORK marker (or, before a fork child's first
+  // turn, the clone the marker recorded in Lifecycle.compute_instance): the state is gone. Empty
+  // means not recorded, and such a turn is not compared.
+  string compute_instance = 6;
 }
 
 // ---- Event ----

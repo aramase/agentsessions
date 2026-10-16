@@ -39,6 +39,10 @@ const (
 	StatusRunning
 	StatusSuspended
 	StatusTerminated
+	// StatusTransitioning is an actor on its way between states (resuming, suspending, pausing),
+	// usually because another host or the router is acting on it. It settles on its own, so the
+	// backend reports it as ErrActorBusy rather than as a permanent failure.
+	StatusTransitioning
 )
 
 // ActorRef identifies an actor within an atespace (substrate's tenant/namespace).
@@ -63,28 +67,54 @@ type ActorInfo struct {
 	// changes on every suspend, so comparing it against a recorded handle tells whether the actor
 	// still holds the snapshot a caller took.
 	Snapshot string
+	// UID is the actor's server-assigned identity (substrate ResourceMetadata.uid). It is fixed for the
+	// actor's lifetime, suspends and resumes included, and differs for an actor created later under the
+	// same name, which is how the backend tells a replacement apart. A REQUIRES_MEMORY_SNAPSHOT harness
+	// is placed only on an actor that reports one.
+	UID string
 }
 
 // ControlClient is the subset of agent-substrate's ateapi.Control gRPC that the backend uses. A
 // real substrate deployment implements this over pkg/proto/ateapipb; keeping it an interface here
 // is what keeps agentsessions free of a substrate dependency.
 type ControlClient interface {
+	// CreateActor creates a SUSPENDED actor holding no snapshot of its own. A name that is already
+	// taken must be reported as (or wrap) ErrActorExists.
 	CreateActor(ctx context.Context, actor ActorRef, template ObjectRef) error
 	// ResumeActor schedules the actor onto a worker. Substrate picks the source itself: the actor's
 	// own snapshot if it has one, else the template's golden snapshot (a freshly started harness),
 	// else a cold boot from the template spec. There is no per-call boot flag.
 	ResumeActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
-	// SuspendActor snapshots the actor to durable storage and frees the worker, returning the handle
-	// of the external snapshot it now holds (ActorInfo.Snapshot).
-	SuspendActor(ctx context.Context, actor ActorRef) (snapshot string, err error)
+	// SuspendActor snapshots the actor to durable storage and frees the worker, returning the actor
+	// as the suspend left it: ActorInfo.Snapshot is the external snapshot it now holds, and
+	// ActorInfo.UID tells which actor under the name was suspended. UID must be set: a memory-tier
+	// Snapshot refuses a suspend that reports none, since it cannot tell which actor it captured.
+	// An actor that does not exist must be reported as (or wrap) ErrActorNotFound.
+	SuspendActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 	DeleteActor(ctx context.Context, actor ActorRef) error
 	GetActor(ctx context.Context, actor ActorRef) (ActorInfo, error)
 }
 
-// ErrActorNotFound is what a ControlClient must return (or wrap) from GetActor when the actor does
-// not exist. It is a sentinel rather than a transport code so the seam stays neutral: the backend
-// decides "create it" vs "attach to it" without knowing that the client underneath speaks gRPC.
+// ErrActorNotFound is what a ControlClient must return (or wrap) from GetActor and SuspendActor when
+// the actor does not exist, and should from ResumeActor. After a resume that reports it, Restore
+// asks GetActor and reports a memory-tier session's state lost unless the actor still holds the
+// snapshot being restored, so a replacement created between the two calls does not hide the loss.
+// It is a sentinel rather than a transport code so the seam stays neutral: the backend decides
+// "create it" vs "attach to it", and whether a memory-tier session's in-RAM state is gone, without
+// knowing that the client underneath speaks gRPC.
 var ErrActorNotFound = errors.New("substrate: actor not found")
+
+// ErrActorExists is what a ControlClient must return (or wrap) from CreateActor when an actor of that
+// name already exists. Create treats it as another host having placed the session first, and
+// attaches to that actor instead of failing the turn.
+var ErrActorExists = errors.New("substrate: actor already exists")
+
+// ErrActorBusy is what a ControlClient must return (or wrap) when substrate refuses an operation
+// because another one holds the actor (substrate reports ABORTED: another host is resuming or
+// suspending it). The backend also returns it for an actor it finds mid-transition, and for one
+// replaced or deleted while Create was attaching to it. It wraps api.ErrComputeBusy, which the
+// session service reports as ABORTED, so the caller retries once the actor settles.
+var ErrActorBusy = fmt.Errorf("substrate: actor is busy with another operation: %w", api.ErrComputeBusy)
 
 // ErrTagExists is what a SnapshotCloner must return (or wrap) from TagActor when a tag of that name
 // already exists, finished or left pending by an earlier attempt. It tells the backend the tag is
@@ -112,9 +142,11 @@ type SnapshotCloner interface {
 	// copies, so a call that fails may still leave a pending tag behind; a name that was already
 	// taken fails with ErrTagExists.
 	TagActor(ctx context.Context, source ActorRef, tag SnapshotID) error
-	// CreateActorFromTag creates actor seeded from the snapshot behind tag. Substrate requires the
-	// actor's template to be the one the snapshot was taken under.
-	CreateActorFromTag(ctx context.Context, actor ActorRef, template ObjectRef, tag SnapshotID) error
+	// CreateActorFromTag creates actor seeded from the snapshot behind tag and reports the actor it
+	// created, UID included. Substrate requires the actor's template to be the one the snapshot was
+	// taken under. Fork compares the reported UID with the one ResumeActor reports, so a clone
+	// deleted and replaced under its name between the two calls is refused rather than recorded.
+	CreateActorFromTag(ctx context.Context, actor ActorRef, template ObjectRef, tag SnapshotID) (ActorInfo, error)
 	// DeleteTag removes a tag and collects its copy of the snapshot. An actor seeded from the tag
 	// borrows that copy until its own first suspend, so a tag must outlive its unsuspended clones.
 	DeleteTag(ctx context.Context, tag SnapshotID) error
@@ -188,10 +220,24 @@ func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespa
 //     starts it from the template's golden snapshot (a harness captured right after it became ready,
 //     before any session touched it) or, if that is not built yet, cold-boots the template spec.
 //     Either way the harness carries no session state, which is what the first placement needs.
+//     For a REQUIRES_MEMORY_SNAPSHOT harness whose session already has started turns on this
+//     harness (SessionSpec.StartedTurns, counted after GetActor reports the actor missing), that is
+//     exactly wrong: the state those turns built lived only in the missing actor's RAM, so Create
+//     refuses with ErrMemoryStateLost and creates nothing.
 //   - RUNNING — attach. Return the actor's incarnation without touching it. This covers the second
 //     and later turns of a session, and the first turn of a FORKED CHILD, whose actor was created
 //     from the parent's snapshot and resumed before it was ever handed out.
 //   - SUSPENDED — resume, which restores the actor's own snapshot, so its RAM is what comes back.
+//
+// When CreateActor finds the name taken (ErrActorExists), another host placed the session between
+// this call's GetActor and its CreateActor, so Create attaches to or resumes that actor as above.
+//
+// For a REQUIRES_MEMORY_SNAPSHOT harness the incarnation carries the actor's UID as ComputeInstance,
+// and the host refuses the turn if an earlier turn recorded another one (api.ErrMemoryStateLost).
+// That catches an actor created under the session's name after the actor its turns ran on was lost:
+// a host that counted no started turns can create one before another host's first turn is journaled,
+// and the count above cannot see that turn. A fork child's FORK marker records the UID of the clone
+// Fork returns, so an actor created under the child's name before its first turn is refused too.
 //
 // The distinction matters most for a REQUIRES_MEMORY_SNAPSHOT harness: recreating an actor that
 // already holds live state would silently discard exactly the state fork and suspend exist to carry,
@@ -217,19 +263,26 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	}
 
 	ref := b.ref(sessionUID)
-	switch info, err := b.ctl.GetActor(ctx, ref); {
-	case err == nil && info.Status == StatusRunning:
-		return b.incarnation(sessionUID, info)
-	case err == nil && info.Status == StatusSuspended:
-		info, err := b.ctl.ResumeActor(ctx, ref) // restores the actor's own snapshot
+	if inc, found, err := b.attach(ctx, ref); found || err != nil {
+		return inc, err
+	}
+
+	// The actor is gone (deleted out of band, or the backend now points at another atespace) and no
+	// snapshot or tag of it is reachable from here. A stateless harness rebuilds from the journal; a
+	// memory-tier one would silently continue the journal with none of the state it recorded. Count
+	// the turns only now that the actor is known to be missing: every turn that ran on it was journaled
+	// before it ran, so a turn another host journaled before this point is counted too. One journaled
+	// after it is left to the host's compute-instance check (see the doc comment above).
+	if b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot && s.StartedTurns != nil {
+		turns, err := s.StartedTurns()
 		if err != nil {
-			return api.Incarnation{}, fmt.Errorf("substrate: resume suspended actor: %w", err)
+			return api.Incarnation{}, fmt.Errorf("substrate: count the session's started turns: %w", err)
 		}
-		return b.incarnation(sessionUID, info)
-	case err == nil:
-		return api.Incarnation{}, fmt.Errorf("substrate: actor %q is in state %v, not placeable", ref.Name, info.Status)
-	case !errors.Is(err, ErrActorNotFound):
-		return api.Incarnation{}, fmt.Errorf("substrate: get actor: %w", err)
+		if turns > 0 {
+			return api.Incarnation{}, fmt.Errorf("%w: session %q has %d started turn(s) on harness %q but actor %s/%s does not exist, "+
+				"so its in-RAM state cannot be reconstructed; no actor was created",
+				ErrMemoryStateLost, sessionUID, turns, b.descriptor.ID, ref.Atespace, ref.Name)
+		}
 	}
 
 	createFinished := observability.StartDebug(ctx, b.logger, "runtime.substrate", "create_actor",
@@ -237,6 +290,17 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 		"atespace", ref.Atespace,
 	)
 	if err := b.ctl.CreateActor(ctx, ref, b.template); err != nil {
+		if errors.Is(err, ErrActorExists) {
+			// Another host created the actor after this call looked. Use it as that host does; the
+			// host's compute-instance check still refuses it if it replaced a lost actor.
+			createFinished(nil, "actor_exists", true)
+			inc, found, aerr := b.attach(ctx, ref)
+			if !found && aerr == nil {
+				// Deleted again since. A retry looks afresh, and refuses a lost memory-tier session.
+				aerr = fmt.Errorf("%w: actor %s/%s already existed at create and is now gone: %w", ErrActorBusy, ref.Atespace, ref.Name, err)
+			}
+			return inc, aerr
+		}
 		createFinished(err, "error_kind", "create_actor_failed")
 		return api.Incarnation{}, fmt.Errorf("substrate: create actor: %w", err)
 	}
@@ -256,8 +320,72 @@ func (b *Backend) Create(ctx context.Context, s *api.SessionSpec) (inc api.Incar
 	return inc, err
 }
 
+// attach returns the incarnation of the session's existing actor: a RUNNING actor as it is, a
+// SUSPENDED one after resuming it, which restores its own snapshot. found is false, with no error,
+// when the actor does not exist, including when it is deleted between the look and the resume (see
+// resumeFailed). An actor mid-transition is ErrActorBusy, as is a resume substrate refuses because
+// another operation holds the actor (the ControlClient wraps it), so a host that lost a race for a
+// session's first turn gets a retryable error, not a permanent one.
+func (b *Backend) attach(ctx context.Context, ref ActorRef) (inc api.Incarnation, found bool, err error) {
+	info, err := b.ctl.GetActor(ctx, ref)
+	switch {
+	case errors.Is(err, ErrActorNotFound):
+		return api.Incarnation{}, false, nil
+	case err != nil:
+		return api.Incarnation{}, false, fmt.Errorf("substrate: get actor: %w", err)
+	case info.Status == StatusRunning:
+	case info.Status == StatusSuspended:
+		seen := info
+		if info, err = b.ctl.ResumeActor(ctx, ref); err != nil {
+			return b.resumeFailed(ctx, ref, seen, err)
+		}
+	case info.Status == StatusTransitioning:
+		// Usually another host's Create is resuming the actor it just made. Retrying finds it
+		// RUNNING (or SUSPENDED); placing onto it now would race that operation.
+		return api.Incarnation{}, true, fmt.Errorf("%w: actor %q is mid-transition", ErrActorBusy, ref.Name)
+	default:
+		return api.Incarnation{}, true, fmt.Errorf("substrate: actor %q is in state %v, not placeable", ref.Name, info.Status)
+	}
+	inc, err = b.incarnation(ref.Name, info)
+	return inc, true, err
+}
+
+// resumeFailed classifies a failed resume of the SUSPENDED actor attach found (seen). A resume that
+// reports the actor missing (ErrActorNotFound) is checked with GetActor, because the actor can be
+// deleted, or deleted and created again, between the look and the resume, and substrate also
+// answers NOT_FOUND for an actor that exists (a template volume it cannot find). Gone now, it is
+// reported as not found, so Create treats it as any missing actor: a memory-tier session with
+// started turns is refused with ErrMemoryStateLost, anything else gets a new actor. Replaced (another
+// UID), the resume is ErrActorBusy, which is retryable: the next attempt attaches to the replacement,
+// which the host refuses if it recorded another UID. Otherwise the resume error stands.
+func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo, resumeErr error) (api.Incarnation, bool, error) {
+	if errors.Is(resumeErr, ErrActorNotFound) {
+		now, err := b.ctl.GetActor(ctx, ref)
+		switch {
+		case errors.Is(err, ErrActorNotFound):
+			return api.Incarnation{}, false, nil
+		case err == nil && now.UID != seen.UID:
+			return api.Incarnation{}, true, fmt.Errorf("%w: actor %s/%s was replaced while it was being resumed: %w",
+				ErrActorBusy, ref.Atespace, ref.Name, resumeErr)
+		}
+	}
+	return api.Incarnation{}, true, fmt.Errorf("substrate: resume suspended actor: %w", resumeErr)
+}
+
 // Snapshot suspends the actor: RAM+disk snapshot to external storage, worker freed. Only the
 // external (cold/suspend) kind is supported; substrate has no node-local warm checkpoint API today.
+//
+// When in.ComputeInstance is set (Placer.Suspend and a stateful fork pass the UID the journal last
+// recorded), the actor under the name must be that one. Snapshot checks it before suspending, so a
+// replacement is refused with api.ErrMemoryStateLost untouched, and again on the actor the suspend
+// reports, since the actor can be replaced between the look and the suspend; substrate's
+// SuspendActor has no UID precondition to close that window. In the second case the replacement is
+// left suspended, which costs nothing: it holds none of the session's state and the host refuses it
+// on every later turn. An actor that is gone is refused with api.ErrMemoryStateLost as well, since
+// the state it held went with it. An actor that reports no UID is refused with a plain error: it
+// cannot be compared, and that is a ControlClient fault, not evidence of a replacement. A
+// REQUIRES_MEMORY_SNAPSHOT backend refuses a suspend that reports no UID even when no instance is
+// recorded (a fork child whose FORK marker records no clone, before its first turn).
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,
@@ -276,12 +404,30 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 		"atespace", b.atespace,
 		"reason", "snapshot",
 	)
-	uri, err := b.ctl.SuspendActor(ctx, b.ref(in.ID))
+	if in.ComputeInstance != "" {
+		info, err := b.ctl.GetActor(ctx, b.ref(in.ID))
+		if err != nil {
+			err = b.instanceGone(in, "get actor before snapshot", err)
+			suspendFinished(err, "error_kind", snapshotErrorKind(err, "get_actor_failed"))
+			return api.SnapshotRef{}, err
+		}
+		if err := b.requireInstance(in, info.UID); err != nil {
+			suspendFinished(err, "error_kind", snapshotErrorKind(err, "actor_uid_missing"))
+			return api.SnapshotRef{}, err
+		}
+	}
+	info, err := b.ctl.SuspendActor(ctx, b.ref(in.ID))
 	if err != nil {
-		suspendFinished(err, "error_kind", "suspend_actor_failed")
-		return api.SnapshotRef{}, fmt.Errorf("substrate: suspend actor: %w", err)
+		err = b.instanceGone(in, "suspend actor", err)
+		suspendFinished(err, "error_kind", snapshotErrorKind(err, "suspend_actor_failed"))
+		return api.SnapshotRef{}, err
+	}
+	if err := b.requireInstance(in, info.UID); err != nil {
+		suspendFinished(err, "error_kind", snapshotErrorKind(err, "actor_uid_missing"))
+		return api.SnapshotRef{}, err
 	}
 	suspendFinished(nil)
+	uri := info.Snapshot
 	// Local carries the actor name (the handle Restore/ResumeActor needs); ExternalURI carries the
 	// external snapshot the suspend produced. Fork clones by tagging the ACTOR, not this handle, and
 	// uses the handle to check that the actor still holds this exact snapshot when it is tagged.
@@ -289,8 +435,73 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 	return snapshot, nil
 }
 
+// instanceGone wraps err, from the control call op, for Snapshot. When the actor is not found and
+// in requires a compute instance, or the harness is REQUIRES_MEMORY_SNAPSHOT (a fork child whose
+// FORK marker records no clone has no recorded instance before its first turn), the actor that
+// held the session's in-RAM state is gone for good, so the result wraps api.ErrMemoryStateLost as
+// well as err, the way Restore reports a missing memory-tier actor; any other error is only
+// wrapped.
+func (b *Backend) instanceGone(in api.Incarnation, op string, err error) error {
+	memory := in.ComputeInstance != "" || b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	if !memory || !errors.Is(err, ErrActorNotFound) {
+		return fmt.Errorf("substrate: %s: %w", op, err)
+	}
+	instance := ""
+	if in.ComputeInstance != "" {
+		instance = fmt.Sprintf(", instance %q", in.ComputeInstance)
+	}
+	return fmt.Errorf("%w: actor %s/%s%s, which held the session's in-RAM state, no longer exists, "+
+		"so that state cannot be captured; nothing was snapshotted for the session: %s: %w",
+		api.ErrMemoryStateLost, b.atespace, in.ID, instance, op, err)
+}
+
+// snapshotErrorKind is the debug error_kind for a failed step of Snapshot: memory_state_lost when
+// err wraps api.ErrMemoryStateLost, else the step's own kind.
+func snapshotErrorKind(err error, step string) string {
+	if errors.Is(err, api.ErrMemoryStateLost) {
+		return "memory_state_lost"
+	}
+	return step
+}
+
+// requireInstance returns an error wrapping api.ErrMemoryStateLost when in requires a compute
+// instance and the actor under in.ID reports another UID. An actor that reports no UID cannot be
+// compared at all, which is a ControlClient that breaks its contract rather than a replacement, so
+// that is a plain error. A REQUIRES_MEMORY_SNAPSHOT backend refuses a missing UID even when in
+// records no instance (a fork child whose FORK marker records no clone, before its first turn):
+// the ControlClient contract requires one, and the snapshot would otherwise be taken of an actor
+// nobody could identify.
+func (b *Backend) requireInstance(in api.Incarnation, uid string) error {
+	memory := in.ComputeInstance != "" || b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
+	if !memory {
+		return nil
+	}
+	if uid == "" {
+		why := "so the snapshot of the session's in-RAM state could not be tied to the actor that took it"
+		if in.ComputeInstance != "" {
+			why = fmt.Sprintf("so it could not be checked against instance %q, which holds the session's in-RAM state", in.ComputeInstance)
+		}
+		return fmt.Errorf("substrate: actor %s/%s reported no UID, %s; no checkpoint was recorded for the session",
+			b.atespace, in.ID, why)
+	}
+	if in.ComputeInstance == "" || uid == in.ComputeInstance {
+		return nil
+	}
+	return fmt.Errorf("%w: actor %s/%s is instance %q, but the session's journal recorded "+
+		"instance %q, which has been replaced, "+
+		"so its in-RAM state cannot be captured; nothing was snapshotted for the session",
+		api.ErrMemoryStateLost, b.atespace, in.ID, uid, in.ComputeInstance)
+}
+
 // Restore brings the actor back from its snapshot onto a (possibly different) worker.
-func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Incarnation, err error) {
+func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (api.Incarnation, error) {
+	return b.RestoreInstance(ctx, ref, nil)
+}
+
+// RestoreInstance is Restore with a reader for the UID of the actor the session's journal last
+// recorded (api.InstanceRestorer); nil reads none. After a failed resume, that UID is what tells the
+// session's actor, still there, from a replacement (see memoryActorGone).
+func (b *Backend) RestoreInstance(ctx context.Context, ref api.SnapshotRef, recorded func() (string, error)) (inc api.Incarnation, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "restore_compute",
 		"actor", ref.Local,
 		"atespace", b.atespace,
@@ -310,11 +521,78 @@ func (b *Backend) Restore(ctx context.Context, ref api.SnapshotRef) (inc api.Inc
 	info, err := b.ctl.ResumeActor(ctx, b.ref(name)) // restores the actor's own snapshot
 	if err != nil {
 		resumeFinished(err, "error_kind", "resume_actor_failed")
+		if lost := b.memoryActorGone(ctx, ref, recorded, err); lost != nil {
+			return api.Incarnation{}, lost
+		}
 		return api.Incarnation{}, fmt.Errorf("substrate: resume (restore) actor: %w", err)
 	}
 	resumeFinished(nil, "actor_status", info.Status)
 	inc, err = b.incarnation(name, info)
 	return inc, err
+}
+
+// memoryActorGone reports, after resumeErr, that the actor holding a REQUIRES_MEMORY_SNAPSHOT
+// session's state is gone, as ErrMemoryStateLost wrapping resumeErr too: the snapshot Restore would
+// resume belonged to that actor, so the state went with it and there is nothing to retry. It asks
+// GetActor, whose ControlClient contract reports a missing actor as ErrActorNotFound. The actor is
+// gone when GetActor finds none. An actor GetActor finds is compared with the session's record:
+//
+//   - After a resume that reported the actor missing (ErrActorNotFound), with a snap.ExternalURI,
+//     an actor that holds it keeps the resume error: substrate also answers a resume with NOT_FOUND
+//     for an actor that still exists (a template volume it cannot find).
+//   - Otherwise, an actor whose UID is not the one the journal last recorded, read through recorded
+//     after GetActor answers, is a replacement. The recorded actor keeps the resume error, whatever
+//     snapshot it holds: one newer than snap is still the session's own RAM, left by a suspend whose
+//     SUSPEND append failed after the snapshot was taken, or by another host suspending it again.
+//   - With no UID to compare with (a nil recorded, or a journal that records none), an actor that
+//     does not hold snap.ExternalURI after a NOT_FOUND resume is reported gone, since a replacement
+//     holds no snapshot of the session's; this cannot tell the session's own actor holding a newer
+//     snapshot from a replacement. Without a snap.ExternalURI either, the actor keeps the resume
+//     error.
+//
+// It returns nil for a stateless harness, whose state is in the journal, and when GetActor or
+// recorded fails, so the caller keeps the resume error.
+func (b *Backend) memoryActorGone(ctx context.Context, snap api.SnapshotRef, recorded func() (string, error), resumeErr error) error {
+	if b.descriptor.Capabilities.Resumability != api.ResumabilityRequiresMemorySnapshot {
+		return nil
+	}
+	ref := b.ref(snap.Local)
+	info, err := b.ctl.GetActor(ctx, ref)
+	switch {
+	case errors.Is(err, ErrActorNotFound):
+	case err != nil:
+		return nil
+	case errors.Is(resumeErr, ErrActorNotFound) && snap.ExternalURI != "" && info.Snapshot == snap.ExternalURI:
+		return nil
+	default:
+		instance := ""
+		if recorded != nil {
+			id, err := recorded()
+			if err != nil {
+				// Lost is permanent and a journal read can fail transiently: keep the resume error.
+				return nil
+			}
+			instance = id
+		}
+		switch {
+		case instance != "" && info.UID == instance:
+			return nil
+		case instance != "":
+			return fmt.Errorf("%w: actor %s/%s of session %q on harness %q has UID %q, "+
+				"not the %q the session's journal recorded "+
+				"(replaced), so its in-RAM state cannot be restored; no actor was created: resume: %w",
+				ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, info.UID, instance, resumeErr)
+		case errors.Is(resumeErr, ErrActorNotFound) && snap.ExternalURI != "":
+			return fmt.Errorf("%w: actor %s/%s of session %q on harness %q no longer holds the snapshot the session was suspended to "+
+				"and the session's journal records no actor UID to compare (replaced, or suspended again since), "+
+				"so its in-RAM state cannot be restored; no actor was created: resume: %w",
+				ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, resumeErr)
+		default:
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: actor %s/%s of session %q on harness %q does not exist, so its in-RAM state cannot be restored; no actor was created: resume: %w",
+		ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, resumeErr)
 }
 
 // ErrNoSnapshotToClone is returned when a REQUIRES_MEMORY_SNAPSHOT harness is forked without a
@@ -329,6 +607,14 @@ var ErrNoSnapshotToClone = errors.New("substrate: fork of a memory-snapshot harn
 // checkpoint and the tag would hand the children RAM that does not match their copied journal prefix.
 // It wraps api.ErrSnapshotSuperseded, which the session service reports as ABORTED.
 var ErrSnapshotSuperseded = fmt.Errorf("substrate: parent snapshot was superseded before the fork could tag it: %w", api.ErrSnapshotSuperseded)
+
+// ErrMemoryStateLost is returned by Create when a REQUIRES_MEMORY_SNAPSHOT session that already has a
+// started turn on this harness has no actor to attach to or resume. Its state existed only in that
+// actor's RAM, so a new actor from the template would continue the journal with a harness that
+// remembers none of it. Restore returns it for every such session whose actor is gone, whatever its
+// journal records (an interrupted first turn included), since the snapshot went with the actor.
+// It wraps api.ErrMemoryStateLost, which the session service reports as FAILED_PRECONDITION.
+var ErrMemoryStateLost = fmt.Errorf("substrate: refusing to cold-create an actor: %w", api.ErrMemoryStateLost)
 
 // Fork branches a session's compute into a child incarnation.
 //
@@ -400,6 +686,13 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		// remains. Release it, unless the name was already taken: that tag is not this attempt's.
 		if !errors.Is(err, ErrTagExists) {
 			b.releaseForkTag(ctx, cloner, child)
+			// The parent may have been deleted, or woken and suspended again, while the tag ran:
+			// substrate reports a missing source as FAILED_PRECONDITION, which says nothing typed.
+			// Read the parent again so those are api.ErrMemoryStateLost and ErrSnapshotSuperseded,
+			// as on either side of the tag.
+			if gone := b.requireSnapshot(ctx, parent, ref.ExternalURI); errors.Is(gone, api.ErrMemoryStateLost) || errors.Is(gone, ErrSnapshotSuperseded) {
+				return api.Incarnation{}, fmt.Errorf("%w; the tag of parent %q failed: %v", gone, parent.Name, err)
+			}
 		}
 		return api.Incarnation{}, fmt.Errorf("substrate: tag parent %q: %w", parent.Name, err)
 	}
@@ -407,17 +700,35 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 		b.releaseForkTag(ctx, cloner, child)
 		return api.Incarnation{}, err
 	}
-	if err := cloner.CreateActorFromTag(ctx, b.ref(child), b.template, tag); err != nil {
+	created, err := cloner.CreateActorFromTag(ctx, b.ref(child), b.template, tag)
+	if err != nil {
 		// No actor exists yet, but the tag does. Release it: the tag name is derived from a child UID
 		// the caller is about to discard, so this is the last moment it can be named.
 		b.releaseForkTag(ctx, cloner, child)
 		return api.Incarnation{}, fmt.Errorf("substrate: create actor from tag %q: %w", tag.Name, err)
 	}
-	// The child holds the tag's snapshot, so resuming it restores the cloned RAM.
-	info, err := b.ctl.ResumeActor(ctx, b.ref(child))
-	if err != nil {
+	if created.UID == "" {
+		// The host records the clone's UID on the child's FORK marker and refuses any other actor
+		// under the child's name, so a clone it cannot identify is never handed out. The create
+		// just succeeded, so the actor under the name is this call's.
 		b.destroyChild(ctx, child)
-		return api.Incarnation{}, fmt.Errorf("substrate: resume cloned actor: %w", err)
+		return api.Incarnation{}, fmt.Errorf("substrate: create actor from tag %q reported no actor UID; a %s clone must report one",
+			tag.Name, api.ResumabilityRequiresMemorySnapshot)
+	}
+	// The child holds the tag's snapshot, so resuming it restores the cloned RAM. The clone is
+	// SUSPENDED until then, so it can be deleted and another actor created under its name, and
+	// ResumeActor resolves the name, not the UID: compare the UID it reports with the clone's.
+	childRef := b.ref(child)
+	info, err := b.ctl.ResumeActor(ctx, childRef)
+	if err != nil {
+		return api.Incarnation{}, b.discardClone(ctx, cloner, childRef, created.UID, fmt.Errorf("substrate: resume cloned actor: %w", err))
+	}
+	if info.UID != created.UID {
+		// ResumeActor has no UID precondition, so it may have resumed the replacement. That actor
+		// is not this fork's: leave it running and release only the tag, which no clone holds now.
+		b.releaseForkTag(ctx, cloner, child)
+		return api.Incarnation{}, fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); its cloned RAM is gone, no child was created, and the replacement may have been woken by this fork's resume and is left running, not suspended or deleted",
+			ErrActorBusy, childRef.Atespace, childRef.Name, created.UID, info.UID)
 	}
 	inc, err = b.incarnation(child, info)
 	if err != nil {
@@ -430,9 +741,14 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 }
 
 // requireSnapshot fails with ErrSnapshotSuperseded unless the actor is SUSPENDED holding exactly
-// snapshot.
+// snapshot. A parent that no longer exists took the snapshot with it, so that is
+// api.ErrMemoryStateLost: no child can be cloned from it, and retrying cannot help.
 func (b *Backend) requireSnapshot(ctx context.Context, actor ActorRef, snapshot string) error {
 	info, err := b.ctl.GetActor(ctx, actor)
+	if errors.Is(err, ErrActorNotFound) {
+		return fmt.Errorf("%w: fork parent %s/%s no longer exists, so the snapshot it held cannot be cloned; no child was created: %w",
+			api.ErrMemoryStateLost, actor.Atespace, actor.Name, err)
+	}
 	if err != nil {
 		return fmt.Errorf("substrate: get fork parent %q: %w", actor.Name, err)
 	}
@@ -460,6 +776,37 @@ func (b *Backend) destroyChild(ctx context.Context, child string) {
 	ctx, cancel := cleanupContext(ctx)
 	defer cancel()
 	_ = b.Stop(ctx, api.Incarnation{ID: child})
+}
+
+// discardClone cleans up after a fork whose clone (created with uid) failed to resume, and returns
+// cause. It reads the child's name first so it never tears down an actor this fork did not create:
+// the clone is destroyed only while the name still resolves to uid, and cause stands. Gone or
+// replaced, only the tag is released and the fork is ErrActorBusy, retryable: the parent still
+// holds its snapshot and a retry clones a new child. When the read fails, nothing is touched and
+// the error says so. Stop suspends and deletes by name, so an actor created between this read and
+// Stop's delete is not protected.
+// TODO(spike): substrate's DeleteActorRequest.options.uid can make that delete UID-conditional, but
+// ControlClient.DeleteActor does not carry it and Stop's SuspendActor has no such precondition.
+func (b *Backend) discardClone(ctx context.Context, cloner SnapshotCloner, ref ActorRef, uid string, cause error) error {
+	readCtx, cancel := cleanupContext(ctx)
+	now, err := b.ctl.GetActor(readCtx, ref)
+	cancel()
+	switch {
+	case err == nil && now.UID == uid:
+		b.destroyChild(ctx, ref.Name)
+	case err == nil:
+		b.releaseForkTag(ctx, cloner, ref.Name)
+		return fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); the replacement was left in place: %w",
+			ErrActorBusy, ref.Atespace, ref.Name, uid, now.UID, cause)
+	case errors.Is(err, ErrActorNotFound):
+		b.releaseForkTag(ctx, cloner, ref.Name)
+		return fmt.Errorf("%w: fork child %s/%s (clone %q) was deleted between its create and resume: %w",
+			ErrActorBusy, ref.Atespace, ref.Name, uid, cause)
+	default:
+		return fmt.Errorf("%w; fork child %s/%s (clone %q) could not be read for cleanup, so it and its tag %q were left in place: %v",
+			cause, ref.Atespace, ref.Name, uid, forkTag(ref.Name), err)
+	}
+	return cause
 }
 
 // releaseForkTag deletes the tag a fork took of the parent, for the case where no child actor was
@@ -575,9 +922,22 @@ const TargetActorHeader = "ate-target-actor"
 // and CallMetadata names the actor: substrate removed the direct pod-IP ingress, so the router is the
 // only path to the harness. An actor that is not RUNNING after a resume is a loud error rather than a
 // handle the Placer would dial only to have the router resume it behind the backend's back.
+//
+// For a REQUIRES_MEMORY_SNAPSHOT harness the actor's UID becomes the incarnation's ComputeInstance,
+// which the host records and compares per turn; an actor that reports no UID is refused, since the
+// host could not tell it from a replacement. A stateless harness's state is in the journal, so a
+// replaced actor is fine and no instance is set.
 func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, error) {
 	if info.Status != StatusRunning {
 		return api.Incarnation{}, fmt.Errorf("substrate: actor %q is %v after resume, want running", uid, info.Status)
+	}
+	instance := ""
+	if b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot {
+		if info.UID == "" {
+			return api.Incarnation{}, fmt.Errorf("substrate: actor %s/%s reported no UID, so a replacement could not be told apart "+
+				"from the actor that holds the session's in-RAM state", b.atespace, uid)
+		}
+		instance = info.UID
 	}
 	return api.Incarnation{
 		ID:           uid,
@@ -585,6 +945,9 @@ func (b *Backend) incarnation(uid string, info ActorInfo) (api.Incarnation, erro
 		Address:      b.router,
 		CallMetadata: map[string]string{TargetActorHeader: b.atespace + "/" + uid},
 		Runtime:      "substrate",
+		// The router reaches the actor by name, so this records which actor the name resolved to
+		// when the backend looked, not which one the router reaches later.
+		ComputeInstance: instance,
 	}, nil
 }
 
@@ -600,6 +963,10 @@ func substrateErrorKind(err error) string {
 		return "invalid_spec"
 	case errors.Is(err, ErrSnapshotSuperseded):
 		return "snapshot_superseded"
+	case errors.Is(err, api.ErrMemoryStateLost):
+		return "memory_state_lost"
+	case errors.Is(err, api.ErrComputeBusy):
+		return "actor_busy"
 	default:
 		return "runtime_operation_failed"
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -215,4 +216,79 @@ type countedRemoteOverrideBackend struct {
 func (b *countedRemoteOverrideBackend) Describe(ctx context.Context) (api.Descriptor, error) {
 	b.describes.Add(1)
 	return b.Backend.Describe(ctx)
+}
+
+// An older interrupted turn that overrode a stateless session onto a memory-tier harness, cut
+// after its gated tool call and before the approval request, is refused on recovery before that
+// request is repaired: Resume and no-input Exec leave the journal, the fence and both harnesses'
+// compute unchanged.
+func TestRecoveryRefusesMemoryOverrideBeforeApprovalRepair(t *testing.T) {
+	for _, operation := range []string{"Resume", "recovering Exec"} {
+		t.Run(operation, func(t *testing.T) {
+			store := openStore(t, ":memory:")
+			ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}
+			desc, err := (memHarness{}).Describe(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			memory := substrate.New(ctl, "space", substrate.ObjectRef{Name: "memory"}, desc)
+			h := &publicGateHarness{}
+			stateless := &publicGateBackend{Backend: local.New(h)}
+			t.Cleanup(func() { _ = stateless.Close() })
+			r, err := placement.NewRegistry("stateless", map[string]*placement.Placer{
+				"stateless": placement.New(stateless, nil),
+				"memory": placement.New(memory, nil, placement.WithDialer(func(api.Incarnation) (api.Harness, func() error, error) {
+					return memHarness{}, func() error { return nil }, nil
+				})),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := serveRegistry(t, store, r)
+			uid := mustCreate(t, c)
+			log := store.Session(uid)
+			fence, err := log.NewFence()
+			if err != nil {
+				t.Fatal(err)
+			}
+			head, err := log.Head()
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := publicGateCall("call")
+			for i, ev := range []api.Event{
+				{Kind: api.EventExecutionStart, ExecutionStart: &api.ExecutionStart{Harness: "memory", HarnessVersion: "v1", InputCount: proto.Int64(0)}},
+				{Kind: api.EventToolCall, ToolCall: &call},
+			} {
+				ev.ExecutionID = "interrupted-override"
+				if _, err := log.Append(head+int64(i), fence, ev); err != nil {
+					t.Fatal(err)
+				}
+			}
+			records := routingRecords(t, log)
+
+			if operation == "Resume" {
+				_, err = c.Resume(t.Context(), &v1.ResumeRequest{Session: uid})
+			} else {
+				_, err = collectPublicExec(c, &v1.ExecRequest{Session: uid})
+			}
+			if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), placement.ErrStatefulOverride.Error()) {
+				t.Fatalf("recovery of a memory-tier override: %v, want FailedPrecondition with ErrStatefulOverride", err)
+			}
+			if !reflect.DeepEqual(records, routingRecords(t, log)) {
+				t.Fatal("refused recovery repaired the approval request")
+			}
+			if next, err := log.NewFence(); err != nil || next != fence+1 {
+				t.Fatalf("refused recovery advanced the fence: next=%d, previous=%d, err=%v", next, fence, err)
+			}
+			if h.runs.Load() != 0 || stateless.creates.Load() != 0 || stateless.restores.Load() != 0 {
+				t.Fatal("refused recovery ran or changed the stateless harness's compute")
+			}
+			ctl.mu.Lock()
+			defer ctl.mu.Unlock()
+			if len(ctl.status) != 0 {
+				t.Fatalf("refused recovery created or restored a memory actor: %v", ctl.status)
+			}
+		})
+	}
 }

@@ -145,6 +145,9 @@ type ExecutionStart struct {
 	InputCount     *int64
 	Harness        string // resolved registry name; empty legacy values use the session harness
 	HarnessVersion string // advertised opaque version; empty is unknown and retains legacy behavior
+	// ComputeInstance is Incarnation.ComputeInstance of the compute the turn was placed on; empty when
+	// the backend set none (a stateless harness, or a backend that cannot tell instances apart).
+	ComputeInstance string
 }
 
 // Lifecycle marks a compute/session transition in the log (§7). Baseline is a replay /
@@ -153,6 +156,10 @@ type Lifecycle struct {
 	Kind     LifecycleKind
 	Detail   string
 	Snapshot *SnapshotRef // captured state, set on SUSPEND (§5.1)
+	// ComputeInstance is set only on FORK: Incarnation.ComputeInstance of the compute the child was
+	// cloned onto. The child's turns are compared with it until the child records its own; empty
+	// (a stateless fork, or a marker written before the field existed) compares nothing.
+	ComputeInstance string
 }
 
 // LifecycleKind enumerates the lifecycle transitions recorded in the log.

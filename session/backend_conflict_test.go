@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -16,19 +17,19 @@ import (
 
 // Keep the real Substrate backend's error wrapping; only the external control plane is replaced.
 // An existing suspended actor makes Exec resume it (ResumeActor restores its snapshot), just as
-// Resume does.
-type conflictControl struct{}
+// Resume does. Resume and suspend fail with err.
+type conflictControl struct{ err error }
 
 func (conflictControl) CreateActor(context.Context, substrate.ActorRef, substrate.ObjectRef) error {
 	return nil
 }
 
-func (conflictControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
-	return substrate.ActorInfo{}, status.Error(codes.Aborted, "concurrent update conflict")
+func (c conflictControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{}, c.err
 }
 
-func (conflictControl) SuspendActor(context.Context, substrate.ActorRef) (string, error) {
-	return "", status.Error(codes.Aborted, "concurrent update conflict")
+func (c conflictControl) SuspendActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{}, c.err
 }
 
 func (conflictControl) DeleteActor(context.Context, substrate.ActorRef) error { return nil }
@@ -37,12 +38,24 @@ func (conflictControl) GetActor(context.Context, substrate.ActorRef) (substrate.
 	return substrate.ActorInfo{Status: substrate.StatusSuspended}, nil
 }
 
+// A transport status from the control plane does not leak into the public code: a raw ABORTED stays
+// INTERNAL. Only the typed sentinel a ControlClient wraps for an actor another operation holds
+// (substrate.ErrActorBusy, which the substrate adapter reports for substrate's ABORTED) is ABORTED.
+// Neither changes the journal.
 func TestBackendAbortedRemainsInternal(t *testing.T) {
+	testBackendConflict(t, status.Error(codes.Aborted, "concurrent update conflict"), codes.Internal)
+}
+
+func TestBusyActorIsAborted(t *testing.T) {
+	testBackendConflict(t, fmt.Errorf("%w: another operation is in progress for this actor", substrate.ErrActorBusy), codes.Aborted)
+}
+
+func testBackendConflict(t *testing.T, controlErr error, want codes.Code) {
 	desc, err := (echoagent.Harness{}).Describe(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := newClientWith(t, substrate.New(conflictControl{}, "space", substrate.ObjectRef{Name: "echo"}, desc))
+	client := newClientWith(t, substrate.New(conflictControl{err: controlErr}, "space", substrate.ObjectRef{Name: "echo"}, desc))
 	uid := mustCreate(t, client)
 	for _, operation := range []string{"Suspend", "Resume", "Exec"} {
 		t.Run(operation, func(t *testing.T) {
@@ -62,8 +75,8 @@ func TestBackendAbortedRemainsInternal(t *testing.T) {
 					err = drainExec(stream)
 				}
 			}
-			if status.Code(err) != codes.Internal {
-				t.Errorf("backend conflict during %s = %v, want Internal", operation, err)
+			if status.Code(err) != want {
+				t.Errorf("backend conflict during %s = %v, want %v", operation, err, want)
 			}
 			sess, lookupErr := client.GetSession(t.Context(), &v1.GetSessionRequest{Uid: uid})
 			if lookupErr != nil || sess.GetLastSeq() != 0 {

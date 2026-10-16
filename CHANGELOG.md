@@ -194,13 +194,17 @@ not provide.
   first v4 open, stop every older host and embedded `agentctl` process sharing the journal;
   upgrade all writers before restarting them. Back up before upgrading. The new LIFECYCLE_DELETE
   hash requires a deletion-aware reader. Cancel remains unimplemented.
-- `Exec` refuses a stateless harness override when the session's served stored harness requires
-  memory snapshots (`FAILED_PRECONDITION`, before any fence or journal write). `Resume` and
+- An `ExecRequest.harness` override cannot involve a `REQUIRES_MEMORY_SNAPSHOT` harness: when
+  either the session's served stored harness or the override requires memory snapshots, `Exec` is
+  `FAILED_PRECONDITION` (`placement.ErrStatefulOverride`) before any compute is provisioned, fence
+  minted or journal written. Parking only an override of a memory-tier session cannot checkpoint
+  the stored harness's live memory, and Suspend and Fork follow the session's own harness, so they
+  would neither checkpoint nor clone the RAM a memory-tier override leaves behind. `Resume` and
   no-input Exec recovery also refuse an older interrupted override before compute changes or
   journal repair; an ordinary interrupted turn can be superseded by a new Exec on the stored
-  harness. Parking only the override cannot checkpoint the stored harness's live memory.
-  Stateless-to-stateless overrides are unchanged: a stored runtime without memory-snapshot
-  support is not contacted for this check, even when its remote harness is down.
+  harness. An override onto a name that aliases the session's own registry entry is not an
+  override and still runs. Stateless-to-stateless overrides are unchanged: a stored runtime without
+  memory-snapshot support is not contacted for this check, even when its remote harness is down.
 - `Approve` and a stateful `Fork` on the same session now exclude each other through the shared
   checkpoint mark. A refused approval returns `ABORTED` without minting a fence or writing a
   decision; retry after the fork finishes. This coordination covers one Registry/host only.
@@ -280,6 +284,107 @@ not provide.
 - `agentsessionsd` exits at startup with a model API key and a plain-`http` `-model-base-url` to a
   host that is not loopback, `localhost` or a `.svc` name (see Security). Switch such an
   endpoint to `https`, or unset the key, before upgrading.
+- `runtime/substrate` no longer cold-creates an actor for a `REQUIRES_MEMORY_SNAPSHOT` session that
+  has a started turn on that harness (completed, failed or interrupted) but no actor (deleted out of
+  band, or a host restarted with another atespace). `Exec` fails with
+  `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and nothing is created, where it used to continue
+  the journal on a fresh harness that had lost the session's RAM state. `Runtime.Create` gets a
+  journal counter in the new `api.SessionSpec.StartedTurns`, which `runtime/substrate` calls only
+  after it finds the actor missing, so a turn another host journaled before then is counted; other
+  backends ignore it. The count is per harness: a turn an `ExecRequest.harness` override ran
+  elsewhere does not count, while a turn with no recorded harness name, or one this host does not
+  serve, does. Two substrate backends on one atespace share each session's actor, so the count
+  misses the turns the other one ran there: hosts sharing a journal and an atespace must serve the
+  same substrate harness, and a program that builds its own registry must use one. `Sessions.Resume` of any
+  memory-tier session whose actor is gone, whatever its journal records, is `FAILED_PRECONDITION`
+  (`api.ErrMemoryStateLost`) too, where it used to be `INTERNAL`; a stateless session's `Resume`
+  keeps its error.
+- A memory-tier turn on substrate records its actor's UID in the new
+  `EXECUTION_START.compute_instance` (`api.Incarnation.ComputeInstance`, set by `runtime/substrate`
+  from the new `substrate.ActorInfo.UID`). `Exec` or `Resume` placed on an actor whose UID differs
+  from the latest one recorded for that harness since the session's `FORK` marker is
+  `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and journals nothing. This catches an actor
+  another host created under the session's name after it counted no turns, while the actor the first
+  turn ran on was lost; the count alone let later turns attach to it. `Suspend` and a stateful
+  `Fork` of such a session, or of one whose actor is gone, are `FAILED_PRECONDITION` too (they were
+  `INTERNAL`, and `Suspend` of a replaced actor succeeded), and suspend, clone and journal nothing:
+  the Placer passes the recorded UID to `Runtime.Snapshot` in `api.Incarnation.ComputeInstance`, and
+  `runtime/substrate` refuses another actor or a missing one, checking the UID before it suspends
+  and the one the suspend reports. A memory-tier fork child whose cloned actor is gone before its
+  first turn, and a stateful `Fork` whose parent actor is deleted around or during the tag, are
+  `FAILED_PRECONDITION` the same way; a tag that substrate refuses because
+  another operation holds the parent is `ABORTED`, and one whose parent was suspended again while it
+  ran is `ABORTED` (`api.ErrSnapshotSuperseded`). `runtime/substrate` refuses a memory-tier actor that
+  reports no UID (`INTERNAL` from `Snapshot`, a fork child before its first turn included), so a
+  custom `ControlClient` must report one from `GetActor`, `ResumeActor` and `SuspendActor`, and must
+  report a missing actor as `substrate.ErrActorNotFound` from `SuspendActor` as well as `GetActor`
+  (the `integrations/substrate` adapter now maps substrate's `NOT_FOUND` from both, and from
+  `ResumeActor`), or a Suspend or Fork whose actor is deleted between the check and the suspend is
+  `INTERNAL`. It should report it from `ResumeActor` too, and the backend checks it with `GetActor`
+  before reading it as the actor being gone, since substrate also answers `NOT_FOUND` for an actor
+  whose template lacks a volume: such an actor keeps the resume error. Otherwise a `Resume` whose
+  actor is replaced between the failed resume and `Restore`'s `GetActor` is `INTERNAL`; with it, the
+  backend compares the actor's UID with the one the journal last recorded, read through the new
+  optional `api.InstanceRestorer`, which the Placer uses in place of `Restore`: only another UID is
+  `FAILED_PRECONDITION`. The recorded actor keeps the resume error whatever snapshot it holds, so one
+  holding a newer snapshot than the journal's last `SUSPEND` (that append failed after the snapshot,
+  or another host suspended it again) stays recoverable. With no UID recorded to compare, a
+  replacement that does not hold the session's snapshot is `FAILED_PRECONDITION`, and an actor with
+  neither to compare, or whose journal cannot be read, keeps the resume error. An `Exec` whose
+  `SUSPENDED` actor is deleted before its resume is treated as a missing actor
+  (`FAILED_PRECONDITION` for a memory-tier session with started turns, a new actor otherwise), and
+  one replaced there, or deleted again after `CreateActor` found the name taken, is `ABORTED`; both
+  were `INTERNAL`. A `Placer` outside a `placement.Registry` now counts every started turn, and
+  compares every recorded UID, whatever harness name the turn recorded, since it cannot tell another
+  name's backend from its own.
+  `ControlClient.SuspendActor` now returns the suspended actor's `substrate.ActorInfo` (snapshot
+  handle and UID) instead of the snapshot handle alone. When `CreateActor` finds the name taken
+  (`substrate.ErrActorExists`, which a `ControlClient` must return for it), `Create` attaches to
+  that actor where it used to fail the turn with `INTERNAL`. Stateless turns record no UID and their
+  canonical bytes are unchanged; turns recorded before this change are not compared. The router
+  reaches an actor by name, so a turn already placed when its actor is replaced still runs; the next
+  one is refused. `compute_instance` is part of the record's canonical bytes. A binary built before
+  this change drops the field when it reads the record, so it fails chain verification with a
+  `content_hash` mismatch on any session with a memory-tier substrate turn, as older binaries do for
+  `EXECUTION_START` itself. Rollback is not supported for such sessions, and every host sharing a
+  journal must run this release before any of them runs a memory-tier substrate turn. This change
+  adds no SQLite schema migration (`user_version` stays 4, from soft deletion above), so a version 4
+  binary from before this change still opens the journal and reports only those sessions as
+  tampered; a build that supports at most version 3 refuses the journal at open, as it does any
+  version 4 database.
+- A memory-tier fork child's `FORK` marker records the UID of the actor it was cloned onto, in the
+  new `Lifecycle.compute_instance` (`api.Lifecycle.ComputeInstance`, from the `ComputeInstance` of
+  the incarnation `Runtime.Fork` returns; Go callers use the new
+  `controller.ForkWithComputeInstance`). `SnapshotCloner.CreateActorFromTag` now returns the created
+  actor's `substrate.ActorInfo` instead of only an error, so a custom `ControlClient` must report
+  the clone's UID from it: `runtime/substrate` records that UID and refuses a fork whose
+  `ResumeActor` reports another one (the clone deleted and replaced under its name while
+  `SUSPENDED`) with `ABORTED` (`substrate.ErrActorBusy`) and records no child; the replacement may
+  have been woken by that resume and is left running, not suspended or deleted. A clone reported
+  without a UID is torn down and the fork fails. Until the child's first turn records its own UID,
+  `Exec`, `Resume`, `Suspend` and a stateful `Fork` of the child compare its actor with that UID, so
+  an actor created under the child's name before its first turn is `FAILED_PRECONDITION`
+  (`api.ErrMemoryStateLost`) and nothing is journaled, snapshotted or cloned, where the replacement
+  used to be treated as holding the cloned state. A stateless fork records no UID. A `FORK` marker
+  written before this change records none either, so such a child keeps the old behavior: its first
+  turn is not compared. An empty field is omitted from the canonical bytes, so those markers hash as
+  before; a set one is part of them (new golden vectors in `canon` and `hack/verify_chain.py`).
+  Downgrade: v0.1.0 through v0.1.2, and any build that supports at most schema version 3, refuse the
+  journal at open (`unsupported database schema`, since it is schema version 4), so they never read
+  the field. A build from before this change that opens version 4 drops the field on read: it does
+  not compare the child, its `Verify` fails with a `content_hash` mismatch on such a child, and a
+  `Fork` it takes of such a child copies the prefix without the field, so the new child no longer
+  shares its parent's prefix hashes. As for `EXECUTION_START.compute_instance`, upgrade every host
+  sharing a journal before any of them forks a memory-tier session; rollback is not supported for
+  such children.
+- An actor another operation holds is now retryable: `Exec`, `Resume`, `Suspend` and `Fork` are
+  `ABORTED` (new `api.ErrComputeBusy`) where they used to be `INTERNAL` when `runtime/substrate`
+  finds the session's actor `RESUMING`, `SUSPENDING` or `PAUSING` (new
+  `substrate.StatusTransitioning`), or when substrate refuses a resume or suspend with `ABORTED`
+  because another operation holds the actor's lease. The adapter reports the latter as the new
+  `substrate.ErrActorBusy`; a `ControlClient` that returns a raw transport status still gets
+  `INTERNAL`. This is the usual outcome for the host that loses a race for a session's first turn
+  while the winner's actor is still resuming.
 - New `EXECUTION_START` records include the resolved registry harness name and optional advertised
   harness version (`HarnessDescriptor.version`). Interrupted `Sessions.Resume` uses the recorded
   registry entry, not the session default; an unserved recorded entry or known-version mismatch is

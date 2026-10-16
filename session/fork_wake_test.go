@@ -31,15 +31,40 @@ type actorControl struct {
 	onResume  func(actor string)
 	onSuspend func(actor string)
 	onGet     func(actor string)
+	// onTag, when set, runs when TagActor tags actor; tagErr, when set, is what TagActor then returns.
+	onTag  func(actor string)
+	tagErr error
+	// onCreate, when set, runs before CreateActor looks at the registry.
+	onCreate func(actor string)
+	// resumeErr, when set and returning an error, fails ResumeActor with it after onResume ran,
+	// whether or not the actor exists, as substrate does for an actor whose template volume is gone.
+	resumeErr func(actor string) error
+	// uids is each actor's server-assigned UID, minted at create and dropped at delete, so an actor
+	// created again under a name reports a new one.
+	uids    map[string]string
+	created int
+}
+
+// newUID mints the UID substrate assigns an actor at creation. c.mu must be held.
+func (c *actorControl) newUID(name string) {
+	if c.uids == nil {
+		c.uids = map[string]string{}
+	}
+	c.created++
+	c.uids[name] = fmt.Sprintf("uid-%d", c.created)
 }
 
 func (c *actorControl) CreateActor(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef) error {
+	if c.onCreate != nil {
+		c.onCreate(a.Name)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.status[a.Name]; ok {
-		return fmt.Errorf("actor %q already exists", a.Name)
+		return fmt.Errorf("%w: %q", substrate.ErrActorExists, a.Name)
 	}
 	c.status[a.Name] = substrate.StatusSuspended
+	c.newUID(a.Name)
 	return nil
 }
 
@@ -47,20 +72,25 @@ func (c *actorControl) ResumeActor(_ context.Context, a substrate.ActorRef) (sub
 	if c.onResume != nil {
 		c.onResume(a.Name)
 	}
+	if c.resumeErr != nil {
+		if err := c.resumeErr(a.Name); err != nil {
+			return substrate.ActorInfo{}, err
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.status[a.Name]; !ok {
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
 	c.status[a.Name] = substrate.StatusRunning
-	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: "w"}, nil
+	return substrate.ActorInfo{Status: substrate.StatusRunning, Worker: "w", UID: c.uids[a.Name]}, nil
 }
 
-func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (string, error) {
+func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	c.mu.Lock()
 	if _, ok := c.status[a.Name]; !ok {
 		c.mu.Unlock()
-		return "", substrate.ErrActorNotFound
+		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
 	// Substrate's suspend is a no-op on an actor that is already SUSPENDED holding a snapshot.
 	snap := c.snapshots[a.Name]
@@ -69,17 +99,21 @@ func (c *actorControl) SuspendActor(_ context.Context, a substrate.ActorRef) (st
 		snap = fmt.Sprintf("snap-%s-%d", a.Name, c.suspends)
 		c.status[a.Name], c.snapshots[a.Name] = substrate.StatusSuspended, snap
 	}
+	uid := c.uids[a.Name]
 	c.mu.Unlock()
 	if c.onSuspend != nil {
 		c.onSuspend(a.Name)
 	}
-	return snap, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Worker: "w", Snapshot: snap, UID: uid}, nil
 }
 
 func (c *actorControl) DeleteActor(_ context.Context, a substrate.ActorRef) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.status, a.Name)
+	delete(c.uids, a.Name)
+	// The snapshot went with the actor: one created again under the name holds none.
+	delete(c.snapshots, a.Name)
 	return nil
 }
 
@@ -93,18 +127,22 @@ func (c *actorControl) GetActor(_ context.Context, a substrate.ActorRef) (substr
 	if !ok {
 		return substrate.ActorInfo{}, substrate.ErrActorNotFound
 	}
-	return substrate.ActorInfo{Status: st, Worker: "w", Snapshot: c.snapshots[a.Name]}, nil
+	return substrate.ActorInfo{Status: st, Worker: "w", Snapshot: c.snapshots[a.Name], UID: c.uids[a.Name]}, nil
 }
 
-func (c *actorControl) TagActor(context.Context, substrate.ActorRef, substrate.SnapshotID) error {
-	return nil
+func (c *actorControl) TagActor(_ context.Context, a substrate.ActorRef, _ substrate.SnapshotID) error {
+	if c.onTag != nil {
+		c.onTag(a.Name)
+	}
+	return c.tagErr
 }
 
-func (c *actorControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, _ substrate.SnapshotID) error {
+func (c *actorControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, _ substrate.SnapshotID) (substrate.ActorInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.status[a.Name] = substrate.StatusSuspended
-	return nil
+	c.newUID(a.Name)
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: c.uids[a.Name]}, nil
 }
 
 func (c *actorControl) DeleteTag(context.Context, substrate.SnapshotID) error { return nil }

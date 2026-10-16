@@ -415,11 +415,12 @@ jobs:
         # Memory continuity across suspend/restore (the differentiator a plain pod cannot do), and
         # fork: fan out k children from one parent checkpoint and require each to continue at N+1
         # independently, the claim that a stateful fork clones RAM instead of silently cold-booting.
+        # A stateful session whose actor was deleted must be refused, not cold-created.
         # Then two sessions' calls through the router at once, each of which must reach its own actor.
         if: needs.changes.outputs.decision != 'skip'
         env:
           COUNTER_SANDBOX_CLASS: microvm
-        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestFork|TestConcurrentSessionsReachTheirOwnActors|TestSessionDeletePendingOnMicroVM' "${E2E_IMAGE}" 2400
+        run: hack/run-e2e-job.sh 'TestMemorySnapshotSuspendResume|TestMemorySessionWhoseActorIsLostIsRefused|TestFork|TestConcurrentSessionsReachTheirOwnActors|TestSessionDeletePendingOnMicroVM' "${E2E_IMAGE}" 2400
 
       - name: Dump diagnostics on failure
         if: needs.changes.outputs.decision != 'skip' && failure()

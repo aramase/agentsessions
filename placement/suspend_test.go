@@ -32,6 +32,7 @@ type suspendControl struct {
 	snapshotErr  error
 	afterSuspend func()
 	afterResume  func()
+	created      int // actors created so far, for server-assigned UIDs
 }
 
 type suspendActor struct {
@@ -41,6 +42,7 @@ type suspendActor struct {
 	snapshot  substrate.SnapshotID
 	sourceTag substrate.SnapshotID
 	template  substrate.ObjectRef
+	uid       string
 }
 
 type suspendSnapshot struct {
@@ -62,9 +64,9 @@ func newSuspendControl() *suspendControl {
 func (c *suspendControl) CreateActor(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef) error {
 	c.calls = append(c.calls, "create:"+ref.Name)
 	if _, exists := c.actors[ref]; exists {
-		return status.Error(codes.AlreadyExists, "actor exists")
+		return fmt.Errorf("%w: %s", substrate.ErrActorExists, ref.Name)
 	}
-	c.actors[ref] = &suspendActor{status: substrate.StatusSuspended, template: template}
+	c.actors[ref] = &suspendActor{status: substrate.StatusSuspended, template: template, uid: c.newUID()}
 	return nil
 }
 
@@ -72,7 +74,7 @@ func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef) 
 	c.calls = append(c.calls, "resume:"+ref.Name)
 	a, exists := c.actors[ref]
 	if !exists {
-		return substrate.ActorInfo{}, status.Error(codes.NotFound, "actor does not exist")
+		return substrate.ActorInfo{}, fmt.Errorf("%w: %w", substrate.ErrActorNotFound, status.Error(codes.NotFound, "actor does not exist"))
 	}
 	if a.status == substrate.StatusSuspended && a.snapshot.Name == "" {
 		a.turns = 0 // no snapshot of its own yet: a fresh harness
@@ -98,17 +100,17 @@ func (c *suspendControl) ResumeActor(_ context.Context, ref substrate.ActorRef) 
 	return c.info(ref, a), nil
 }
 
-func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef) (string, error) {
+func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef) (substrate.ActorInfo, error) {
 	c.calls = append(c.calls, "suspend:"+ref.Name)
 	if c.snapshotErr != nil {
-		return "", c.snapshotErr
+		return substrate.ActorInfo{}, c.snapshotErr
 	}
 	a, exists := c.actors[ref]
 	if !exists {
-		return "", status.Error(codes.NotFound, "actor does not exist")
+		return substrate.ActorInfo{}, status.Error(codes.NotFound, "actor does not exist")
 	}
 	if a.status == substrate.StatusSuspended && a.snapshot.Name != "" {
-		return a.snapshot.Name, nil
+		return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, UID: a.uid}, nil
 	}
 	a.snapshot = substrate.SnapshotID{Atespace: ref.Atespace, Name: fmt.Sprintf("snap-%s-%d", ref.Name, len(c.snapshots)+1)}
 	c.snapshots[a.snapshot] = suspendSnapshot{turns: a.turns, template: a.template}
@@ -118,7 +120,7 @@ func (c *suspendControl) SuspendActor(_ context.Context, ref substrate.ActorRef)
 		c.afterSuspend = nil
 		hook()
 	}
-	return a.snapshot.Name, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: a.snapshot.Name, UID: a.uid}, nil
 }
 
 func (c *suspendControl) DeleteActor(_ context.Context, ref substrate.ActorRef) error {
@@ -134,6 +136,12 @@ func (c *suspendControl) DeleteActor(_ context.Context, ref substrate.ActorRef) 
 	return nil
 }
 
+// newUID mints the UID substrate assigns an actor at creation.
+func (c *suspendControl) newUID() string {
+	c.created++
+	return fmt.Sprintf("uid-%d", c.created)
+}
+
 func (c *suspendControl) GetActor(_ context.Context, ref substrate.ActorRef) (substrate.ActorInfo, error) {
 	a, exists := c.actors[ref]
 	if !exists {
@@ -143,7 +151,7 @@ func (c *suspendControl) GetActor(_ context.Context, ref substrate.ActorRef) (su
 }
 
 func (c *suspendControl) info(ref substrate.ActorRef, a *suspendActor) substrate.ActorInfo {
-	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name}
+	info := substrate.ActorInfo{Status: a.status, Snapshot: a.snapshot.Name, UID: a.uid}
 	if a.worker {
 		info.Worker = ref.Name
 	}
@@ -170,26 +178,27 @@ func (c *suspendControl) TagActor(_ context.Context, ref substrate.ActorRef, tag
 	return nil
 }
 
-func (c *suspendControl) CreateActorFromTag(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef, tag substrate.SnapshotID) error {
+func (c *suspendControl) CreateActorFromTag(_ context.Context, ref substrate.ActorRef, template substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
 	c.calls = append(c.calls, "clone:"+ref.Name+":from="+tag.Name)
 	source, exists := c.tags[tag]
 	if !exists {
-		return status.Error(codes.NotFound, "tag does not exist")
+		return substrate.ActorInfo{}, status.Error(codes.NotFound, "tag does not exist")
 	}
 	snapshot, exists := c.snapshots[source]
 	if !exists {
-		return status.Error(codes.NotFound, "snapshot does not exist")
+		return substrate.ActorInfo{}, status.Error(codes.NotFound, "snapshot does not exist")
 	}
 	if template != snapshot.template {
-		return status.Error(codes.FailedPrecondition, "snapshot template mismatch")
+		return substrate.ActorInfo{}, status.Error(codes.FailedPrecondition, "snapshot template mismatch")
 	}
 	if _, exists := c.actors[ref]; exists {
-		return status.Error(codes.AlreadyExists, "actor exists")
+		return substrate.ActorInfo{}, status.Error(codes.AlreadyExists, "actor exists")
 	}
-	c.actors[ref] = &suspendActor{
-		status: substrate.StatusSuspended, snapshot: source, sourceTag: tag, template: template,
+	a := &suspendActor{
+		status: substrate.StatusSuspended, snapshot: source, sourceTag: tag, template: template, uid: c.newUID(),
 	}
-	return nil
+	c.actors[ref] = a
+	return substrate.ActorInfo{Status: a.status, UID: a.uid}, nil
 }
 
 func (c *suspendControl) DeleteTag(_ context.Context, tag substrate.SnapshotID) error {
@@ -609,6 +618,13 @@ func (s suspendFailStore) Head() (int64, error) {
 	return s.Store.Head()
 }
 
+func (s suspendFailStore) Read(from int64) ([]eventlog.Record, error) {
+	if s.operation == "read" {
+		return nil, s.err
+	}
+	return s.Store.Read(from)
+}
+
 func (s suspendFailStore) Append(seq, fence int64, ev api.Event) (eventlog.Record, error) {
 	if s.operation == "append" {
 		return eventlog.Record{}, s.err
@@ -617,7 +633,7 @@ func (s suspendFailStore) Append(seq, fence int64, ev api.Event) (eventlog.Recor
 }
 
 func TestSuspendFailuresPreserveActorAndJournal(t *testing.T) {
-	for _, operation := range []string{"snapshot", "fence", "head", "append"} {
+	for _, operation := range []string{"read", "snapshot", "fence", "head", "append"} {
 		t.Run(operation, func(t *testing.T) {
 			ctx := context.Background()
 			ctl := newSuspendControl()
@@ -640,14 +656,19 @@ func TestSuspendFailuresPreserveActorAndJournal(t *testing.T) {
 			if after := suspendRecords(t, log); !reflect.DeepEqual(after, before) {
 				t.Fatal("failed suspend changed the journal or invented a SUSPEND record")
 			}
-			if !reflect.DeepEqual(ctl.calls, []string{"suspend:session"}) {
-				t.Fatalf("failure must not invoke destructive teardown: calls=%v", ctl.calls)
+			// A journal that cannot be read gives no instance to check, so compute is not touched.
+			wantCalls := []string{"suspend:session"}
+			if operation == "read" {
+				wantCalls = nil
+			}
+			if !reflect.DeepEqual(ctl.calls, wantCalls) {
+				t.Fatalf("failure must not invoke destructive teardown: calls=%v want %v", ctl.calls, wantCalls)
 			}
 			a, exists := ctl.actors[substrate.ActorRef{Atespace: "space", Name: "session"}]
 			if !exists {
 				t.Fatal("failed suspend destroyed the actor")
 			}
-			if operation == "snapshot" {
+			if operation == "snapshot" || operation == "read" {
 				if !a.worker || a.status != substrate.StatusRunning || len(ctl.snapshots) != 0 {
 					t.Fatal("failed snapshot changed compute or captured a false snapshot")
 				}

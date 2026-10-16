@@ -82,6 +82,17 @@ DELETE_CANONICAL = (
     b'"schema_version":1,"ts":"2023-11-14T22:13:20.123456789Z"},"prev_hash":"","seq":"1"}'
 )
 
+# FORK markers (canon TestForkMarkerGoldenVectors): one recording no compute instance, as every
+# marker written before Lifecycle.compute_instance existed does (its bytes are unchanged), and one
+# recording the clone a stateful fork made.
+FORK_GOLDENS = [
+    ({"kind": "EVENT_LIFECYCLE", "lifecycle": {"kind": "LIFECYCLE_FORK", "detail": "parent@2"}},
+     "a545aeac12036c2b871c394990207d101b93074c6b687830016925bbb3617ea4"),
+    ({"kind": "EVENT_LIFECYCLE", "lifecycle": {"kind": "LIFECYCLE_FORK", "detail": "parent@2",
+                                               "compute_instance": "uid-1"}},
+     "a10f9c7c0bc86360e712fdd926fffa45d56168af238c451d2b494ce0feb8dc8c"),
+]
+
 EVENT_TYPE = "agentsessions.v1.Event"
 
 
@@ -98,7 +109,8 @@ def golden_check():
         print("MISMATCH: DELETE canonical bytes differ from the independent literal", file=sys.stderr)
         return 1
     print("DELETE canonical:", DELETE_CANONICAL.decode("utf-8"))
-    vectors = [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS, TOOL_CALL_GOLDEN, DELETE_GOLDEN]
+    vectors = [(GOLDEN_EVENT, GOLDEN_EXPECTED), *START_GOLDENS, TOOL_CALL_GOLDEN, DELETE_GOLDEN,
+               *FORK_GOLDENS]
     for event, expected in vectors:
         record = {"event": event, "prev_hash": "", "seq": "1"}
         digest = hashlib.sha256(_stdlib_jcs(record)).hexdigest()

@@ -2,14 +2,18 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/agent-primitives/sessions/api"
 	"github.com/agent-primitives/sessions/controller"
 	"github.com/agent-primitives/sessions/harness/echoagent"
+	ateadapter "github.com/agent-primitives/sessions/integrations/substrate"
 	"github.com/agent-primitives/sessions/placement"
+	"github.com/agent-primitives/sessions/runtime/substrate"
 	"github.com/agent-primitives/sessions/sqlitelog"
 )
 
@@ -71,6 +75,66 @@ func TestMemorySnapshotSuspendResume(t *testing.T) {
 		t.Fatalf("chain verify across the snapshot boundary: %v", err)
 	}
 	t.Logf("continuity=%s (N+1), no double-apply, chain verified across suspend", got)
+}
+
+// TestMemorySessionWhoseActorIsLostIsRefused deletes a stateful session's actor after a committed
+// turn, the way an operator cleanup or a host restarted against another atespace loses it. The next
+// turn must be refused with api.ErrMemoryStateLost, and no actor may be created for the session: a
+// fresh one from the template would answer 1 again, continuing the journal with a counter that forgot it.
+func TestMemorySessionWhoseActorIsLostIsRefused(t *testing.T) {
+	f := newFixture(t, env("SUBSTRATE_ATESPACE", "e2e-memory"))
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	backend := f.backend(t, counterTemplateSpec, counterDescriptor)
+	session := uniqueUID("memory-lost")
+	log := journal(t).Session(session)
+	p := placement.New(backend, echoagent.Model)
+	defer stopQuietly(t, backend, session)
+
+	driveTurns(ctx, t, p, log, session, 1)
+	if err := backend.Stop(ctx, api.Incarnation{ID: session}); err != nil {
+		t.Fatalf("delete the session's actor: %v", err)
+	}
+	ctl := ateadapter.New(f.conn)
+	actor := substrate.ActorRef{Atespace: f.atespace, Name: session}
+	waitActorGone(ctx, t, ctl, actor)
+	head, err := log.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+
+	_, err = p.Exec(ctx, log, session, []api.Message{*api.TextMessage("user", "inc")}, head)
+	if !errors.Is(err, api.ErrMemoryStateLost) {
+		t.Fatalf("turn after the actor was lost: err=%v, want api.ErrMemoryStateLost", err)
+	}
+	if !strings.Contains(err.Error(), session) {
+		t.Errorf("error %q does not name the session", err)
+	}
+	if _, err := ctl.GetActor(ctx, actor); !errors.Is(err, substrate.ErrActorNotFound) {
+		t.Fatalf("after the refused turn, GetActor(%s) err=%v, want ErrActorNotFound: no actor may be created", session, err)
+	}
+	if got, err := log.Head(); err != nil || got != head {
+		t.Fatalf("journal head after the refused turn = %d (err %v), want %d", got, err, head)
+	}
+	t.Logf("refused as expected, nothing created: %v", err)
+}
+
+// waitActorGone polls until substrate reports the actor absent, since a delete may finish after the
+// call returns.
+func waitActorGone(ctx context.Context, t *testing.T, ctl substrate.ControlClient, actor substrate.ActorRef) {
+	t.Helper()
+	for {
+		_, err := ctl.GetActor(ctx, actor)
+		if errors.Is(err, substrate.ErrActorNotFound) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("actor %s still present after delete (last err %v)", actor.Name, err)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // driveTurns runs n turns through the Placer, each at the log's current head.

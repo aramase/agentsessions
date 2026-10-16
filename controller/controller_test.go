@@ -263,6 +263,57 @@ func TestForkSharesPrefixDivergesAfter(t *testing.T) {
 	}
 }
 
+// ForkWithComputeInstance records the clone's compute instance on the FORK marker, where it is part
+// of the marker's canonical bytes: the child still shares the parent's prefix hashes and verifies,
+// the instance survives the store, and the marker hashes differently from Fork's, which records none.
+func TestForkWithComputeInstanceRecordsTheCloneOnTheMarker(t *testing.T) {
+	s, err := sqlitelog.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	parent := s.Session("parent")
+	c, err := controller.New(parent, echoModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Exec(context.Background(), &echoHarness{}, []api.Message{msg("hi")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	head, err := parent.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloned, plain := s.Session("cloned"), s.Session("plain")
+	if err := controller.ForkWithComputeInstance(parent, cloned, head, "clone-1"); err != nil {
+		t.Fatalf("fork with instance: %v", err)
+	}
+	if err := controller.Fork(parent, plain, head); err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	pRecs, _ := parent.Read(1)
+	cRecs, _ := cloned.Read(1)
+	plainRecs, _ := plain.Read(1)
+	for i := 0; i < int(head); i++ {
+		if cRecs[i].Hash != pRecs[i].Hash {
+			t.Fatalf("fork prefix hash diverged at seq %d", i+1)
+		}
+	}
+	marker := cRecs[head]
+	if lc := marker.Event.Lifecycle; lc == nil || lc.Kind != api.LifecycleFork || lc.ComputeInstance != "clone-1" {
+		t.Fatalf("FORK marker = %+v, want one recording compute instance %q", lc, "clone-1")
+	}
+	if lc := plainRecs[head].Event.Lifecycle; lc == nil || lc.ComputeInstance != "" {
+		t.Fatalf("Fork's marker = %+v, want no compute instance", lc)
+	}
+	if marker.Hash == plainRecs[head].Hash {
+		t.Fatal("the FORK marker's compute instance is not bound into its content_hash")
+	}
+	if err := cloned.Verify(); err != nil {
+		t.Fatalf("child verify: %v", err)
+	}
+}
+
 // TestCanPlace: the load-bearing placement rule — a memory-snapshot harness cannot run on a plain
 // pod, a stateless-replay harness runs anywhere.
 func TestCanPlace(t *testing.T) {

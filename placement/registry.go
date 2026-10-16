@@ -131,6 +131,7 @@ func NewRegistry(defaultHarness string, placers map[string]*Placer, opts ...Regi
 	for name, p := range placers {
 		p.guard = r.guard
 		p.sessions = r.sessions
+		p.registry = r
 		r.byName[name] = p
 		r.static[name] = true
 	}
@@ -176,6 +177,7 @@ func (r *Registry) Add(name string, p *Placer) error {
 		}
 		p.guard = r.guard
 		p.sessions = r.sessions
+		p.registry = r
 	}
 	r.byName[name] = p
 	return nil
@@ -240,6 +242,14 @@ func (r *Registry) Has(name string) bool {
 	_, served := r.byName[name]
 	_, unavailable := r.unavailable[name]
 	return served || unavailable
+}
+
+// lookup returns the Placer registered under name, without For's default for an empty name.
+func (r *Registry) lookup(name string) (*Placer, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.byName[name]
+	return p, ok
 }
 
 // For returns the Placer for a harness name. An empty name selects the default, which is how a
@@ -319,7 +329,9 @@ func WithResolvedHarnessCheck(check func(name string) error) RegistryResumeOptio
 
 // Resume resolves and recovers an invocation under the Registry's shared session guard, running
 // the resolved-harness check before runtime IO or call-only repair. Pending/repaired requests
-// return *api.ApprovalParkedError without runtime IO; that alone is not cold-compute proof.
+// return *api.ApprovalParkedError without runtime IO; that alone is not cold-compute proof. The
+// one exception is the repair of an override turn on a runtime with memory snapshots: its harness
+// is described first, and a REQUIRES_MEMORY_SNAPSHOT one is refused (ErrStatefulOverride).
 // Decided recovery delegates to the Placer: a new gate commits SUSPEND and returns park, while
 // ordinary success records RESUME. Repair/handoff failures retain their actual cause.
 // Contention through this Registry wins over stale invocation errors. Legacy markerless and
@@ -352,13 +364,14 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 	if err != nil {
 		return err
 	}
-	name := sessionDefaultName
+	own := sessionDefaultName
+	if own == "" {
+		own = r.defaultHarness
+	}
+	name := own
 	recordedName := invocation != nil && invocation.Harness != ""
 	if recordedName {
 		name = invocation.Harness
-	}
-	if name == "" {
-		name = r.defaultHarness
 	}
 	p, err := r.For(name)
 	if err != nil {
@@ -372,8 +385,18 @@ func (r *Registry) Resume(ctx context.Context, log eventlog.Store, sessionUID, s
 			return err
 		}
 	}
+	// A pending turn recorded on a Placer other than the session's own ran as an override. The
+	// Placer refuses a memory-tier harness there (ErrStatefulOverride), before it repairs a missing
+	// approval request too. An alias of the session's harness shares its Placer and is not an
+	// override; a session harness this host cannot resolve is treated as another one.
 	resume := resumeConfig{harness: name, observer: cfg.observer, expectedLastSeq: cfg.expectedLastSeq}
-	if handled, err := p.resumeApproval(log, sessionUID, state, resume); handled {
+	if name != own {
+		ownPlacer, err := r.For(own)
+		resume.override = err != nil || ownPlacer != p
+	}
+	if handled, err := p.resumeApproval(log, sessionUID, state, resume, func() error {
+		return p.refuseOverrideRepair(ctx, sessionUID, resume.override)
+	}); handled {
 		return err
 	}
 	return p.resume(ctx, log, sessionUID, resume)

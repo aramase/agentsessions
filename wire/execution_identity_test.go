@@ -72,3 +72,50 @@ func TestExecutionStartIdentityFieldsAffectHashButPreserveLegacyHash(t *testing.
 		t.Fatal("different version reused hash")
 	}
 }
+
+// The compute instance a memory-tier turn ran on survives the wire and is bound into the record's
+// hash, so it cannot be rewritten without breaking the chain. An empty one is omitted, so a start
+// marker that records none hashes as it did before the field existed.
+func TestExecutionStartComputeInstanceRoundTripAndHash(t *testing.T) {
+	count := int64(1)
+	start := &api.ExecutionStart{InputCount: &count, Harness: "mem", ComputeInstance: "0b5c3c56-6d5e-4f0e-9b1a-2f4d8c1e7a90"}
+	event := api.Event{ExecutionID: "run", Kind: api.EventExecutionStart, ExecutionStart: start}
+	encoded := wire.EventToProto(event)
+	if got := encoded.GetExecutionStart().GetComputeInstance(); got != start.ComputeInstance {
+		t.Fatalf("wire compute_instance = %q, want %q", got, start.ComputeInstance)
+	}
+	if got := wire.EventFromProto(encoded).ExecutionStart; !reflect.DeepEqual(got, start) {
+		t.Fatalf("round-trip start = %#v, want %#v", got, start)
+	}
+	canonical, err := canon.Event(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(canonical), `"compute_instance":"0b5c3c56-6d5e-4f0e-9b1a-2f4d8c1e7a90"`) {
+		t.Fatalf("canonical bytes omit the compute instance: %s", canonical)
+	}
+	with, err := canon.HashRecord("", 1, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start.ComputeInstance = "7f1e2d3c-4b5a-4968-8776-655443322110"
+	other, err := canon.HashRecord("", 1, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start.ComputeInstance = ""
+	without, err := canon.HashRecord("", 1, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if with == other || with == without {
+		t.Fatal("compute instance is not bound into the record hash")
+	}
+	canonical, err = canon.Event(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(canonical), "compute_instance") {
+		t.Fatalf("absent compute instance emitted: %s", canonical)
+	}
+}

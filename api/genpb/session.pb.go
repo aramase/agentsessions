@@ -886,9 +886,11 @@ type ExecRequest struct {
 	ResumeFromSeq int64 `protobuf:"varint,3,opt,name=resume_from_seq,json=resumeFromSeq,proto3" json:"resume_from_seq,omitempty"`
 	// Empty = the session's harness. A different harness runs this turn only, unless either one is
 	// a registered harness (see HarnessRegistry): then the session is pinned and the call is
-	// FAILED_PRECONDITION. A stored REQUIRES_MEMORY_SNAPSHOT harness also refuses a
-	// STATELESS_REPLAY override before any fence or journal write: parking only the override
-	// cannot checkpoint the stored harness's live memory.
+	// FAILED_PRECONDITION. If either harness is REQUIRES_MEMORY_SNAPSHOT (and the two are not
+	// aliases of one entry), the call is FAILED_PRECONDITION too, before any compute is provisioned,
+	// fence minted or journal written: Suspend and Fork follow the session's harness, so they would
+	// not checkpoint or clone a memory-tier override's RAM, and parking only an override cannot
+	// checkpoint a memory-tier stored harness's live memory.
 	Harness string `protobuf:"bytes,4,opt,name=harness,proto3" json:"harness,omitempty"`
 	// Opaque per-execution config, passed through to Start.config. Non-empty bytes are journaled
 	// verbatim in EXECUTION_START before the harness runs, and restored for controller replay/resume.

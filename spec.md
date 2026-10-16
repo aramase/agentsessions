@@ -350,7 +350,9 @@ no flattened lifecycle enum.
   `LIFECYCLE_FORK` record whose `prev_hash` is the parent's `content_hash` at `at_seq`. The chain is
   a tree rooted at the first ancestor.
 - The reference host writes `Lifecycle.detail = "parent@<at_seq>"`. The parent uid is recorded in
-  session metadata (`parent_uid`, `fork_seq`), not in the detail string.
+  session metadata (`parent_uid`, `fork_seq`), not in the detail string. When `Fork` returns a
+  compute instance (`RT-4h`), the marker records it in `Lifecycle.compute_instance`; an empty one
+  is omitted from the canonical bytes, so a marker without it hashes as before.
 
 ### 7.3 Verification
 
@@ -389,10 +391,11 @@ no flattened lifecycle enum.
 
 ### 8.1 Execution records
 
-- `EXE-1`: Every new execution MUST begin with a host-written `EVENT_EXECUTION_START` record,
-  before any `EVENT_INPUT` or effect. It carries the execution's `config` bytes verbatim,
-  `resume_from_seq`, `input_count` (always set, including 0), the host-resolved harness name, and
-  the harness's advertised `version`.
+- `EXE-1`: Every new execution MUST begin with a host-written `EVENT_EXECUTION_START` record, before
+  any `EVENT_INPUT` or effect. It carries the execution's `config` bytes verbatim,
+  `resume_from_seq`, `input_count` (always set, including 0), the host-resolved harness name, the
+  harness's advertised `version`, and, when the backend reports one, the compute instance the turn
+  was placed on (`compute_instance`, `RT-4h`).
 - `EXE-2`: The caller's compare-and-swap cursor (§11.4) applies to the `EXECUTION_START` append. If
   it fails, the harness MUST NOT run.
 - `EXE-3`: One `EVENT_INPUT` per input message MUST follow `EXECUTION_START`. Each later append in
@@ -694,7 +697,10 @@ invokes no harness and stays a no-op without one.
 
 - `APR-13`: `Resume` (or input-less `Exec`, §11.4) on an owned gate with no decision MUST return
   the current session without runtime IO. If only `TOOL_CALL` was committed before a crash, the host
-  MUST first mint a fence and append the missing `APPROVAL_REQUEST`.
+  MUST first mint a fence and append the missing `APPROVAL_REQUEST`. When that turn ran on an
+  override (`OPS-7`) and its backend has `memory_snapshot`, the host first runs admission (`RT-1`)
+  on the override's harness, before the fence: an admission error fails the call, and a
+  `REQUIRES_MEMORY_SNAPSHOT` harness is `FAILED_PRECONDITION`.
 - `APR-14`: After a decision, recovery MUST use the recorded invocation (harness, config, inputs,
   cursor) and snapshot reference. A denial writes an `APPROVAL_DENIED` receipt without calling the
   executor. An approval calls the executor with the recorded call; an executor failure becomes a
@@ -758,8 +764,16 @@ invokes no harness and stays a no-op without one.
 - `OPS-6`: If either the stored harness or the override is a registered harness (§14), a differing
   override MUST be `FAILED_PRECONDITION` (the session is pinned). This check runs before the
   override is resolved.
-- `OPS-7`: A `STATELESS_REPLAY` override of a stored `REQUIRES_MEMORY_SNAPSHOT` harness on a
-  memory-snapshot runtime MUST be `FAILED_PRECONDITION` before any fence or journal write.
+- `OPS-7`: An override that resolves to another registry entry than the session's stored harness
+  MUST be `FAILED_PRECONDITION` (`placement.ErrStatefulOverride`) when either harness is
+  `REQUIRES_MEMORY_SNAPSHOT`, before any compute is provisioned, fence minted, or record written.
+  `Suspend` and `Fork` follow the stored harness, so they would not checkpoint or clone a
+  memory-tier override's memory, and parking only an override cannot checkpoint a memory-tier
+  stored harness. An alias of the stored harness's entry is not an override. The reference host
+  checks the stored harness's half while routing, by `Describe` on the stored harness when its
+  runtime has `memory_snapshot`, and the override's half on the descriptor admission reads
+  (`RT-1`), again on the turn's connection for a live-describing backend (`RT-3`). Recovery of a
+  turn recorded on an override (`OPS-8`) applies both halves.
 - `OPS-8`: Recovery (`Resume`, input-less `Exec` recovery) MUST route by the recorded
   `EXECUTION_START.harness`. A recorded name the host does not serve is `FAILED_PRECONDITION`, with
   no fallback. With no recorded name (a legacy or markerless execution, §8.7; an empty `harness`;
@@ -783,11 +797,11 @@ invokes no harness and stays a no-op without one.
     Auto-create failure, an approval-inspection failure, the approval block (`OPS-14`), every
     session lookup or routing error, a journal head read failure, and a failure to materialize
     the session for the frame end the stream with no frame. Routing errors include an unknown
-    session or harness (`OPS-10`), the pin (`OPS-6`), and the memory-tier override check
-    (`OPS-7`), which runs `Describe` on both harnesses and can fail `UNAVAILABLE`,
-    `FAILED_PRECONDITION`, or with a context error. Placement admission (`RT-1`: `Describe`,
-    descriptor id, `CanPlace`), `expected_last_seq` (`OPS-13`), and the run itself fail after the
-    frame.
+    session or harness (`OPS-10`), the pin (`OPS-6`), and the stored harness's half of the
+    memory-tier override check (`OPS-7`), which runs `Describe` on the stored harness and can fail
+    `UNAVAILABLE`, `FAILED_PRECONDITION`, or with a context error. Placement admission (`RT-1`:
+    `Describe`, descriptor id, `CanPlace`, and the override's half of `OPS-7`),
+    `expected_last_seq` (`OPS-13`), and the run itself fail after the frame.
   - Input-less approval recovery (`OPS-14`): only the session lookup, the approval inspection,
     the journal head read, and materializing the session for the frame precede it. Routing by the
     recorded harness (`OPS-8`), the pin, the memory-tier override check, the deadline,
@@ -822,15 +836,17 @@ invokes no harness and stays a no-op without one.
   to its recorded harness (`OPS-8`).
 - The reference host accepts `Suspend` on a session that is already cold or has never run, and
   appends another `SUSPEND`. `Resume` without a prior `Suspend` is also accepted. The host does not
-  check either case itself; whether the call succeeds is up to the backend (`RT-4b`, `RT-4c`).
-  With `runtime/local` and `runtime/remote` both succeed. With `runtime/substrate`, both fail when
-  no actor exists for the session uid, for example a fresh session before any `Create` reached
+  check either case itself; whether the call succeeds is up to the backend (`RT-4b`, `RT-4c`). With
+  `runtime/local` and `runtime/remote` both succeed. With `runtime/substrate`, both fail when no
+  actor exists for the session uid, for example a fresh session before any `Create` reached
   `CreateActor` (a fork child gets its actor from `Fork`): `SuspendActor` and `ResumeActor` return
-  `NOT_FOUND`, the reference session service reports `INTERNAL`, and no marker is appended
-  (§13.4). A failed `Exec` does not imply that case: when `Create` succeeded and the dial or turn
-  failed, or `CreateActor` succeeded and `Create`'s `ResumeActor` failed, the actor remains, since
-  the host calls no `Stop` (`RT-7`), and a later `Suspend` or `Resume` reaches it.
-  `agentsessionsd` itself does not build substrate placements (`REG-2a`).
+  `NOT_FOUND` and no marker is appended. For a `REQUIRES_MEMORY_SNAPSHOT` harness the backend
+  reports that as `api.ErrMemoryStateLost`, which the reference session service reports as
+  `FAILED_PRECONDITION`; for a `STATELESS_REPLAY` harness the service reports `INTERNAL` (§13.4). A
+  failed `Exec` does not imply that case: when `Create` succeeded and the dial or turn failed, or
+  `CreateActor` succeeded and `Create`'s `ResumeActor` failed, the actor remains, since the host
+  calls no `Stop` (`RT-7`), and a later `Suspend` or `Resume` reaches it. `agentsessionsd` itself
+  does not build substrate placements (`REG-2a`).
 - TODO(spike): Should a repeated `Suspend`, or `Resume` without a prior `Suspend`, be refused or be
   a no-op? Current behavior appends a marker each time the backend call succeeds, and no test pins
   it.
@@ -942,11 +958,11 @@ does not erase data or reclaim compute.
 |---|---|
 | Missing required field, bad page token, unknown harness name, fork `count > 128`, `child_names` length mismatch, fork `identity` set | `INVALID_ARGUMENT` |
 | Unknown session (Get, Exec, Suspend, Resume, Fork, Approve, Delete) | `NOT_FOUND` |
-| Compare-and-swap conflict, stale fence, session busy (including an overlap with `DeleteSession`, `OPS-30`), checkpoint in progress, snapshot superseded | `ABORTED` |
-| Unplaceable harness, descriptor mismatch, pin violation, retired or unservable harness, static harness name with a registration row, approval state violation, inherited intent, memory fork at a historical `seq`, deleted session (`OPS-34`) | `FAILED_PRECONDITION` |
+| Compare-and-swap conflict, stale fence, session busy (including an overlap with `DeleteSession`, `OPS-30`), checkpoint in progress, snapshot superseded, compute busy with another operation (`api.ErrComputeBusy`) | `ABORTED` |
+| Unplaceable harness, descriptor mismatch, pin violation, memory-tier override (`OPS-7`), retired or unservable harness, static harness name with a registration row, approval state violation, inherited intent, memory fork at a historical `seq`, deleted session (`OPS-34`), memory-tier compute gone or replaced (`api.ErrMemoryStateLost`, `RT-4e`, `RT-4h`) | `FAILED_PRECONDITION` |
 | Harness `Describe` (admission `RT-1`, the `RT-3` recheck, or a `Describe` during the turn) could not reach the harness while the caller's context is live: the peer returned `UNAVAILABLE` or `DEADLINE_EXCEEDED`; or, on admission and the recheck, the host's own bound expired; or, during the turn, the error wraps `context.DeadlineExceeded` | `UNAVAILABLE` |
 | Any other `Describe` error on those paths, for example a peer `UNIMPLEMENTED` or `INTERNAL`, or a plain error from an in-process harness (during the turn, even one returned after the host's bound expired) | `INTERNAL` |
-| Any `Describe` error in the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
+| Any `Describe` error in the stored harness's half of the memory-tier override check (`OPS-7`) while the caller's context is live | `UNAVAILABLE` |
 | Caller deadline or cancellation during admission, any `Describe` above, or `DeleteSession` | `DEADLINE_EXCEEDED` or `CANCELLED` |
 | `Cancel` | `UNIMPLEMENTED` |
 | Any other failure | `INTERNAL` |
@@ -1067,7 +1083,7 @@ sequenceDiagram
   because a second dial can reach a different replica.
 - `RT-3` does not cover fences minted before the execution has a connection:
   - the approval repair fence (`APR-13`), minted before admission; that call parks and returns
-    without admission or a connection;
+    without admission or a connection, except the override check `APR-13` runs before the fence;
   - the early fence of a cursor-checked `Resume` (`OPS-29`), minted after the first admission and
     before restore.
 - A refusal at the repeated check of a cursor-checked `Resume` leaves its early fence minted, so
@@ -1087,18 +1103,20 @@ The reference host takes it as `placement.Backend` in
   `Status`, `Capabilities`. The host identifies an incarnation only by the session uid and keeps no
   runtime handle between calls.
 - `RT-4a`: A runtime MUST key each incarnation by its session uid. `Create` receives it as
-  `SessionSpec.SessionUID`, the only field the reference host sets; `Image`, `Harness`, and
-  `Identity` are empty. `Fork` receives the child's as `ForkOpts.ChildSessionUID`, and a
-  later `Restore` of the child arrives as `{local: child uid}` until the child writes its own
-  `SUSPEND` (`RT-4c`).
-- `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying only `ID` (the session uid). The
-  runtime MUST resolve everything it needs from that uid. The host does not check that the uid has
-  an incarnation: `Suspend` (`OPS-17`) and the memory-tier fork source step (`OPS-25`) call
-  `Snapshot` for a uid the backend may hold nothing for, for example a `Suspend` before any `Exec`.
-  Whether one exists is the backend's state, not the journal's: a failed `Exec` can leave one behind
-  (`RT-7`). A backend MAY fail `Snapshot` for a uid it has no incarnation for; the host returns the
-  error and appends no `SUSPEND` (`RT-5`). `runtime/local` and `runtime/remote` accept it;
-  `runtime/substrate` fails it (§13.4).
+  `SessionSpec.SessionUID`. The only other field the reference host sets is
+  `SessionSpec.StartedTurns`, a function that counts the turns the journal records as started on the
+  harness being placed (`RT-4e`); `Image`, `Harness`, and `Identity` are empty. `Fork` receives the
+  child's uid as `ForkOpts.ChildSessionUID`, and a later `Restore` of the child arrives as
+  `{local: child uid}` until the child writes its own `SUSPEND` (`RT-4c`).
+- `RT-4b`: `Snapshot` and `Stop` receive an `Incarnation` carrying `ID` (the session uid). `Suspend`
+  and the memory-tier fork source step also pass the latest recorded `ComputeInstance` to `Snapshot`
+  (`RT-4h`), empty when none is recorded; nothing else is set. The runtime MUST resolve everything
+  it needs from those. The host does not check that the uid has an incarnation: `Suspend` (`OPS-17`)
+  and the memory-tier fork source step (`OPS-25`) call `Snapshot` for a uid the backend may hold
+  nothing for, for example a `Suspend` before any `Exec`. Whether one exists is the backend's state,
+  not the journal's: a failed `Exec` can leave one behind (`RT-7`). A backend MAY fail `Snapshot`
+  for a uid it has no incarnation for; the host returns the error and appends no `SUSPEND` (`RT-5`).
+  `runtime/local` and `runtime/remote` accept it; `runtime/substrate` fails it (§13.4).
 - `RT-4c`: `Restore` receives this session's own latest `SUSPEND` ref, or `{local: uid}` when the
   session has none (`OPS-19`). A `STATELESS_REPLAY` `Fork` receives `{local: parent uid}`
   (`OPS-24`). A `REQUIRES_MEMORY_SNAPSHOT` `Fork` receives the ref the parent's `Snapshot(EXTERNAL)`
@@ -1107,7 +1125,16 @@ The reference host takes it as `placement.Backend` in
   descriptor it was built with. `{local: uid}` can name a uid the backend holds no incarnation for,
   for example on `Resume` before any `Exec` (§11.5). A backend MAY fail that `Restore`; the host
   returns the error before it dials and appends nothing. `runtime/local` and `runtime/remote` accept
-  it; `runtime/substrate` fails it (§13.4).
+  it; `runtime/substrate` fails it (§13.4). When the backend implements `api.InstanceRestorer`, the
+  host calls `RestoreInstance` in place of `Restore`, with a reader for the latest recorded compute
+  instance (`RT-4h`) that the backend calls only after a failed restore. A
+  `REQUIRES_MEMORY_SNAPSHOT` backend reports `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) from
+  `Restore` only when it finds the compute that held the session's memory gone or replaced, since a
+  retry cannot help then, or, with no compute instance recorded to compare (`RT-4h`), finds compute
+  it cannot tell from a replacement; otherwise it returns the restore error, since compute that is
+  still there can fail a restore for another reason. With no recorded instance, `runtime/substrate`
+  reports lost after a `NOT_FOUND` resume whenever the actor does not hold the session's snapshot,
+  including the session's own actor holding a newer one (§13.4).
 - The returned `Incarnation.ID` is used by the reference host only for diagnostics; every in-repo
   backend sets it to the session uid.
 - `RT-4d`: The `Incarnation` returned by `Create` and `Restore` MUST carry an `Address` at which
@@ -1121,8 +1148,24 @@ The reference host takes it as `placement.Backend` in
   forked child's from `Fork`, or a suspended one, since `Exec` on a cold session goes through
   `Create`, not `Restore`. `Create` MUST NOT fail because the incarnation exists. For a
   `REQUIRES_MEMORY_SNAPSHOT` harness it MUST attach to a live incarnation and bring back a
-  suspended one's captured memory rather than start a fresh one; `runtime/substrate` does both. A
-  `STATELESS_REPLAY` backend MAY start fresh, since the host sends the full log (`EXE-7`).
+  suspended one's captured memory rather than start a fresh one; `runtime/substrate` does both.
+  When no incarnation exists for such a harness and `StartedTurns` reports any, `Create` MUST fail
+  with `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`) instead of starting fresh compute: the
+  journal cannot rebuild the lost memory. A `STATELESS_REPLAY` backend MAY start fresh, since the
+  host sends the full log (`EXE-7`).
+- `RT-4h`: A backend MAY set `Incarnation.ComputeInstance`, an opaque identity that differs between
+  two compute instances reusing one session uid (`runtime/substrate`: the actor's UID, set only for
+  a `REQUIRES_MEMORY_SNAPSHOT` harness). The host records the one `Create` returns in the turn's
+  `EXECUTION_START.compute_instance` (`EXE-1`) and the one `Fork` returns on the child's
+  `LIFECYCLE_FORK` (§7.2). The latest recorded instance is the last one named after the session's
+  last `LIFECYCLE_FORK`, that marker included, counting only the `EXECUTION_START`s of turns the
+  host attributes to the same harness; a fork child's copied prefix does not count. `Exec` and
+  `Resume` MUST fail `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) when the incarnation `Create`
+  or `Restore` returned names another instance; the reference host checks after it mints the turn's
+  regular fence and before it appends any record or runs the harness. A backend that sets
+  `ComputeInstance` MUST refuse a `Snapshot` given one (`RT-4b`) with `api.ErrMemoryStateLost` when
+  another instance, or none, is there, before it returns a ref. An empty instance records nothing
+  and is not compared, so records written before the field existed are not compared.
 - `RT-4f`: `Describe` returns the harness descriptor the host admits on. It MUST NOT provision
   compute: the host calls it before `Create`, `Restore`, and the fork source step (`RT-1`), in the
   memory-tier override check (`OPS-7`), and when the registry reports a harness's observed
@@ -1151,14 +1194,18 @@ The reference host takes it as `placement.Backend` in
   a runtime `Status`. A backend with per-session compute suspends it in `Snapshot`; a backend with
   none releases nothing, and its `Status` can still report `LIVE` (§13.4).
 - `RT-6`: `Fork` MUST tear down a partially created child on failure. A backend that checks the
-  parent before cloning MUST return an error wrapping `api.ErrSnapshotSuperseded` when it finds
-  the parent present but no longer holding the referenced snapshot (resumed, or suspended again
-  with a different one). The host maps that error to `ABORTED`, and a retry at the parent's new
-  head is meaningful. The rule does not cover a parent that cannot be read: `runtime/substrate`
-  returns the `GetActor` error, including `ErrActorNotFound` for an actor deleted outside the
-  host, and the reference session service reports it as `INTERNAL`. A backend that does not check
-  the parent (`runtime/local`, `runtime/remote`, and `runtime/substrate`'s replay fork) never
-  returns the error.
+  parent before cloning MUST return an error wrapping `api.ErrSnapshotSuperseded` when it finds the
+  parent present but no longer holding the referenced snapshot (resumed, or suspended again with a
+  different one). The host maps that error to `ABORTED`, and a retry at the parent's new head is
+  meaningful. The rule does not cover a parent that cannot be read: `runtime/substrate` reports a
+  parent actor deleted outside the host as `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), and
+  returns any other `GetActor` error, which the reference session service reports as `INTERNAL`. A
+  backend that does not check the parent (`runtime/local`, `runtime/remote`, and
+  `runtime/substrate`'s replay fork) never returns the error. A backend that sets `ComputeInstance`
+  (`RT-4h`) returns the child's from `Fork`, and the host records it on the child's
+  `LIFECYCLE_FORK`. Teardown covers only compute the fork created: when `runtime/substrate` finds
+  the clone replaced under the child's name before its resume, it leaves the replacement in place
+  and fails `ABORTED` (`api.ErrComputeBusy`) with no child recorded.
 - `RT-7`: `Stop` is destructive teardown and is not part of suspension. The reference host calls it
   only to roll back a failed fork fan-out (`OPS-27`), never for `DeleteSession` (`OPS-35`). It does
   not call `Stop` when a later step of `Exec` or `Resume` fails after `Create` or `Restore`
@@ -1180,23 +1227,29 @@ The reference host takes it as `placement.Backend` in
   dials it, and the backend is a `LiveDescriber` (`RT-4g`). Same capabilities and snapshot refs as
   local. `Create`, `Restore`, and `Fork` provision nothing, and `Stop` leaves the harness running.
 - `runtime/substrate`: `memory_snapshot = true`, driven through its own `ControlClient` interface.
-  `Describe` returns the descriptor it was built with. `Create` attaches to a running actor,
-  resumes a suspended one, and creates one only when none exists (`RT-4e`). `Snapshot` suspends the
-  actor's per-session compute and returns `memory = true` and the snapshot URI substrate reports,
-  whatever the harness tier. `Snapshot` and `Restore` call `SuspendActor` and `ResumeActor`
-  without the existence check `Create` makes, so when no actor exists for the session uid (for
-  example a fresh session before any `Create` reached `CreateActor`, and not a fork child, or an
-  actor deleted outside the host) both fail with the control API's `NOT_FOUND` (substrate module
-  pinned in `integrations/substrate/go.mod`, `cmd/ateapi/internal/controlapi/actor.go`). A failed
-  `Create` can still leave an actor: `CreateActor` succeeded and the `ResumeActor` after it
-  failed. In the pinned module a `SuspendActor` on a suspended actor and a `ResumeActor` on a
-  running one succeed without doing anything, so a repeated `Suspend` and a `Resume` after an
-  `Exec` without a `Suspend` both succeed. `Fork` clones the parent's snapshot for a
-  `REQUIRES_MEMORY_SNAPSHOT` descriptor and creates a fresh actor otherwise.
-  The adapter that talks to agent-substrate is the separate Go module
-  [`integrations/substrate`](integrations/substrate/), an example of the runtime contract. The core
-  module does not import it; CI asserts `go list -deps ./...` contains no `agent-substrate`
-  import.
+  `Describe` returns the descriptor it was built with. `Create` attaches to a running actor, resumes
+  a suspended one, and creates one only when none exists (`RT-4e`). `Snapshot` suspends the actor's
+  per-session compute and returns `memory = true` and the snapshot URI substrate reports, whatever
+  the harness tier. `Snapshot` and `Restore` call `SuspendActor` and `ResumeActor` without the
+  existence check `Create` makes, so when no actor exists for the session uid (for example a fresh
+  session before any `Create` reached `CreateActor`, and not a fork child, or an actor deleted
+  outside the host) both fail with the control API's `NOT_FOUND` (substrate module pinned in
+  `integrations/substrate/go.mod`, `cmd/ateapi/internal/controlapi/actor.go`), reported as
+  `api.ErrMemoryStateLost` for a `REQUIRES_MEMORY_SNAPSHOT` harness. For such a harness it sets
+  `ComputeInstance` to the actor's UID (`RT-4h`), refuses to create an actor for a session with
+  started turns (`RT-4e`), and after a failed restore reports lost state only when `GetActor` finds
+  no actor or one whose UID is not the recorded one; with no UID recorded, only an actor that does
+  not hold the session's snapshot after a `NOT_FOUND` resume. An actor that another operation holds
+  is `api.ErrComputeBusy` (`ABORTED`).
+  [`docs/substrate-conformance.md`](docs/substrate-conformance.md) has the details. A failed
+  `Create` can still leave an actor: `CreateActor` succeeded and the `ResumeActor` after it failed.
+  In the pinned module a `SuspendActor` on a suspended actor and a `ResumeActor` on a running one
+  succeed without doing anything, so a repeated `Suspend` and a `Resume` after an `Exec` without a
+  `Suspend` both succeed. `Fork` clones the parent's snapshot for a `REQUIRES_MEMORY_SNAPSHOT`
+  descriptor and creates a fresh actor otherwise. The adapter that talks to agent-substrate is the
+  separate Go module [`integrations/substrate`](integrations/substrate/), an example of the runtime
+  contract. The core module does not import it; CI asserts `go list -deps ./...` contains no
+  `agent-substrate` import.
 
 ## 14. Harness registry
 

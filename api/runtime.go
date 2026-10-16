@@ -11,6 +11,27 @@ import (
 // caller can retry the fork at the parent's new head.
 var ErrSnapshotSuperseded = errors.New("runtime: fork source snapshot was superseded")
 
+// ErrMemoryStateLost reports that a backend cannot give a session whose harness keeps its state
+// only in RAM (REQUIRES_MEMORY_SNAPSHOT) the compute that held that state, because the compute is
+// gone. Create returns it rather than create fresh compute when the journal already records a
+// started turn on that harness (SessionSpec.StartedTurns). Restore returns it for any such session
+// whose compute no longer exists, whatever the journal records, since the snapshot it would restore
+// went with the compute; the recorded compute, still there, keeps the restore error whatever
+// snapshot it holds (see InstanceRestorer). The host returns it when the compute a turn or a
+// Resume was placed on reports another Incarnation.ComputeInstance than the journal recorded: the
+// compute was replaced under the same name. Snapshot returns it when the compute behind
+// Incarnation.ID is not the instance the caller required (a stateful fork). The journal cannot
+// rebuild the state (I4), so fresh compute would continue the journal with a harness that has
+// forgotten it. The caller cannot fix this by retrying; the session service reports it as
+// FAILED_PRECONDITION.
+var ErrMemoryStateLost = errors.New("runtime: session's in-memory harness state is lost")
+
+// ErrComputeBusy reports that the session's compute is in the middle of another operation (another
+// host resuming or suspending it, say), so the backend could not place onto it or act on it right
+// now. Nothing was journaled, and the state settles on its own, so the session service reports it
+// as ABORTED and the caller retries.
+var ErrComputeBusy = errors.New("runtime: compute is busy with another operation")
+
 // Runtime is the compute/sandbox SPI. Pod, Kata Pod Sandboxing, Cloud Hypervisor,
 // Dragonball, Hyperlight, and agent-substrate all implement it. There is no gVisor
 // requirement — backends are interchangeable, and the host reads Capabilities to place
@@ -29,6 +50,12 @@ type Runtime interface {
 	// and any backend handles Restore needs. A backend without memory snapshots may return
 	// a filesystem/journal handle; without dedicated per-session compute, its shared harness
 	// server may remain running.
+	//
+	// A non-empty in.ComputeInstance is the instance the caller requires behind in.ID (the
+	// latest one the journal recorded). A backend that sets ComputeInstance refuses with
+	// ErrMemoryStateLost when another instance is there, or none is, before it captures anything
+	// if it can tell, and in any case before returning a ref: a snapshot of a replacement would
+	// hand its callers compute that holds none of the session's state.
 	Snapshot(ctx context.Context, in Incarnation, kind SnapshotKind) (SnapshotRef, error)
 
 	// Restore brings an incarnation back from a snapshot. Sub-second on memory-capable
@@ -41,7 +68,8 @@ type Runtime interface {
 	// and relies on the host replaying the child's copied log prefix. Implementations must not leak a
 	// partially-provisioned child: on any failure after the child exists, tear it down before returning.
 	// A backend that finds ref no longer held by the parent returns an error wrapping
-	// ErrSnapshotSuperseded.
+	// ErrSnapshotSuperseded. The host records the returned ComputeInstance on the child's FORK
+	// marker, and compares the child's compute with it until the child's first turn records one.
 	Fork(ctx context.Context, ref SnapshotRef, opts ForkOpts) (Incarnation, error)
 
 	// Stop is destructive teardown: it destroys the incarnation and frees its dedicated compute.
@@ -53,6 +81,20 @@ type Runtime interface {
 
 	// Capabilities reports what this backend supports.
 	Capabilities() RuntimeCapabilities
+}
+
+// InstanceRestorer is an optional extension of Runtime for a backend that sets
+// Incarnation.ComputeInstance. RestoreInstance is Restore with a way to read the compute instance the
+// journal last recorded for the session's harness, so that when the restore fails the backend can
+// tell whether that instance is gone or replaced. recorded returns "" when no instance is recorded;
+// the backend calls it only after a failed restore, when it decides, so a turn another host journaled
+// before then is seen. A backend reports ErrMemoryStateLost from RestoreInstance only when it can
+// show the recorded instance gone or replaced or, with none recorded, finds an instance it cannot
+// tell from a replacement, and otherwise returns the restore error: an instance that is still there
+// may fail a restore for another reason. The host calls RestoreInstance in place of Restore when the
+// backend implements it.
+type InstanceRestorer interface {
+	RestoreInstance(ctx context.Context, ref SnapshotRef, recorded func() (string, error)) (Incarnation, error)
 }
 
 // SnapshotKind selects local (warm/pause) vs external (cold/suspend) storage.
@@ -90,6 +132,16 @@ type Incarnation struct {
 	// sandbox (substrate: ate-target-actor); a backend that hands out a direct address leaves it
 	// empty. It is routing, not authentication: nothing here proves the caller's identity.
 	CallMetadata map[string]string
+	// ComputeInstance is an opaque identity of the compute instance behind ID that differs between two
+	// instances reusing one ID (substrate: the actor's server-assigned UID, while ID is the actor
+	// name). A backend sets it only when the harness keeps its state in that instance's memory
+	// (REQUIRES_MEMORY_SNAPSHOT). The host records it in the turn's EXECUTION_START and refuses a turn
+	// or a Resume placed on an instance other than the latest one the journal recorded for that
+	// harness since the session's FORK marker, or the clone that marker recorded from Fork's
+	// incarnation (ErrMemoryStateLost): a replacement holds none of the state. Suspend and a stateful
+	// fork pass that recorded instance to Snapshot, which refuses another one.
+	// Empty records nothing and skips the check.
+	ComputeInstance string
 }
 
 // SessionSpec is what a Runtime needs to create an incarnation.
@@ -98,6 +150,20 @@ type SessionSpec struct {
 	Image      string
 	Harness    string
 	Identity   IdentityRef
+	// StartedTurns counts the turns the session's journal records as started (an EXECUTION_START) on
+	// the harness being placed, whether they completed, failed or were interrupted: any of them may
+	// have changed that harness's in-memory state. For a forked child it counts the turns of the copied
+	// prefix that ran on this harness. A turn another harness ran (an ExecRequest.harness override) is
+	// not counted, since it left no state in this harness's compute; a turn the host cannot attribute
+	// (no recorded harness name, or a name it does not serve) is.
+	//
+	// A backend uses it to refuse creating fresh compute for a REQUIRES_MEMORY_SNAPSHOT session that
+	// already has state only its old compute held (ErrMemoryStateLost). It is a function rather than a
+	// number so that the backend counts only after it has seen the compute is missing: a turn is
+	// journaled before it runs, so every turn that ran on the lost compute is then visible, including
+	// one another host sharing the journal recorded while this call was being placed. A backend that
+	// does not need it does not call it. Nil declares a session with no started turns on this harness.
+	StartedTurns func() (int, error)
 	// resource requests, env, mounts elided for v0
 }
 

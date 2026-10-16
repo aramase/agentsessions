@@ -270,8 +270,10 @@ func (stubControl) CreateActor(context.Context, substrate.ActorRef, substrate.Ob
 func (stubControl) ResumeActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{}, nil
 }
-func (stubControl) SuspendActor(context.Context, substrate.ActorRef) (string, error) { return "", nil }
-func (stubControl) DeleteActor(context.Context, substrate.ActorRef) error            { return nil }
+func (stubControl) SuspendActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{}, nil
+}
+func (stubControl) DeleteActor(context.Context, substrate.ActorRef) error { return nil }
 func (stubControl) GetActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
 	return substrate.ActorInfo{}, nil
 }
@@ -390,9 +392,9 @@ type cloningControl struct {
 	budgets     []time.Duration
 }
 
-func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (string, error) {
+func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return substrate.ActorInfo{}, err
 	}
 	// Teardown runs under its own deadline; the caller's context carries none. Recording the budget
 	// each teardown actually sees is what distinguishes a per-child budget from a shared one.
@@ -405,7 +407,7 @@ func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef)
 		select {
 		case <-time.After(c.suspendCost):
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return substrate.ActorInfo{}, ctx.Err()
 		}
 	}
 	if c.beforeSuspend != nil {
@@ -414,19 +416,19 @@ func (c *cloningControl) SuspendActor(ctx context.Context, a substrate.ActorRef)
 		race()
 	}
 	c.calls = append(c.calls, "suspend:"+a.Name)
-	return c.snapshot, nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, UID: "uid-" + a.Name}, nil
 }
 
 func (c *cloningControl) ResumeActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
 	c.calls = append(c.calls, "resume:"+a.Name)
-	return substrate.ActorInfo{Status: substrate.StatusRunning}, nil
+	return substrate.ActorInfo{Status: substrate.StatusRunning, UID: "uid-" + a.Name}, nil
 }
 
 // GetActor reports every actor SUSPENDED holding the snapshot the last suspend produced, which is
 // what a stateful fork checks the parent against around its tag. It is not recorded in calls: the
 // backend's own tests pin that bracket, and these tests are about the Placer's ordering.
-func (c *cloningControl) GetActor(context.Context, substrate.ActorRef) (substrate.ActorInfo, error) {
-	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot}, nil
+func (c *cloningControl) GetActor(_ context.Context, a substrate.ActorRef) (substrate.ActorInfo, error) {
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, Snapshot: c.snapshot, UID: "uid-" + a.Name}, nil
 }
 
 func (c *cloningControl) TagActor(_ context.Context, source substrate.ActorRef, tag substrate.SnapshotID) error {
@@ -434,15 +436,15 @@ func (c *cloningControl) TagActor(_ context.Context, source substrate.ActorRef, 
 	return nil
 }
 
-func (c *cloningControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) error {
+func (c *cloningControl) CreateActorFromTag(_ context.Context, a substrate.ActorRef, _ substrate.ObjectRef, tag substrate.SnapshotID) (substrate.ActorInfo, error) {
 	if c.failCloneOf == a.Name {
 		if c.onFailedClone != nil {
 			c.onFailedClone()
 		}
-		return errors.New("clone refused")
+		return substrate.ActorInfo{}, errors.New("clone refused")
 	}
 	c.calls = append(c.calls, "clone:"+a.Name+":from="+tag.Name)
-	return nil
+	return substrate.ActorInfo{Status: substrate.StatusSuspended, UID: "uid-" + a.Name}, nil
 }
 
 func (c *cloningControl) DeleteTag(ctx context.Context, tag substrate.SnapshotID) error {
@@ -527,6 +529,10 @@ func TestForkOfMemoryHarnessClonesParentSnapshot(t *testing.T) {
 	}
 	if tail := cRecs[len(cRecs)-1].Event; tail.Kind != api.EventLifecycle || tail.Lifecycle == nil || tail.Lifecycle.Kind != api.LifecycleFork {
 		t.Fatalf("child must end with a FORK marker, got %v", tail.Kind)
+	}
+	// The marker records the clone's UID, so the child's compute is compared before its first turn.
+	if got := cRecs[len(cRecs)-1].Event.Lifecycle.ComputeInstance; got != "uid-child" {
+		t.Fatalf("child FORK marker records compute instance %q, want the clone's UID %q", got, "uid-child")
 	}
 	if err := child.Verify(); err != nil {
 		t.Fatalf("verify child: %v", err)
@@ -656,6 +662,10 @@ func TestForkOfStatelessHarnessLeavesParentRunning(t *testing.T) {
 	cRecs, _ := child.Read(1)
 	if len(cRecs) != int(head)+1 {
 		t.Fatalf("child len=%d want %d prefix records + a FORK marker", len(cRecs), head)
+	}
+	// A replay-fork's child holds nothing the journal lacks, so its marker records no instance.
+	if tail := cRecs[len(cRecs)-1].Event.Lifecycle; tail == nil || tail.Kind != api.LifecycleFork || tail.ComputeInstance != "" {
+		t.Fatalf("stateless child must end with a FORK marker that records no compute instance, got %+v", tail)
 	}
 	if err := child.Verify(); err != nil {
 		t.Fatalf("verify child: %v", err)
