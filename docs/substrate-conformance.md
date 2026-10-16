@@ -152,12 +152,11 @@ attached to as if it held the cloned RAM. The child now records the clone's UID 
   another actor created under the child's name, and `ResumeActor` resolves the name. Another UID
   is `substrate.ErrActorBusy` (`ABORTED`; the parent still holds its snapshot and a retry mints a
   new child), the fork records no child, and the replacement, which this fork's resume may have
-  woken, is left running, not suspended or deleted. The Placer clones
-  each child before it writes the child's journal, so the UID is known when the marker is appended.
-  The marker is already one per child, so no new record is needed; a separate per-child record was
-  rejected because it would be a second append that can fail after the marker (leaving the gap) and
-  a new event kind older readers do not know. A backend that sets no instance (a stateless fork)
-  records none.
+  woken, is left running, not suspended or deleted. The Placer clones each child before it writes
+  the child's journal, so the UID is known when the marker is appended. The marker is already one
+  per child, so no new record is needed; a separate per-child record was rejected because it would
+  be a second append that can fail after the marker (leaving the gap) and a new event kind older
+  readers do not know. A backend that sets no instance (a stateless fork) records none.
 - **Comparison.** `controller.LatestComputeInstance` returns the marker's UID until the child's own
   first turn records one; the marker is attributed like a turn with no recorded harness name. So the
   child's first `Exec` and a `Resume` compare the actor they were placed on with it, `Suspend` and a
