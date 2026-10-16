@@ -151,7 +151,8 @@ attached to as if it held the cloned RAM. The child now records the clone's UID 
   reports the same UID: the clone is `SUSPENDED` between the two calls, so it can be deleted and
   another actor created under the child's name, and `ResumeActor` resolves the name. Another UID
   is `substrate.ErrActorBusy` (`ABORTED`; the parent still holds its snapshot and a retry mints a
-  new child), the fork records no child, and the replacement is left in place. The Placer clones
+  new child), the fork records no child, and the replacement, which this fork's resume may have
+  woken, is left running, not suspended or deleted. The Placer clones
   each child before it writes the child's journal, so the UID is known when the marker is appended.
   The marker is already one per child, so no new record is needed; a separate per-child record was
   rejected because it would be a second append that can fail after the marker (leaving the gap) and
@@ -267,11 +268,12 @@ Constraints inherited from substrate, enforced or surfaced rather than papered o
 - A child must be resumed on the clone the fork created. `CreateActorFromTag` reports the clone's
   UID from `CreateActor`'s response, and `Fork` refuses a `ResumeActor` that reports another one
   with `substrate.ErrActorBusy` (`ABORTED`), since the clone was deleted, and maybe replaced under
-  its name, while it was `SUSPENDED`. When the resume fails, the backend reads the child's name
-  before it cleans up: it tears down only the actor with the clone's UID (the resume's error
-  stands), releases just the tag when the name is gone or holds another actor (`ABORTED` too), and
-  touches nothing when the read fails. `Stop` suspends and deletes by name, so an actor created between that read and the
-  delete is not protected.
+  its name, while it was `SUSPENDED`. That replacement may have been woken by this fork's resume
+  and is left running, not suspended or deleted. When the resume fails, the backend reads the
+  child's name before it cleans up: it tears down only the actor with the clone's UID (the resume's
+  error stands), releases just the tag when the name is gone or holds another actor (`ABORTED`
+  too), and touches nothing when the read fails. `Stop` suspends and deletes by name, so an actor
+  created between that read and the delete is not protected.
 - A control client without the Tag APIs does not satisfy the optional `SnapshotCloner` interface; a
   stateful fork there fails loudly rather than degrading to a lossy replay-fork.
 - The child fan-out is all-or-nothing. If a child fails to provision, the ones already created are
@@ -317,7 +319,9 @@ Two properties make the failure paths above safe, both read off substrate's susp
 - **A clone that never resumed is still deletable.** `CreateActor` starts an actor at
   `ACTOR_STATE_SUSPENDED`, and `DeleteActor` accepts `SUSPENDED`, `CRASHED`, or `DELETING`. So the
   suspend-then-delete teardown the backend runs works on a child that failed at `ResumeActor` and
-  still holds the clone's UID, and rollback does not strand an actor or leak its tag.
+  still holds the clone's UID, and rollback does not strand an actor or leak its tag. The exception
+  is a cleanup that cannot read the child's name: it leaves the clone and its tag rather than risk
+  deleting an actor this fork did not create, and the error names both.
 
 ### It is not copy-on-write
 

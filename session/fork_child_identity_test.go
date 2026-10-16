@@ -205,7 +205,8 @@ func TestForkChildWithoutARecordedCloneIsNotCompared(t *testing.T) {
 // the name, so without a UID check the child's FORK marker would record the replacement's UID and
 // its first turn would run there, on none of the cloned RAM. The fork is ABORTED instead (the
 // parent still holds its snapshot, so a retry clones it again), no FORK marker names the
-// replacement, and the replacement is left in place. The retry succeeds.
+// replacement, and the replacement, which the fork's resume woke, is left running. The retry
+// succeeds.
 func TestForkWhoseCloneIsReplacedDuringTheForkIsAborted(t *testing.T) {
 	ctx := context.Background()
 	ctl := &actorControl{status: map[string]substrate.ActorStatus{}, snapshots: map[string]string{}}

@@ -357,23 +357,24 @@ not provide.
   actor's `substrate.ActorInfo` instead of only an error, so a custom `ControlClient` must report
   the clone's UID from it: `runtime/substrate` records that UID and refuses a fork whose
   `ResumeActor` reports another one (the clone deleted and replaced under its name while
-  `SUSPENDED`) with `ABORTED` (`substrate.ErrActorBusy`), records no child, and leaves the
-  replacement in place; a clone reported without a UID is torn down and the fork fails. Until the
-  child's first turn records its own UID, `Exec`, `Resume`, `Suspend` and a stateful `Fork` of the
-  child compare its actor with that UID, so an actor created under the child's name before its first
-  turn is `FAILED_PRECONDITION` (`api.ErrMemoryStateLost`) and nothing is journaled, snapshotted or
-  cloned, where the replacement used to be treated as holding the cloned state. A stateless fork
-  records no UID. A `FORK` marker written before this change records none either, so such a child
-  keeps the old behavior: its first turn is not compared. An empty field is omitted from the
-  canonical bytes, so those markers hash as before; a set one is part of them (new golden vectors in
-  `canon` and `hack/verify_chain.py`). Downgrade: v0.1.0 through v0.1.2, and any build that supports
-  at most schema version 3, refuse the journal at open (`unsupported database schema`, since it is
-  schema version 4), so they never read the field. A build from before this change that opens
-  version 4 drops the field on read: it does not compare the child, its `Verify` fails with a
-  `content_hash` mismatch on such a child, and a `Fork` it takes of such a child copies the prefix
-  without the field, so the new child no longer shares its parent's prefix hashes. As for
-  `EXECUTION_START.compute_instance`, upgrade every host sharing a journal before any of them forks
-  a memory-tier session; rollback is not supported for such children.
+  `SUSPENDED`) with `ABORTED` (`substrate.ErrActorBusy`) and records no child; the replacement may
+  have been woken by that resume and is left running, not suspended or deleted. A clone reported
+  without a UID is torn down and the fork fails. Until the child's first turn records its own UID,
+  `Exec`, `Resume`, `Suspend` and a stateful `Fork` of the child compare its actor with that UID, so
+  an actor created under the child's name before its first turn is `FAILED_PRECONDITION`
+  (`api.ErrMemoryStateLost`) and nothing is journaled, snapshotted or cloned, where the replacement
+  used to be treated as holding the cloned state. A stateless fork records no UID. A `FORK` marker
+  written before this change records none either, so such a child keeps the old behavior: its first
+  turn is not compared. An empty field is omitted from the canonical bytes, so those markers hash as
+  before; a set one is part of them (new golden vectors in `canon` and `hack/verify_chain.py`).
+  Downgrade: v0.1.0 through v0.1.2, and any build that supports at most schema version 3, refuse the
+  journal at open (`unsupported database schema`, since it is schema version 4), so they never read
+  the field. A build from before this change that opens version 4 drops the field on read: it does
+  not compare the child, its `Verify` fails with a `content_hash` mismatch on such a child, and a
+  `Fork` it takes of such a child copies the prefix without the field, so the new child no longer
+  shares its parent's prefix hashes. As for `EXECUTION_START.compute_instance`, upgrade every host
+  sharing a journal before any of them forks a memory-tier session; rollback is not supported for
+  such children.
 - An actor another operation holds is now retryable: `Exec`, `Resume`, `Suspend` and `Fork` are
   `ABORTED` (new `api.ErrComputeBusy`) where they used to be `INTERNAL` when `runtime/substrate`
   finds the session's actor `RESUMING`, `SUSPENDING` or `PAUSING` (new

@@ -708,9 +708,9 @@ func (b *Backend) Fork(ctx context.Context, ref api.SnapshotRef, opts api.ForkOp
 	}
 	if info.UID != created.UID {
 		// ResumeActor has no UID precondition, so it may have resumed the replacement. That actor
-		// is not this fork's: leave it as it is and release only the tag, which no clone holds now.
+		// is not this fork's: leave it running and release only the tag, which no clone holds now.
 		b.releaseForkTag(ctx, cloner, child)
-		return api.Incarnation{}, fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); its cloned RAM is gone, no child was created, and the replacement was left in place",
+		return api.Incarnation{}, fmt.Errorf("%w: fork child %s/%s was replaced between its create and resume (clone %q, now %q); its cloned RAM is gone, no child was created, and the replacement may have been woken by this fork's resume and is left running, not suspended or deleted",
 			ErrActorBusy, childRef.Atespace, childRef.Name, created.UID, info.UID)
 	}
 	inc, err = b.incarnation(child, info)
@@ -764,10 +764,10 @@ func (b *Backend) destroyChild(ctx context.Context, child string) {
 // discardClone cleans up after a fork whose clone (created with uid) failed to resume, and returns
 // cause. It reads the child's name first so it never tears down an actor this fork did not create:
 // the clone is destroyed only while the name still resolves to uid, and cause stands. Gone or
-// replaced, only the tag is released and the fork is ErrActorBusy, retryable: the parent still holds
-// its snapshot and a retry clones a new child. When the read fails, nothing is touched and the
-// error says so. Stop suspends and
-// deletes by name, so an actor created between this read and Stop's delete is not protected.
+// replaced, only the tag is released and the fork is ErrActorBusy, retryable: the parent still
+// holds its snapshot and a retry clones a new child. When the read fails, nothing is touched and
+// the error says so. Stop suspends and deletes by name, so an actor created between this read and
+// Stop's delete is not protected.
 // TODO(spike): substrate's DeleteActorRequest.options.uid can make that delete UID-conditional, but
 // ControlClient.DeleteActor does not carry it and Stop's SuspendActor has no such precondition.
 func (b *Backend) discardClone(ctx context.Context, cloner SnapshotCloner, ref ActorRef, uid string, cause error) error {

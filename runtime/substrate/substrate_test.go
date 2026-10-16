@@ -662,7 +662,7 @@ func TestForkRefusesACloneReplacedBeforeItsResume(t *testing.T) {
 	}{
 		{name: "replaced, then resumed: refused, replacement left", afterClone: replace,
 			wantCalls: append(slices.Clone(head), "untag:fork-child"), wantBusy: true,
-			wantMsg: "replaced between its create and resume", wantLeft: true},
+			wantMsg: "replacement may have been woken by this fork's resume and is left running", wantLeft: true},
 		{name: "replaced, then the resume fails: refused, replacement left", afterClone: replace, resumeErr: resumeFailed,
 			wantCalls: append(slices.Clone(head), "get:child", "untag:fork-child"), wantBusy: true, wantErr: resumeFailed,
 			wantMsg: "the replacement was left in place", wantLeft: true},
