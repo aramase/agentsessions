@@ -1910,8 +1910,15 @@ type Lifecycle struct {
 	SnapshotExternalUri string `protobuf:"bytes,4,opt,name=snapshot_external_uri,json=snapshotExternalUri,proto3" json:"snapshot_external_uri,omitempty"`
 	SnapshotMemory      bool   `protobuf:"varint,5,opt,name=snapshot_memory,json=snapshotMemory,proto3" json:"snapshot_memory,omitempty"`
 	SnapshotSealed      bool   `protobuf:"varint,6,opt,name=snapshot_sealed,json=snapshotSealed,proto3" json:"snapshot_sealed,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Set only on FORK: the identity of the compute instance the child was cloned onto, in the
+	// same form as ExecutionStart.compute_instance (substrate: the cloned actor's UID). The child's
+	// turns are compared with it until the child records one of its own, so a turn, Resume,
+	// Suspend or Fork placed on another instance before the child's first turn is refused. Empty
+	// means not recorded (a stateless fork, or a marker written before this field existed), and
+	// the child's first turn is not compared.
+	ComputeInstance string `protobuf:"bytes,7,opt,name=compute_instance,json=computeInstance,proto3" json:"compute_instance,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Lifecycle) Reset() {
@@ -1986,6 +1993,13 @@ func (x *Lifecycle) GetSnapshotSealed() bool {
 	return false
 }
 
+func (x *Lifecycle) GetComputeInstance() string {
+	if x != nil {
+		return x.ComputeInstance
+	}
+	return ""
+}
+
 // ExecutionStart is host-owned invocation state, committed before inputs and harness execution.
 // The host emits it for every new execution, including default-config and inputless turns.
 // Logs without this event reconstruct with empty config and a zero cursor. Older discarded
@@ -2012,8 +2026,9 @@ type ExecutionStart struct {
 	// its state in that instance's memory (REQUIRES_MEMORY_SNAPSHOT) and the backend can tell two
 	// instances behind the same name apart (substrate: the actor's server-assigned UID). The host
 	// refuses a later turn, or a Resume, whose compute reports a different identity than the latest
-	// one recorded on that harness since the session's FORK marker: the state is gone. Empty means
-	// not recorded, and such a turn is not compared.
+	// one recorded on that harness since the session's FORK marker (or, before a fork child's first
+	// turn, the clone the marker recorded in Lifecycle.compute_instance): the state is gone. Empty
+	// means not recorded, and such a turn is not compared.
 	ComputeInstance string `protobuf:"bytes,6,opt,name=compute_instance,json=computeInstance,proto3" json:"compute_instance,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -2602,14 +2617,15 @@ const file_common_proto_rawDesc = "" +
 	"\n" +
 	"HarnessEnd\x12\x14\n" +
 	"\x05state\x18\x01 \x01(\tR\x05state\x12-\n" +
-	"\x05error\x18\x02 \x01(\v2\x17.agentsessions.v1.ErrorR\x05error\"\xaf\x03\n" +
+	"\x05error\x18\x02 \x01(\v2\x17.agentsessions.v1.ErrorR\x05error\"\xda\x03\n" +
 	"\tLifecycle\x124\n" +
 	"\x04kind\x18\x01 \x01(\x0e2 .agentsessions.v1.Lifecycle.KindR\x04kind\x12\x16\n" +
 	"\x06detail\x18\x02 \x01(\tR\x06detail\x12%\n" +
 	"\x0esnapshot_local\x18\x03 \x01(\tR\rsnapshotLocal\x122\n" +
 	"\x15snapshot_external_uri\x18\x04 \x01(\tR\x13snapshotExternalUri\x12'\n" +
 	"\x0fsnapshot_memory\x18\x05 \x01(\bR\x0esnapshotMemory\x12'\n" +
-	"\x0fsnapshot_sealed\x18\x06 \x01(\bR\x0esnapshotSealed\"\xa6\x01\n" +
+	"\x0fsnapshot_sealed\x18\x06 \x01(\bR\x0esnapshotSealed\x12)\n" +
+	"\x10compute_instance\x18\a \x01(\tR\x0fcomputeInstance\"\xa6\x01\n" +
 	"\x04Kind\x12\x19\n" +
 	"\x15LIFECYCLE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11LIFECYCLE_SUSPEND\x10\x01\x12\x14\n" +

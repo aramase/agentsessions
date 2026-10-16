@@ -237,3 +237,43 @@ func TestToolCallPartGoldenVector(t *testing.T) {
 		t.Fatalf("hash after a wire round-trip = %s, %v; want %s", again, err, hash)
 	}
 }
+
+// A FORK marker's compute_instance (the clone a stateful fork made) is part of its canonical bytes
+// only when set, so a marker that records none, which every marker written before the field existed
+// is, keeps its canonical bytes and hash. Both are interop vectors (hack/verify_chain.py) and must
+// survive the wire, which the store and the Sessions API carry the marker through.
+func TestForkMarkerGoldenVectors(t *testing.T) {
+	for _, tc := range []struct {
+		name, instance, canonical, hash string
+	}{
+		{
+			name:      "no instance",
+			canonical: `{"event":{"kind":"EVENT_LIFECYCLE","lifecycle":{"detail":"parent@2","kind":"LIFECYCLE_FORK"}},"prev_hash":"","seq":"1"}`,
+			hash:      "a545aeac12036c2b871c394990207d101b93074c6b687830016925bbb3617ea4",
+		},
+		{
+			name:      "clone instance",
+			instance:  "uid-1",
+			canonical: `{"event":{"kind":"EVENT_LIFECYCLE","lifecycle":{"compute_instance":"uid-1","detail":"parent@2","kind":"LIFECYCLE_FORK"}},"prev_hash":"","seq":"1"}`,
+			hash:      "a10f9c7c0bc86360e712fdd926fffa45d56168af238c451d2b494ce0feb8dc8c",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := api.Event{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{
+				Kind: api.LifecycleFork, Detail: "parent@2", ComputeInstance: tc.instance,
+			}}
+			got, err := canon.Record("", 1, event)
+			if err != nil || string(got) != tc.canonical {
+				t.Fatalf("canonical FORK marker = %s, %v; want %s", got, err, tc.canonical)
+			}
+			hash, err := canon.HashRecord("", 1, event)
+			if err != nil || hash != tc.hash {
+				t.Fatalf("FORK marker hash = %s, %v; want %s (also update hack/verify_chain.py)", hash, err, tc.hash)
+			}
+			again, err := canon.HashRecord("", 1, wire.EventFromProto(wire.EventToProto(event)))
+			if err != nil || again != hash {
+				t.Fatalf("hash after a wire round-trip = %s, %v; want %s", again, err, hash)
+			}
+		})
+	}
+}

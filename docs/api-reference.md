@@ -167,7 +167,7 @@ non-empty values cannot be recovered. Config is opaque: preserve bytes verbatim,
 | input_count | [int64](#int64) | optional | Expected number of INPUT events for this invocation, always set by new writers (including zero). Replay/resume reject a completed or selected invocation with a missing/negative count or a different committed INPUT count before running the harness. An incomplete trailing invocation is skipped by completed replay. Count-less experimental start markers fail closed; truly markerless legacy executions retain their existing reconstruction behavior. |
 | harness | [string](#string) |  | Host-resolved registry name used for this execution, not necessarily HarnessDescriptor.id. Interrupted Resume resolves this exact name; absent legacy names use the session harness. |
 | harness_version | [string](#string) |  | Advertised, opaque harness replay-compatibility version. Empty means unknown/unversioned. When nonempty, controller replay and interrupted resume require an exact served-version match (including rejection of an empty served version) before running the harness. Empty recorded versions retain existing behavior; this field is opt-in, not required. |
-| compute_instance | [string](#string) |  | Opaque identity of the compute instance the turn was placed on, set only when the harness keeps its state in that instance&#39;s memory (REQUIRES_MEMORY_SNAPSHOT) and the backend can tell two instances behind the same name apart (substrate: the actor&#39;s server-assigned UID). The host refuses a later turn, or a Resume, whose compute reports a different identity than the latest one recorded on that harness since the session&#39;s FORK marker: the state is gone. Empty means not recorded, and such a turn is not compared. |
+| compute_instance | [string](#string) |  | Opaque identity of the compute instance the turn was placed on, set only when the harness keeps its state in that instance&#39;s memory (REQUIRES_MEMORY_SNAPSHOT) and the backend can tell two instances behind the same name apart (substrate: the actor&#39;s server-assigned UID). The host refuses a later turn, or a Resume, whose compute reports a different identity than the latest one recorded on that harness since the session&#39;s FORK marker (or, before a fork child&#39;s first turn, the clone the marker recorded in Lifecycle.compute_instance): the state is gone. Empty means not recorded, and such a turn is not compared. |
 
 
 
@@ -243,6 +243,7 @@ compaction checkpoint (§1).
 | snapshot_external_uri | [string](#string) |  |  |
 | snapshot_memory | [bool](#bool) |  |  |
 | snapshot_sealed | [bool](#bool) |  |  |
+| compute_instance | [string](#string) |  | Set only on FORK: the identity of the compute instance the child was cloned onto, in the same form as ExecutionStart.compute_instance (substrate: the cloned actor&#39;s UID). The child&#39;s turns are compared with it until the child records one of its own, so a turn, Resume, Suspend or Fork placed on another instance before the child&#39;s first turn is refused. Empty means not recorded (a stateless fork, or a marker written before this field existed), and the child&#39;s first turn is not compared. |
 
 
 

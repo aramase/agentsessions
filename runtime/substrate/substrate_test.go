@@ -1031,8 +1031,8 @@ func TestSnapshotRefusesAReplacedActor(t *testing.T) {
 	if err == nil || errors.Is(err, api.ErrMemoryStateLost) {
 		t.Fatalf("suspend failure: err=%v, want a plain error", err)
 	}
-	// A memory-tier actor with no recorded instance (a fork child before its first turn) that is
-	// gone took the cloned state with it too.
+	// A memory-tier actor with no recorded instance (a fork child whose FORK marker records no clone,
+	// before its first turn) that is gone took the cloned state with it too.
 	m = &mockControl{info: running("worker-a"), suspendErr: substrate.ErrActorNotFound}
 	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)
 	if !errors.Is(err, api.ErrMemoryStateLost) || !errors.Is(err, substrate.ErrActorNotFound) {
@@ -1076,9 +1076,9 @@ func TestSnapshotRefusesAReplacedActor(t *testing.T) {
 		t.Fatalf("calls=%v want %v", m.calls, want)
 	}
 
-	// A memory-tier actor with no recorded instance (a fork child before its first turn) must still
-	// report a UID from the suspend: the ControlClient contract requires one. A stateless backend
-	// does not depend on it.
+	// A memory-tier actor with no recorded instance (a fork child whose FORK marker records no clone,
+	// before its first turn) must still report a UID from the suspend: the ControlClient contract
+	// requires one. A stateless backend does not depend on it.
 	m = newRunning()
 	m.suspendNoUID = true
 	_, err = newMemoryBackend(m).Snapshot(ctx, api.Incarnation{ID: "sess-x"}, api.SnapshotExternal)

@@ -562,7 +562,9 @@ func lifecycleToProto(l *api.Lifecycle) *v1.Lifecycle {
 	if l == nil {
 		return nil
 	}
-	out := &v1.Lifecycle{Kind: lifecycleKindToProto(l.Kind), Detail: l.Detail}
+	out := &v1.Lifecycle{
+		Kind: lifecycleKindToProto(l.Kind), Detail: l.Detail, ComputeInstance: l.ComputeInstance,
+	}
 	if s := l.Snapshot; s != nil {
 		out.SnapshotLocal = s.Local
 		out.SnapshotExternalUri = s.ExternalURI
@@ -576,7 +578,10 @@ func lifecycleFromProto(l *v1.Lifecycle) *api.Lifecycle {
 	if l == nil {
 		return nil
 	}
-	out := &api.Lifecycle{Kind: lifecycleKindFromProto(l.GetKind()), Detail: l.GetDetail()}
+	out := &api.Lifecycle{
+		Kind: lifecycleKindFromProto(l.GetKind()), Detail: l.GetDetail(),
+		ComputeInstance: l.GetComputeInstance(),
+	}
 	if l.GetSnapshotLocal() != "" || l.GetSnapshotExternalUri() != "" || l.GetSnapshotMemory() || l.GetSnapshotSealed() {
 		out.Snapshot = &api.SnapshotRef{
 			Local:       l.GetSnapshotLocal(),

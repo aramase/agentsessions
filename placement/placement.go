@@ -259,7 +259,8 @@ func (p *Placer) controllerOpts(fence int64, sessionUID string, observer control
 
 // computeInstance binds the controller to the compute instance inc was placed on, attributing a
 // recorded turn to this Placer as startedTurns does (ranHere), so the controller refuses compute that
-// replaced the instance this harness's earlier turns ran on.
+// replaced the instance this harness's earlier turns ran on, or the clone a fork child's FORK
+// marker recorded.
 func (p *Placer) computeInstance(inc api.Incarnation) controller.Option {
 	return controller.WithComputeInstance(inc.ComputeInstance, p.ranHere)
 }
@@ -1117,9 +1118,10 @@ func (p *Placer) resume(ctx context.Context, log eventlog.Store, sessionUID stri
 			return err
 		}
 	}
-	// A backend that can tell instances apart reads the one this harness's turns last ran on, so a
-	// failed restore is reported as lost state only when that instance is gone or replaced. It reads
-	// the journal when it decides, not here, so a turn another host journals meanwhile is seen.
+	// A backend that can tell instances apart reads the one this harness's turns last ran on (or the
+	// clone a fork child's FORK marker recorded, before its first turn), so a failed restore with an
+	// instance recorded is reported as lost state only when that instance is gone or replaced. It
+	// reads the journal when it decides, not here, so a turn another host journals meanwhile is seen.
 	if r, ok := p.backend.(api.InstanceRestorer); ok {
 		inc, err = r.RestoreInstance(ctx, ref, func() (string, error) {
 			recs, err := log.Read(1)
@@ -1306,7 +1308,8 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 		return err
 	}
 	for _, child := range children {
-		if _, err := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID}); err != nil {
+		inc, err := p.backend.Fork(ctx, ref, api.ForkOpts{ChildSessionUID: child.UID})
+		if err != nil {
 			return abort(err)
 		}
 		created = append(created, child.UID)
@@ -1315,7 +1318,11 @@ func (p *Placer) Fork(ctx context.Context, parent eventlog.Store, parentUID stri
 			"child_session_uid", child.UID,
 			"at_seq", atSeq,
 		)
-		err := controller.Fork(parent, child.Log, atSeq)
+		// Record the clone's identity on the child's FORK marker. The child has no turn of its own
+		// yet, so without it an actor created under the child's name before its first turn would be
+		// attached to as if it held the cloned state. A backend that sets no instance (a stateless
+		// fork) records none, and the child's first turn is not compared.
+		err = controller.ForkWithComputeInstance(parent, child.Log, atSeq, inc.ComputeInstance)
 		copyFinished(err, "error_kind", placementErrorKind(err))
 		if err != nil {
 			return abort(err)
@@ -1438,10 +1445,11 @@ func (p *Placer) forkSource(ctx context.Context, parent eventlog.Store, parentUI
 	if atSeq != head {
 		return api.SnapshotRef{}, nil, fmt.Errorf("%w: parent advanced from seq %d to %d while the fork was being prepared", eventlog.ErrConflict, atSeq, head)
 	}
-	// The snapshot must capture the compute the parent's turns ran on. If that was replaced under
-	// the same name, the replacement holds none of the parent's state, and every child cloned from
-	// it would run without it: a child's own compute is a clone with its own instance, and the FORK
-	// marker resets the comparison its turns make. Pass the instance the journal last recorded so
+	// The snapshot must capture the compute the parent's turns ran on (or, for a parent that is
+	// itself a fork child with no turn yet, the clone its FORK marker recorded). If that was replaced
+	// under the same name, the replacement holds none of the parent's state, and every child cloned
+	// from it would run without it: a child's own compute is a clone with its own instance, which its
+	// FORK marker records in place of the parent's. Pass the instance the journal last recorded so
 	// the backend refuses a replacement (api.ErrMemoryStateLost). The records read here are the
 	// history the SUSPEND append below extends under its CAS on atSeq.
 	recs, err := parent.Read(1)

@@ -68,7 +68,8 @@ type Runtime interface {
 	// and relies on the host replaying the child's copied log prefix. Implementations must not leak a
 	// partially-provisioned child: on any failure after the child exists, tear it down before returning.
 	// A backend that finds ref no longer held by the parent returns an error wrapping
-	// ErrSnapshotSuperseded.
+	// ErrSnapshotSuperseded. The host records the returned ComputeInstance on the child's FORK
+	// marker, and compares the child's compute with it until the child's first turn records one.
 	Fork(ctx context.Context, ref SnapshotRef, opts ForkOpts) (Incarnation, error)
 
 	// Stop is destructive teardown: it destroys the incarnation and frees its dedicated compute.
@@ -136,8 +137,9 @@ type Incarnation struct {
 	// name). A backend sets it only when the harness keeps its state in that instance's memory
 	// (REQUIRES_MEMORY_SNAPSHOT). The host records it in the turn's EXECUTION_START and refuses a turn
 	// or a Resume placed on an instance other than the latest one the journal recorded for that
-	// harness since the session's FORK marker (ErrMemoryStateLost): a replacement holds none of the
-	// state. A stateful fork passes that recorded instance to Snapshot, which refuses another one.
+	// harness since the session's FORK marker, or the clone that marker recorded from Fork's
+	// incarnation (ErrMemoryStateLost): a replacement holds none of the state. Suspend and a stateful
+	// fork pass that recorded instance to Snapshot, which refuses another one.
 	// Empty records nothing and skips the check.
 	ComputeInstance string
 }

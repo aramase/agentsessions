@@ -70,8 +70,10 @@ creates a replacement under the session's name, which every later `GetActor` fin
 identity covers that case. A memory-tier incarnation carries the actor's UID
 (`ResourceMetadata.uid`, which substrate assigns at create and keeps across suspend and resume) as
 `api.Incarnation.ComputeInstance`, and each turn records it in `EXECUTION_START.compute_instance`.
-Before `Exec` journals a turn, the controller compares the UID of the actor it was placed on with the
-latest UID recorded for that harness since the session's `FORK` marker (attributed as above), reading
+A fork child's `FORK` marker records the UID of its clone (see [A fork child's clone
+UID](#a-fork-childs-clone-uid)). Before `Exec` journals a turn, the controller compares the UID of
+the actor it was placed on with the latest UID recorded for that harness since the session's `FORK`
+marker, or the clone's UID that marker recorded (attributed as above), reading
 the history its compare-and-swap append extends, so a turn another host journaled first is either
 compared or makes the append fail. `Resume` makes the same comparison before it re-drives a turn or
 records the resume. A different UID is `api.ErrMemoryStateLost` (`FAILED_PRECONDITION`), names the
@@ -115,27 +117,64 @@ Limits of these checks:
   already placed when its actor is replaced runs on the replacement and records the old UID; the
   next turn is refused, so one turn's output can come from a harness without the session's state.
 - Turns journaled before `compute_instance` existed recorded no UID and are not compared.
-- `compute_instance` is in the record's canonical bytes. A binary built before it drops the field on
-  read and fails chain verification (`content_hash` mismatch) on a session with a memory-tier turn,
-  so every host sharing a journal must be upgraded before any of them runs one, and rollback is not
+- `EXECUTION_START.compute_instance` and `Lifecycle.compute_instance` are in the record's canonical
+  bytes. A binary built before them drops the fields on read and fails chain verification
+  (`content_hash` mismatch) on a session with a memory-tier turn or a memory-tier fork child, so
+  every host sharing a journal must be upgraded before any of them runs one, and rollback is not
   supported for such sessions.
-- A fork child's comparison starts at its `FORK` marker, and the child records no UID until its own
-  first turn. If the child's actor is replaced out of band before that turn, the replacement is not
-  compared: the started-turn count refuses to cold-create a missing child actor, since it includes
-  the inherited prefix, and `Suspend` or a stateful `Fork` of a child whose actor is missing is
-  `FAILED_PRECONDITION`, but neither can see an actor someone else created under the child's name.
+- A fork child whose `FORK` marker records no UID (a marker written before
+  `Lifecycle.compute_instance` existed) is not compared before its first turn: an actor someone
+  else created under the child's name in that window is attached to. The started-turn count still
+  refuses to cold-create a missing child actor, since it includes the inherited prefix.
 - The refused replacement actor is not deleted: it keeps its name and any worker it holds until an
   operator deletes it.
 
 Open questions, not implemented:
-
-TODO(spike): should the `FORK` marker record each child's actor UID (the clone `CreateActorFromTag` made), so `LatestComputeInstance` starts a child's comparison from that UID instead of `""` and an actor created under the child's name before its first turn is refused? It is a new journal field, so it needs a canonical-bytes and replay story.
 
 - Can the atenet-router target an actor by UID, or reject a request whose expected UID differs? If it
   could, a turn already placed would never reach a replacement actor.
 - Should `runtime/substrate` verify the live harness's `Describe` resumability against the configured
   tier, given that `Placer.recheck` runs only for a `LiveDescriber` backend and does not compare
   tiers?
+
+### A fork child's clone UID
+
+A memory-tier fork child runs on a clone of the parent's actor, with its own UID, and its copied
+prefix records only the parent's UIDs, which do not count for it. Without a record of the clone, the
+child had nothing to compare with until its first turn recorded one, so an actor created under the
+child's name in that window (the clone deleted out of band and another created in its place) was
+attached to as if it held the cloned RAM. The child now records the clone's UID at fork:
+
+- **Where.** In `Lifecycle.compute_instance` on the child's own `FORK` marker, set from the
+  `ComputeInstance` of the incarnation `Runtime.Fork` returned (substrate: the UID `ResumeActor`
+  reports for the actor `CreateActorFromTag` made). The Placer clones each child before it writes
+  the child's journal, so the UID is known when the marker is appended. The marker is already one
+  per child, so no new record is needed; a separate per-child record was rejected because it would
+  be a second append that can fail after the marker (leaving the gap) and a new event kind older
+  readers do not know. A backend that sets no instance (a stateless fork) records none.
+- **Comparison.** `controller.LatestComputeInstance` returns the marker's UID until the child's own
+  first turn records one; the marker is attributed like a turn with no recorded harness name. So the
+  child's first `Exec` and a `Resume` compare the actor they were placed on with it, `Suspend` and a
+  stateful `Fork` of the child pass it to `Runtime.Snapshot`, and a `Resume` with no `SUSPEND`
+  recorded reads it through `api.InstanceRestorer`. Another UID is `api.ErrMemoryStateLost`
+  (`FAILED_PRECONDITION`): nothing is journaled, snapshotted or cloned and the harness does not run,
+  as for every other identity check above. The error names the child and the `FORK` marker's clone.
+- **Hash chain.** `compute_instance` is part of the marker's canonical bytes when it is set. proto3
+  JSON omits an empty field, so a marker that records no UID canonicalizes and hashes exactly as
+  before. `canon` and `hack/verify_chain.py --golden` pin both forms as interop vectors, and
+  `hack/verify_chain.py --journal` reads the field from the schema it builds. The child's copied
+  prefix is unchanged and still shares the parent's prefix hashes.
+- **Journals written before the field.** Their `FORK` markers record no UID, so a child forked by an
+  older build keeps today's behavior: its first turn is not compared, attaches to whatever actor is
+  under its name, and records that actor's UID for the turns after it.
+- **Older binaries.** A v0.1.x binary never reads the field: the journal is SQLite schema version 3
+  and v0.1.0 through v0.1.2 refuse it at open (`unsupported database schema`). A build from before
+  this change that opens version 3 decodes the marker without the field, so it does not compare the
+  child, and its `Verify` fails with a `content_hash` mismatch at the marker, or at an earlier
+  record carrying `EXECUTION_START.compute_instance`. A fork it takes of such a child re-appends the
+  copied prefix without the fields, so the new child's chain verifies on its own but no longer
+  shares the prefix hashes. This is the same as for `EXECUTION_START.compute_instance`, and the same
+  rollout applies.
 
 ## SPI → substrate mapping
 

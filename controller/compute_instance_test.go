@@ -26,7 +26,13 @@ func joinEvents(parts ...[]api.Event) []api.Event {
 	return out
 }
 
-var forkMarker = []api.Event{{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleFork, Detail: "parent@2"}}}
+var forkMarker = forkMarkerOn("")
+
+// forkMarkerOn is a FORK marker recording the clone instance (none when empty, as a marker written
+// before Lifecycle.compute_instance existed, or by a stateless fork).
+func forkMarkerOn(instance string) []api.Event {
+	return []api.Event{{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleFork, Detail: "parent@2", ComputeInstance: instance}}}
+}
 
 // Exec compares the compute instance it was placed on with the latest one the journal recorded for
 // its harness since the last FORK marker. A different instance is refused with
@@ -34,6 +40,7 @@ var forkMarker = []api.Event{{Kind: api.EventLifecycle, Lifecycle: &api.Lifecycl
 // its instance in EXECUTION_START.
 func TestExecComparesTheComputeInstance(t *testing.T) {
 	onlyMem := func(recorded string) bool { return recorded == "mem" }
+	memOrUnnamed := func(recorded string) bool { return recorded == "" || recorded == "mem" }
 	for _, tc := range []struct {
 		name        string
 		journal     []api.Event
@@ -49,6 +56,14 @@ func TestExecComparesTheComputeInstance(t *testing.T) {
 		{name: "only turns without an instance", journal: startOn("t1", "mem", ""), instance: "a"},
 		{name: "a fork child's own compute is not the parent's", journal: joinEvents(startOn("t1", "mem", "parent"), forkMarker), instance: "child"},
 		{name: "a fork child's own turns count", journal: joinEvents(startOn("t1", "mem", "parent"), forkMarker, startOn("t2", "mem", "child")), instance: "other", refuse: true},
+		{name: "a fork child's first turn on its clone", journal: joinEvents(startOn("t1", "mem", "parent"), forkMarkerOn("clone")), instance: "clone"},
+		{name: "a fork child's first turn on a replaced clone", journal: joinEvents(startOn("t1", "mem", "parent"), forkMarkerOn("clone")), instance: "other", refuse: true},
+		{name: "a fork child's first turn on the parent's instance", journal: joinEvents(startOn("t1", "mem", "parent"), forkMarkerOn("clone")), instance: "parent", refuse: true},
+		{name: "a fork child's own turn supersedes the clone", journal: joinEvents(forkMarkerOn("clone"), startOn("t2", "mem", "child")), instance: "child"},
+		{name: "a later FORK marker's clone counts", journal: joinEvents(forkMarkerOn("c1"), startOn("t2", "mem", "c1"), forkMarkerOn("c2")), instance: "c1", refuse: true},
+		{name: "a later FORK marker with no clone resets", journal: joinEvents(forkMarkerOn("c1"), startOn("t2", "mem", "c1"), forkMarker), instance: "c2"},
+		{name: "the clone is attributed like an unnamed turn", journal: forkMarkerOn("clone"), instance: "other", sameHarness: memOrUnnamed, refuse: true},
+		{name: "a harness that disowns unnamed turns does not compare the clone", journal: forkMarkerOn("clone"), instance: "other", sameHarness: onlyMem},
 		{name: "another harness's instance is not compared", journal: joinEvents(startOn("t1", "mem", "a"), startOn("t2", "other", "z")), instance: "a", sameHarness: onlyMem},
 		{name: "no sameHarness compares every harness", journal: joinEvents(startOn("t1", "mem", "a"), startOn("t2", "other", "z")), instance: "a", refuse: true},
 		{name: "no instance compares nothing", journal: startOn("t1", "mem", "b"), instance: ""},
@@ -73,6 +88,9 @@ func TestExecComparesTheComputeInstance(t *testing.T) {
 			if tc.refuse {
 				if !errors.Is(err, api.ErrMemoryStateLost) || !strings.Contains(err.Error(), `"sess"`) {
 					t.Fatalf("Exec = %v, want api.ErrMemoryStateLost naming the session", err)
+				}
+				if last := tc.journal[len(tc.journal)-1]; last.Lifecycle != nil && !strings.Contains(err.Error(), "FORK marker") {
+					t.Errorf("Exec = %v, want the error to name the FORK marker's clone it was compared with", err)
 				}
 				if ran {
 					t.Error("the harness ran on a replaced instance")
@@ -136,6 +154,7 @@ func TestResumeComparesTheComputeInstance(t *testing.T) {
 	}{
 		{name: "completed journal", journal: startOn("t1", "mem", "b")},
 		{name: "pending turn", journal: joinEvents(startOn("t1", "mem", "b"), pending)},
+		{name: "fork child before its first turn", journal: joinEvents(startOn("t1", "mem", "parent"), forkMarkerOn("b"))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			log := identityLog(t, tc.journal...)

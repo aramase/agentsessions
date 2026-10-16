@@ -170,6 +170,9 @@ func TestEventRoundTrip(t *testing.T) {
 		"approval_result":  {Kind: api.EventApprovalResult, ApprovalResult: &api.ApprovalResult{ToolCallID: "t1", Approved: true, Reason: "ok"}},
 		"usage":            {Kind: api.EventUsage, Usage: &api.Usage{Model: "gpt-x", InputTokens: 10, OutputTokens: 20, ReasoningTokens: 5}},
 		"lifecycle_fork":   {Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{Kind: api.LifecycleFork, Detail: "parent@7"}},
+		"lifecycle_fork_clone": {Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{
+			Kind: api.LifecycleFork, Detail: "parent@7", ComputeInstance: "uid-1",
+		}},
 		"lifecycle_suspend": {Kind: api.EventLifecycle, Lifecycle: &api.Lifecycle{
 			Kind: api.LifecycleSuspend, Snapshot: &api.SnapshotRef{Local: "sess-x"},
 		}},

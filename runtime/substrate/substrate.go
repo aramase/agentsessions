@@ -234,7 +234,8 @@ func (b *Backend) ref(name string) ActorRef { return ActorRef{Atespace: b.atespa
 // and the host refuses the turn if an earlier turn recorded another one (api.ErrMemoryStateLost).
 // That catches an actor created under the session's name after the actor its turns ran on was lost:
 // a host that counted no started turns can create one before another host's first turn is journaled,
-// and the count above cannot see that turn.
+// and the count above cannot see that turn. A fork child's FORK marker records the UID of the clone
+// Fork returns, so an actor created under the child's name before its first turn is refused too.
 //
 // The distinction matters most for a REQUIRES_MEMORY_SNAPSHOT harness: recreating an actor that
 // already holds live state would silently discard exactly the state fork and suspend exist to carry,
@@ -382,7 +383,7 @@ func (b *Backend) resumeFailed(ctx context.Context, ref ActorRef, seen ActorInfo
 // the state it held went with it. An actor that reports no UID is refused with a plain error: it
 // cannot be compared, and that is a ControlClient fault, not evidence of a replacement. A
 // REQUIRES_MEMORY_SNAPSHOT backend refuses a suspend that reports no UID even when no instance is
-// recorded (a fork child before its first turn).
+// recorded (a fork child whose FORK marker records no clone, before its first turn).
 func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.SnapshotKind) (snapshot api.SnapshotRef, err error) {
 	finish := observability.StartDebug(ctx, b.logger, "runtime.substrate", "snapshot_compute",
 		"actor", in.ID,
@@ -433,10 +434,11 @@ func (b *Backend) Snapshot(ctx context.Context, in api.Incarnation, kind api.Sna
 }
 
 // instanceGone wraps err, from the control call op, for Snapshot. When the actor is not found and
-// in requires a compute instance, or the harness is REQUIRES_MEMORY_SNAPSHOT (a fork child before
-// its first turn has no recorded instance yet), the actor that held the session's in-RAM state is
-// gone for good, so the result wraps api.ErrMemoryStateLost as well as err, the way Restore reports
-// a missing memory-tier actor; any other error is only wrapped.
+// in requires a compute instance, or the harness is REQUIRES_MEMORY_SNAPSHOT (a fork child whose
+// FORK marker records no clone has no recorded instance before its first turn), the actor that
+// held the session's in-RAM state is gone for good, so the result wraps api.ErrMemoryStateLost as
+// well as err, the way Restore reports a missing memory-tier actor; any other error is only
+// wrapped.
 func (b *Backend) instanceGone(in api.Incarnation, op string, err error) error {
 	memory := in.ComputeInstance != "" || b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	if !memory || !errors.Is(err, ErrActorNotFound) {
@@ -464,8 +466,9 @@ func snapshotErrorKind(err error, step string) string {
 // instance and the actor under in.ID reports another UID. An actor that reports no UID cannot be
 // compared at all, which is a ControlClient that breaks its contract rather than a replacement, so
 // that is a plain error. A REQUIRES_MEMORY_SNAPSHOT backend refuses a missing UID even when in
-// records no instance (a fork child before its first turn): the ControlClient contract requires
-// one, and the snapshot would otherwise be taken of an actor nobody could identify.
+// records no instance (a fork child whose FORK marker records no clone, before its first turn):
+// the ControlClient contract requires one, and the snapshot would otherwise be taken of an actor
+// nobody could identify.
 func (b *Backend) requireInstance(in api.Incarnation, uid string) error {
 	memory := in.ComputeInstance != "" || b.descriptor.Capabilities.Resumability == api.ResumabilityRequiresMemorySnapshot
 	if !memory {
@@ -482,7 +485,8 @@ func (b *Backend) requireInstance(in api.Incarnation, uid string) error {
 	if in.ComputeInstance == "" || uid == in.ComputeInstance {
 		return nil
 	}
-	return fmt.Errorf("%w: actor %s/%s is instance %q, but the session's turns ran on instance %q, which has been replaced, "+
+	return fmt.Errorf("%w: actor %s/%s is instance %q, but the session's journal recorded "+
+		"instance %q, which has been replaced, "+
 		"so its in-RAM state cannot be captured; nothing was snapshotted for the session",
 		api.ErrMemoryStateLost, b.atespace, in.ID, uid, in.ComputeInstance)
 }
@@ -561,7 +565,8 @@ func (b *Backend) memoryActorGone(ctx context.Context, snap api.SnapshotRef, rec
 		if err != nil || instance == "" || info.UID == instance {
 			return nil
 		}
-		return fmt.Errorf("%w: actor %s/%s of session %q on harness %q has UID %q, not the %q the session's turns ran on "+
+		return fmt.Errorf("%w: actor %s/%s of session %q on harness %q has UID %q, "+
+			"not the %q the session's journal recorded "+
 			"(replaced), so its in-RAM state cannot be restored; no actor was created: resume: %w",
 			ErrMemoryStateLost, ref.Atespace, ref.Name, snap.Local, b.descriptor.ID, info.UID, instance, resumeErr)
 	default:

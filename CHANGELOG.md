@@ -311,8 +311,8 @@ not provide.
   the Placer passes the recorded UID to `Runtime.Snapshot` in `api.Incarnation.ComputeInstance`, and
   `runtime/substrate` refuses another actor or a missing one, checking the UID before it suspends
   and the one the suspend reports. A memory-tier fork child whose cloned actor is gone before its
-  first turn (no UID recorded yet), and a stateful `Fork` whose parent actor is deleted around or
-  during the tag, are `FAILED_PRECONDITION` the same way; a tag that substrate refuses because
+  first turn, and a stateful `Fork` whose parent actor is deleted around or during the tag, are
+  `FAILED_PRECONDITION` the same way; a tag that substrate refuses because
   another operation holds the parent is `ABORTED`, and one whose parent was suspended again while it
   ran is `ABORTED` (`api.ErrSnapshotSuperseded`). `runtime/substrate` refuses a memory-tier actor that
   reports no UID (`INTERNAL` from `Snapshot`, a fork child before its first turn included), so a
@@ -350,6 +350,25 @@ not provide.
   binary from before this change still opens the journal and reports only those sessions as
   tampered; a build that supports at most version 3 refuses the journal at open, as it does any
   version 4 database.
+- A memory-tier fork child's `FORK` marker records the UID of the actor it was cloned onto, in the
+  new `Lifecycle.compute_instance` (`api.Lifecycle.ComputeInstance`, from the `ComputeInstance` of
+  the incarnation `Runtime.Fork` returns; Go callers use the new
+  `controller.ForkWithComputeInstance`). Until the child's first turn records its own UID, `Exec`,
+  `Resume`, `Suspend` and a stateful `Fork` of the child compare its actor with that UID, so an
+  actor created under the child's name before its first turn is `FAILED_PRECONDITION`
+  (`api.ErrMemoryStateLost`) and nothing is journaled, snapshotted or cloned, where the replacement
+  used to be treated as holding the cloned state. A stateless fork records no UID. A `FORK` marker
+  written before this change records none either, so such a child keeps the old behavior: its first
+  turn is not compared. An empty field is omitted from the canonical bytes, so those markers hash as
+  before; a set one is part of them (new golden vectors in `canon` and `hack/verify_chain.py`).
+  Downgrade: v0.1.0 through v0.1.2, and any build that supports at most schema version 3, refuse the
+  journal at open (`unsupported database schema`, since it is schema version 4), so they never read
+  the field. A build from before this change that opens version 4 drops the field on read: it does
+  not compare the child, its `Verify` fails with a `content_hash` mismatch on such a child, and a
+  `Fork` it takes of such a child copies the prefix without the field, so the new child no longer
+  shares its parent's prefix hashes. As for `EXECUTION_START.compute_instance`, upgrade every host
+  sharing a journal before any of them forks a memory-tier session; rollback is not supported for
+  such children.
 - An actor another operation holds is now retryable: `Exec`, `Resume`, `Suspend` and `Fork` are
   `ABORTED` (new `api.ErrComputeBusy`) where they used to be `INTERNAL` when `runtime/substrate`
   finds the session's actor `RESUMING`, `SUSPENDING` or `PAUSING` (new

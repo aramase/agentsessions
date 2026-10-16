@@ -598,7 +598,7 @@ func TestTwoHostsRacingTheFirstTurnKeepTheSessionHealthy(t *testing.T) {
 
 // A Fork of a memory-tier session whose actor was replaced must not clone the replacement: every
 // child would run without the parent's state, and nothing would refuse it later, since a child's
-// own actor has a new UID and the FORK marker resets the comparison its turns make. After the
+// own actor has a new UID, which its FORK marker records in place of the parent's. After the
 // arbitration's interleaving (host B's turn recorded on the lost actor, host A's replacement
 // RUNNING under the name), Fork is refused with FAILED_PRECONDITION before it suspends anything,
 // creates no child actor and no child session, and journals nothing on the parent.
@@ -724,8 +724,9 @@ func TestResumeOntoAReplacementActorIsRefused(t *testing.T) {
 // (not a retryable INTERNAL), snapshot nothing, create no actor and journal nothing, so no SUSPEND
 // records a checkpoint without the session's state.
 //
-// A fork child before its first turn has no recorded instance yet; when its cloned actor is gone,
-// the cloned state went with it, so it is refused the same way.
+// A fork child before its first turn is compared with the clone its FORK marker recorded; when its
+// cloned actor is gone, the cloned state went with it, so it is refused the same way
+// (TestForkChildWhoseCloneIsReplacedBeforeItsFirstTurnIsRefused covers a replaced clone).
 func TestSuspendAndForkOfALostOrReplacedActorAreRefused(t *testing.T) {
 	ctx := context.Background()
 	for _, actor := range []string{"gone", "replaced", "child-gone"} {

@@ -530,6 +530,10 @@ func TestForkOfMemoryHarnessClonesParentSnapshot(t *testing.T) {
 	if tail := cRecs[len(cRecs)-1].Event; tail.Kind != api.EventLifecycle || tail.Lifecycle == nil || tail.Lifecycle.Kind != api.LifecycleFork {
 		t.Fatalf("child must end with a FORK marker, got %v", tail.Kind)
 	}
+	// The marker records the clone's UID, so the child's compute is compared before its first turn.
+	if got := cRecs[len(cRecs)-1].Event.Lifecycle.ComputeInstance; got != "uid-child" {
+		t.Fatalf("child FORK marker records compute instance %q, want the clone's UID %q", got, "uid-child")
+	}
 	if err := child.Verify(); err != nil {
 		t.Fatalf("verify child: %v", err)
 	}
@@ -658,6 +662,10 @@ func TestForkOfStatelessHarnessLeavesParentRunning(t *testing.T) {
 	cRecs, _ := child.Read(1)
 	if len(cRecs) != int(head)+1 {
 		t.Fatalf("child len=%d want %d prefix records + a FORK marker", len(cRecs), head)
+	}
+	// A replay-fork's child holds nothing the journal lacks, so its marker records no instance.
+	if tail := cRecs[len(cRecs)-1].Event.Lifecycle; tail == nil || tail.Kind != api.LifecycleFork || tail.ComputeInstance != "" {
+		t.Fatalf("stateless child must end with a FORK marker that records no compute instance, got %+v", tail)
 	}
 	if err := child.Verify(); err != nil {
 		t.Fatalf("verify child: %v", err)
